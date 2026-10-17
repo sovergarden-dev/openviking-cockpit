@@ -1,0 +1,30 @@
+# Bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.bak
+
+# Environment and secrets
+*.key
+*.token
+*.dat
+*.env
+monitor.json
+ov.conf
+app.log
+
+# Temporary and local state
+monitor/monitor.json
+monitor/app.log
+monitor/security_reports/
+monitor/backups/
+monitor/_*.json
+monitor/_window_shot*.png
+monitor/openviking-monitor.pyw.bak
+*.lnk
+
+# Editor directories
+.vscode/
+.idea/
+*.swp
+*.swo

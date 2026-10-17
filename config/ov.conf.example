@@ -1,0 +1,28 @@
+[general]
+host = "127.0.0.1"
+port = 19330
+db_path = "viking.db"
+cors = true
+
+[embedding]
+model = "qwen3-embedding:0.6b"
+api_base = "http://127.0.0.1:21434/v1"
+api_key = "ollama"
+dimension = 1024
+
+[vlm]
+model = "gemini-3.8-flash-high"
+api_base = "http://127.0.0.1:9100/v1"
+api_key = "sk-placeholder-vlm-key-do-not-commit"
+
+[[slots]]
+role = "primary"
+model = "gemini-3.8-flash-high"
+api_base = "http://127.0.0.1:9100/v1"
+api_key = "sk-placeholder-primary-key"
+
+[[slots]]
+role = "fallback"
+model = "deepseek/deepseek-v4.1-flash"
+api_base = "https://api.devora.my.id/v1"
+api_key = "sk-placeholder-fallback-key"
