@@ -1,0 +1,54 @@
+# THAM VẤN & PHẢN BIỆN KỸ THUẬT: BẢO MẬT KHÓA VÀ TOÀN VẸN CẤU HÌNH TRONG HỆ SINH THÁI OPENVIKING COCKPIT (WINDOWS 11)
+
+Kính gửi Ban Phản biện Notion AI (Workspace Pool: Sy01/Sy02/Sy06/Sy07),
+
+Hermes đang điều phối đợt chuẩn hóa và siết an ninh toàn diện (Security Hardening, DPAPI & Secret Isolation) cho dự án OpenViking Cockpit trên hệ điều hành Windows 11.
+Trước khi triển khai mã nguồn vào repository và đồng bộ ra môi trường live, Hermes chuyển yêu cầu phản biện độc lập tới Notion AI với 5 câu hỏi kiến trúc cốt lõi sau:
+
+---
+
+### BỐI CẢNH KỸ THUẬT & TRẠNG THÁI HIỆN TẠI
+1. **Thành phần:**
+   - Server OpenViking: Python service chạy cổng 19330, đọc file cấu hình `C:\Users\rurus\.openviking\ov.conf` (chứa 4 VLM slot credentials).
+   - Cockpit Monitor: Ứng dụng Tkinter GUI `openviking-monitor.pyw` chạy Python 3.11, đọc/ghi `ov.conf` (khi đổi/sửa slot) và `C:\Users\rurus\.openviking\monitor\monitor.json` (chứa 12 spare model credentials).
+   - Tài khoản hệ thống: Người dùng `MINH\Rurus`, nhóm đặc quyền `BUILTIN\Administrators`, `NT AUTHORITY\SYSTEM`. Thư mục cha `~/.openviking/` đang có ACE kế thừa cấp `(RX)` cho nhóm `MINH\CodexSandboxUsers`.
+2. **Những điểm vừa phát hiện từ kiểm toán độc lập:**
+   - `os.path.expandvars` trong hàm nạp cấu hình `read_ov_conf()` làm biến đổi biến môi trường `${VAR}` thành chuỗi bí mật thật trong RAM; khi Monitor thực hiện lưu cấu hình (`write_ov_conf`), chuỗi này bị ghi đè ngược ra đĩa thành plaintext.
+   - Cơ chế ghi file nguyên tử (`os.replace` từ tệp `.tmp`) trên Windows làm mất ACL tường minh vừa đặt, khiến file mới tạo tự động thừa kế lại quyền đọc từ thư mục cha.
+   - DPAPI `CryptUnprotectData` hiện đang trả lại nguyên chuỗi ciphertext nếu giải mã thất bại (thay vì báo lỗi rõ ràng), tiềm ẩn nguy cơ âm thầm làm hỏng toàn bộ khóa model dự trữ.
+
+---
+
+### 5 CÂU HỎI THAM VẤN & PHẢN BIỆN CHUYÊN SÂU
+
+#### Câu 1: Phân tách Luồng Đọc/Ghi Cấu hình và Chống Rò rỉ Ngược (Write-Back Leakage)
+- Giải pháp đề xuất: Tách hoàn toàn `read_ov_conf_raw()` (trả về JSON nguyên bản, giữ nguyên ký hiệu `${VAR}`) phục vụ mọi thao tác sửa đổi và ghi đĩa `write_ov_conf()`; tách riêng `read_ov_conf_resolved()` (chỉ giải mã biến môi trường tại thời điểm cần kết nối HTTP / probe).
+- Phản biện: Giải pháp này đã đủ an toàn chưa? Có tình huống nào thao tác người dùng (ví dụ: sửa đổi một trường model name) vô tình làm mất `${VAR}` của trường `api_key` không? Làm thế nào để cơ chế ghi đĩa bảo toàn tuyệt đối mọi biến `${VAR}` nguyên thủy?
+
+#### Câu 2: Xử lý Biến Môi trường Chưa Khởi tạo hoặc Bị Thiếu
+- Nếu người dùng đặt `${OV_SLOT0_KEY}` trong `ov.conf` nhưng biến này chưa được set trong Windows User Environment: `os.path.expandvars` sẽ để nguyên chuỗi `${OV_SLOT0_KEY}`. Khi đưa vào probe hoặc gửi request, upstream sẽ trả về lỗi `Invalid API Key` thay vì thông báo rõ ràng là thiếu biến môi trường.
+- Đề xuất: Có nên tích hợp cơ chế preflight phát hiện chuỗi regex `^\$\{[A-Za-z0-9_]+\}$` chưa được giải quyết để đánh dấu trạng thái `MISSING_ENVIRONMENT_VARIABLE` và chặn probe rác không?
+
+#### Câu 3: Ràng buộc Tài khoản DPAPI và Chính sách Xử lý Khi Giải mã Thất bại (Fail-Loud vs Silent)
+- `CryptProtectData` gắn chặt với User SID `MINH\Rurus`. Nếu Monitor chạy dưới một tiến trình khác (hoặc sau khi khôi phục bản sao lưu sang máy tính khác), `CryptUnprotectData` sẽ thất bại.
+- Việc nuốt ngoại lệ và trả lại chuỗi `dpapi:...` ban đầu khiến key bị xem như chuỗi vô nghĩa.
+- Đề xuất: Monitor nên xử lý thế nào khi gặp lỗi này? (Ném ngoại lệ rõ ràng, hiển thị nhãn `DPAPI_LOCKED_FOREIGN_USER` trên UI, hay khóa quyền ghi để tránh ghi đè dữ liệu hỏng)?
+
+#### Câu 4: Mô hình Đe dọa Thực tế của Quyền ACL Windows (Same-User Sandbox vs Foreign User)
+- Thư mục `~/.openviking/` đang mang quyền đọc cho `MINH\CodexSandboxUsers`. Tuy nhiên, nếu tiến trình sandbox chạy dưới cùng một danh tính token người dùng `MINH\Rurus`, quyền `MINH\Rurus:(F)` vẫn cho phép truy cập bất kể ACE của nhóm.
+- Phản biện: Việc gỡ nhóm `MINH\CodexSandboxUsers` và siết `/inheritance:r` giải quyết được nguy cơ nào (bảo vệ khỏi process bị hạn chế token hay tài khoản khách), và giới hạn kỹ thuật của nó là gì?
+
+#### Câu 5: Tính Bền vững của ACL Sau Giao dịch Ghi Đĩa Nguyên tử (`os.replace`)
+- Khi ghi ra file tạm rồi `os.replace`, file đích sẽ kế thừa ACL của thư mục cha thay vì giữ ACL của file cũ.
+- Nên giải quyết bằng cách:
+  - Phương án A: Tái áp dụng SDDL tường minh (hoặc gọi lệnh `icacls`) ngay sau khi `os.replace` thành công.
+  - Phương án B: Ghi đè trực tiếp tại chỗ (`truncate & write`) thay vì `os.replace` cho các file cấu hình nhạy cảm.
+  - Phương án C: Siết `/inheritance:r` ngay trên thư mục cha `~/.openviking/monitor/` và `~/.openviking/`.
+- Đánh giá ưu/nhược điểm và rủi ro của từng phương án trên môi trường Windows.
+
+---
+
+### YÊU CẦU ĐẦU RA TỪ NOTION AI
+1. Nhận định tổng quan (Verdict: APPROVED / CHANGE-REQUESTED).
+2. Ma trận rủi ro chi tiết cho 5 câu hỏi trên.
+3. Khuyến nghị thứ tự các bước triển khai an toàn nhất (Safe Execution Sequence).

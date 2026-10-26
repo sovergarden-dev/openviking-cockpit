@@ -1,0 +1,41 @@
+THAM VAN BAO MAT OPENVIKING COCKPIT — Sy06
+Ref: b53d00c359ba45e9be3af80e8022087c
+Ngay: 2026-10-26
+
+VERDICT: CHANGE-REQUESTED. Chua nen dong bo live truoc khi dong cac lo hong P0. Day la phan bien kien truc dua tren tep yeu cau va tai lieu Microsoft; chua kiem tra source code, token tien trinh hay ACL thuc te.
+
+CAC DINH CHINH QUAN TRONG
+- DPAPI CurrentUser khong gan voi mot tien trinh: tien trinh khac cung nguu canh tai khoan/profile thuong van giai ma duoc. Doi tai khoan/profile/may co the gay loi; SID khong phai yeu to duy nhat. Khong dung LOCAL_MACHINE de chua loi vi se mo rong pham vi giai ma.
+- Restricted token co restricting SIDs co the phai vuot qua hai access checks; allow cho user SID chua chac du. Phai thu bang chinh token sandbox.
+- os.replace khong dong nghia voi Win32 ReplaceFileW. File tam cung volume thuong mang security descriptor cua chinh no khi rename; khong phai moi lan replace deu ke thua lai ACL tu cha. Vi vay ACL cua file tam ngay tu luc tao moi la diem quyet dinh.
+
+MA TRAN RUI RO (DINH TINH)
+1) Write-back leakage: Critical / P0. Tach raw/resolved can thiet nhung chua du. Moi patch phai dua tren raw snapshot moi nhat; DTO runtime khong duoc serialize. Sua model_name khong duoc cham api_key. Truong secret phai co Keep/Replace/Clear rieng, khong ghi dau mask. Assert api_key moi == api_key cu tai moi duong dan khong duoc phep sua, bao toan unknown fields; JSON loi thi chan ghi. Khoa lien tien trinh va kiem tra revision de tranh lost update. Bao toan gia tri chuoi JSON khac voi bao toan byte/format toan tep.
+2) Missing environment: High / P0 cho chan HTTP. Khai bao grammar placeholder ro rang, phan giai tu environment cua tien trinh, phat hien missing/empty/malformed truoc HTTP. Fullmatch ^\$\{[A-Za-z_][A-Za-z0-9_]*\}$ chi du neu schema chi cho phep mot reference toan chuoi; khong bao phu embedded placeholders, $VAR hay %VAR%. Khong ghi gia tri resolved vao disk/log. Sau khi sua Windows User Environment, Monitor/service dang chay co the can khoi dong lai.
+3) DPAPI decrypt failure: Critical / P0. Khong tra ciphertext nhu plaintext; khong fallback thanh rong, khong double-encrypt. Tra SecretUnavailable voi error code da redact, UI DPAPI_UNAVAILABLE; FOREIGN_USER chi khi co bang chung. Chan probe/activate slot loi, giu nguyen ciphertext, mac dinh khoa ghi credential store. Cho recovery/replace co xac nhan va backup. Cho sua metadata chi sau khi da chung minh opaque-preserving. Server co the khong hieu dpapi:; khong dua ciphertext vao ov.conf neu chua tich hop resolver phia server.
+4) ACL boundary: High; Critical neu xem same-user la untrusted. Bo ACE CodexSandboxUsers giup giam quyen duoc cap boi nhom, nhung khong chan ordinary token cung user co allow F, khong tao boundary voi admin/SYSTEM. Restricted tokens/AppContainer phai kiem chung rieng. Cach ly manh can tai khoan dich vu rieng + broker IPC, khong tra raw key. Can kiem soat ca quyen ghi executable/config/endpoint; chi bao ve key file la chua du.
+5) Atomic persistence/ACL: Critical / P0 neu temp chua plaintext; High cho corruption. A: repair ACL sau replace co cua so ro ri, khong la bien phap chinh. B: truncate/write giu DACL tren file object nhung co the de lai file rong/JSON dang do; khong khuyen nghi. C: harden thu muc cha la nen tang tot nhung phai audit explicit ACE tren file/con, service identity va file tao tu noi khac. Khuyen nghi C + tao temp voi DACL han che truoc khi ghi + atomic replacement + verify. ReplaceFileW co the giu DACL dich; khong dung IGNORE_ACL_ERRORS/IGNORE_MERGE_ERRORS. Xac minh DACL nguon/dich va xu ly cac trang thai loi theo API.
+
+SAFE EXECUTION SEQUENCE
+1. Dong bang writers va auto-probe; thong ke identity thuc cua server/GUI/sandbox, scope DPAPI, ACL, temp/backup/log. Neu co bang chung hoac kha nang dang ke key da lo, thu hoi/rotate ngay, khong cho toi cuoi du an.
+2. Tao recovery channel va backup co ACL han che ngay tu luc tao; luu ACL/owner/revision, khong dua raw secret vao report/git. Dung restore backup de kiem tra khoi phuc, khong gia dinh copy ciphertext la portable.
+3. Chot threat model va quyen cua service; cap allow can thiet truoc khi tat inheritance. Dung SID, OI/CI hop ly; loai explicit grants thua, audit tung protected child. Khong chay icacls /T mu quang. ACL change khong thu hoi handle da mo; dung/restart tien trinh lien quan.
+4. Trien khai raw document / runtime resolved DTO, explicit secret edit intent, strict env preflight, DPAPI typed error va state machine. Chan writer cu.
+5. Trien khai writer dung chung cho ov.conf va monitor.json: lock -> reload+revision -> patch raw -> validate invariants -> tao temp trong secured destination voi CREATE_NEW va restrictive DACL -> verify -> write/flush -> atomic replace -> verify content+DACL -> reload. Loi truoc commit thi giu ban cu; loi sau commit thi bao trang thai thuc, khong bao thanh cong mu quang. Single-file atomic khong tao transaction cho hai file.
+6. Test tren Windows 11 voi synthetic canary keys: model-only edit, missing/empty env, wrong-user/corrupt DPAPI, token sandbox thuc, temp/destination/backup access, hai writer, disk-full, sharing violation, crash truoc/sau replace va recovery giua hai file.
+7. Migrate canary, xac minh server van resolve duoc credentials; sau do moi migrate live. Rotate/revoke keys co the da lo; don plaintext cu theo retention. SSD/snapshot co the khong xoa an toan bang delete don thuan.
+
+DIEU KIEN APPROVED
+- Khong co resolved secrets bi write-back khi chi sua metadata.
+- Missing env/DPAPI unavailable khong tao request HTTP va khong lam doi ciphertext.
+- Temp, dich va backup khong doc/ghi duoc boi identity ngoai pham vi da chot.
+- Crash/concurrency tests cho ket qua old-valid hoac new-valid, khong JSON dang do; recovery da duoc tap duot.
+- Ranh gioi same-user va kha nang tuong thich server duoc ghi ro, khong tuyen bo DPAPI/ACL bao ve vuot qua mo hinh do.
+
+TAI LIEU DOI CHIEU
+https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata
+https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptunprotectdata
+https://learn.microsoft.com/en-us/windows/win32/secauthz/restricted-tokens
+https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexa
+https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilea
+https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/icacls

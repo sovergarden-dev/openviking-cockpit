@@ -34,6 +34,9 @@ def main():
     shutil.copy2(tests_dir.parent/'openviking.ico',ov/'monitor/openviking.ico')
     (ov/'logs/server.log').write_text('',encoding='utf-8')
     files=sorted(p for p in tests_dir.glob('*.py') if p.name.startswith(('test_','check_')))
+    scripts_tests_dir = tests_dir.parents[1] / 'scripts' / 'tests'
+    if scripts_tests_dir.is_dir():
+        files.extend(sorted(p for p in scripts_tests_dir.glob('*.py') if p.name.startswith('test_')))
     if not files:
         parser.error('No suites discovered')
     print('Interpreter:',app_py,flush=True)
