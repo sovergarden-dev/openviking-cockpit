@@ -12,6 +12,7 @@ if str(_APP_DIR) not in sys.path:
     sys.path.insert(0, str(_APP_DIR))
 
 import ctypes
+import copy
 import json
 import os
 import queue
@@ -97,6 +98,55 @@ def _dpi() -> None:
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
+
+
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+
+def dpapi_protect(text: str) -> str:
+    """Protect plaintext secret using Windows DPAPI CryptProtectData."""
+    if not text or text.startswith("dpapi:"):
+        return text
+    if sys.platform != "win32":
+        return text
+    try:
+        import base64
+        data = text.encode("utf-8")
+        in_blob = _DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_char)))
+        out_blob = _DATA_BLOB()
+        # CRYPTPROTECT_UI_FORBIDDEN = 1
+        if not ctypes.windll.crypt32.CryptProtectData(ctypes.byref(in_blob), "OpenViking DPAPI", None, None, None, 1, ctypes.byref(out_blob)):
+            return text
+        try:
+            raw = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+            return "dpapi:" + base64.b64encode(raw).decode("ascii")
+        finally:
+            ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+    except Exception:
+        return text
+
+
+def dpapi_unprotect(cipher: str) -> str:
+    """Unprotect DPAPI-encrypted secret. Transparent passthrough for plain strings."""
+    if not isinstance(cipher, str) or not cipher.startswith("dpapi:"):
+        return cipher or ""
+    if sys.platform != "win32":
+        return cipher
+    try:
+        import base64
+        raw = base64.b64decode(cipher[6:])
+        in_blob = _DATA_BLOB(len(raw), ctypes.cast(ctypes.create_string_buffer(raw), ctypes.POINTER(ctypes.c_char)))
+        out_blob = _DATA_BLOB()
+        if not ctypes.windll.crypt32.CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 1, ctypes.byref(out_blob)):
+            return cipher
+        try:
+            data = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+            return data.decode("utf-8")
+        finally:
+            ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+    except Exception:
+        return cipher
 
 
 def log_app(msg: str) -> None:
@@ -372,7 +422,14 @@ def load_state() -> dict:
     }
     try:
         if STATE_PATH.exists():
-            d.update(json.loads(STATE_PATH.read_text(encoding="utf-8")))
+            raw_state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+            # Decrypt DPAPI protected keys in memory
+            spares = raw_state.get("spare_models")
+            if isinstance(spares, list):
+                for s in spares:
+                    if isinstance(s, dict) and "api_key" in s:
+                        s["api_key"] = dpapi_unprotect(s.get("api_key") or "")
+            d.update(raw_state)
     except Exception:
         pass
     return d
@@ -381,7 +438,15 @@ def load_state() -> dict:
 def save_state(d: dict) -> None:
     try:
         APP_DIR.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(d, ensure_ascii=False, indent=2)
+        import copy
+        to_save = copy.deepcopy(d)
+        # Protect spare API keys with DPAPI on disk
+        spares = to_save.get("spare_models")
+        if isinstance(spares, list):
+            for s in spares:
+                if isinstance(s, dict) and s.get("api_key"):
+                    s["api_key"] = dpapi_protect(s["api_key"])
+        payload = json.dumps(to_save, ensure_ascii=False, indent=2)
         tmp = STATE_PATH.with_suffix(STATE_PATH.suffix + ".tmp")
         with tmp.open("w", encoding="utf-8", newline="\n") as fh:
             fh.write(payload)
@@ -411,6 +476,48 @@ def model_cache_key(base: str, key: str) -> str:
     parsed = urlsplit(base.strip())
     normalized = urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip('/'), parsed.query, ''))
     return normalized + '#credential=' + hashlib.sha256(key.encode('utf-8')).hexdigest()
+
+
+class AuditBadgeCache:
+    """Bounded UI-only cache. Mutation authorization always revalidates on disk."""
+    def __init__(self):
+        self.entries = {}
+        self.version = None
+
+    def clear(self):
+        self.entries.clear()
+
+    def hydrate(self, items: list[dict]) -> list[dict]:
+        import provider_security_auditor as auditor
+        version = (getattr(auditor, "CLASSIFIER_VERSION", None), auditor.get_latest_audit_report)
+        if version != self.version:
+            self.clear()
+            self.version = version
+        now = time.monotonic()
+        used = set()
+        rendered = []
+        for source in items:
+            item = dict(source)
+            item.pop("audit_level", None)
+            identity = credential_identity(item)
+            used.add(identity)
+            cached = self.entries.get(identity)
+            if cached is None or now >= cached[0]:
+                try:
+                    report = auditor.get_latest_audit_report(item.get("api_base") or "", item.get("model") or "",
+                                                             api_key=item.get("api_key") or "")
+                    level = (report.get("verdict") or {}).get("verdict_level") if report else None
+                    ttl = min(60.0, max(0.0, 86400.0 - float(report.get("report_age_s", 0)))) if report else 60.0
+                    if type(level) is not int or level not in range(1, 6):
+                        level = None
+                except Exception:
+                    level, ttl = None, 60.0
+                cached = self.entries[identity] = (now + ttl, level)
+            if cached[1] is not None:
+                item["audit_level"] = cached[1]
+            rendered.append(item)
+        self.entries = {key: value for key, value in self.entries.items() if key in used}
+        return rendered
 
 
 def classify_endpoint(api_base: str | None) -> dict:
@@ -515,10 +622,11 @@ def resolve_form_model(typed: str, selected: list[str] | None = None) -> str:
 
 
 def spare_fingerprint(item: dict) -> tuple[str, str]:
-    return (
-        (item.get("model") or "").strip().casefold(),
-        (item.get("api_base") or "").strip().rstrip("/").casefold(),
-    )
+    from urllib.parse import urlsplit
+    parsed = urlsplit((item.get("api_base") or "").strip())
+    endpoint = parsed._replace(scheme=parsed.scheme.lower(), netloc=parsed.netloc.lower(),
+                               path=parsed.path.rstrip("/"), fragment="").geturl()
+    return ((item.get("model") or "").strip(), endpoint)
 
 
 def normalize_spare(item: dict | None) -> dict:
@@ -571,11 +679,16 @@ def upsert_spare(items: list[dict], incoming: dict) -> list[dict]:
 def inherit_key(api_base: str | None, items: list[dict], slots: list[dict] | None = None, fallback: str = "") -> str:
     if (fallback or "").strip():
         return fallback.strip()
-    want = (api_base or "").strip().rstrip("/").casefold()
+    from urllib.parse import urlsplit
+    def endpoint(value):
+        parsed = urlsplit((value or "").strip())
+        return parsed._replace(scheme=parsed.scheme.lower(), netloc=parsed.netloc.lower(),
+                               path=parsed.path.rstrip("/"), fragment="").geturl()
+    want = endpoint(api_base)
     if not want:
         return ""
     for src in list(items) + list(slots or []):
-        base = (src.get("api_base") or "").strip().rstrip("/").casefold()
+        base = endpoint(src.get("api_base"))
         key = (src.get("api_key") or "").strip()
         if base == want and key:
             return key
@@ -645,7 +758,8 @@ def read_ov_conf() -> dict:
         "slots": [],
     }
     try:
-        raw = json.loads(CONF_PATH.read_text(encoding="utf-8"))
+        raw_text = CONF_PATH.read_text(encoding="utf-8")
+        raw = json.loads(os.path.expandvars(raw_text))
     except Exception as e:
         info["error"] = type(e).__name__
         return info
@@ -1134,6 +1248,41 @@ def vlm_credentials_list(vlm: dict) -> list[dict]:
     return out
 
 
+def effective_credentials(raw: dict) -> list[dict]:
+    vlm = raw.get("vlm") or {}
+    out = []
+    for i, credential in enumerate(vlm_credentials_list(vlm)):
+        out.append(dict(credential,
+                        model=credential.get("model") or (vlm.get("model") if i == 0 else None),
+                        api_base=credential.get("api_base") or vlm.get("api_base") or "",
+                        api_key=credential.get("api_key") or vlm.get("api_key") or ""))
+    return out
+
+
+def credential_identity(item: dict) -> tuple:
+    return (item.get("model") or "", model_cache_key(item.get("api_base") or "", item.get("api_key") or ""))
+
+
+def validate_conf_targets(before: dict, after: dict) -> None:
+    """Monitor mutation boundary only; existing credentials are grandfathered."""
+    existing = {credential_identity(item) for item in effective_credentials(before)}
+    for item in effective_credentials(after):
+        identity = credential_identity(item)
+        if identity in existing:
+            continue
+        try:
+            from provider_security_auditor import get_latest_audit_report
+            report = get_latest_audit_report(item["api_base"], item["model"], api_key=item["api_key"])
+            verdict = report.get("verdict", {}) if isinstance(report, dict) else {}
+            permitted = verdict.get("memory_permitted") is True and verdict.get("safety_stop") is False
+        except Exception:
+            permitted = False
+        if not permitted:
+            raise ValueError("Chạy kiểm định an toàn trước cho đúng Base URL, model và API key. "
+                             "Cần báo cáo còn hạn, hợp lệ và cho phép memory; chưa ghi ov.conf.")
+        existing.add(identity)
+
+
 def apply_credentials(vlm: dict, creds: list[dict]) -> dict:
     vlm["credentials"] = creds
     vlm.pop("backup", None)
@@ -1165,8 +1314,16 @@ def append_slot(raw: dict, model: str, api_base: str | None = None, api_key: str
     vlm = dict(raw.get("vlm") or {})
     creds = vlm_credentials_list(vlm)
     src = creds[0] if creds else {}
-    new_base = (api_base or src.get("api_base") or "").strip().rstrip("/").casefold()
-    if any((c.get("model") or "") == model and (c.get("api_base") or "").strip().rstrip("/").casefold() == new_base for c in creds):
+    from urllib.parse import urlsplit
+    def endpoint(value):
+        parsed = urlsplit((value or "").strip())
+        return parsed._replace(scheme=parsed.scheme.lower(), netloc=parsed.netloc.lower(),
+                               path=parsed.path.rstrip("/"), fragment="").geturl()
+    old_base = src.get("api_base") or vlm.get("api_base") or ""
+    new_base = endpoint(api_base or old_base)
+    if not (api_key or "").strip() and new_base != endpoint(old_base):
+        raise ValueError("Base URL đã đổi; nhập API key cho endpoint mới")
+    if any((c.get("model") or "") == model and endpoint(c.get("api_base") or vlm.get("api_base")) == new_base for c in creds):
         raise ValueError("Model + Base URL đã có trong danh sách")
     if len(creds) >= MAX_SLOTS:
         raise ValueError(f"Tối đa {MAX_SLOTS} model")
@@ -1174,8 +1331,8 @@ def append_slot(raw: dict, model: str, api_base: str | None = None, api_key: str
         "id": f"backup-{len(creds)}",
         "provider": src.get("provider") or "openai",
         "model": model,
-        "api_key": (api_key or "").strip() or src.get("api_key"),
-        "api_base": (api_base or "").strip() or src.get("api_base"),
+        "api_key": (api_key or "").strip() or src.get("api_key") or vlm.get("api_key"),
+        "api_base": (api_base or "").strip() or old_base,
     })
     raw["vlm"] = apply_credentials(vlm, creds)
     return raw
@@ -1189,14 +1346,23 @@ def update_slot(raw: dict, index: int, model: str, api_base: str | None = None, 
     creds = vlm_credentials_list(vlm)
     if index < 0 or index >= len(creds):
         raise ValueError("Slot không tồn tại")
-    new_base = (api_base or creds[index].get("api_base") or "").strip().rstrip("/").casefold()
+    from urllib.parse import urlsplit
+    def endpoint(value):
+        parsed = urlsplit((value or "").strip())
+        return parsed._replace(scheme=parsed.scheme.lower(), netloc=parsed.netloc.lower(),
+                               path=parsed.path.rstrip("/"), fragment="").geturl()
+    old_base = creds[index].get("api_base") or vlm.get("api_base") or ""
+    new_base = endpoint(api_base or old_base)
+    if not (api_key or "").strip() and new_base != endpoint(old_base):
+        raise ValueError("Base URL đã đổi; nhập API key cho endpoint mới")
     for i, c in enumerate(creds):
-        if i != index and (c.get("model") or "") == model and (c.get("api_base") or "").strip().rstrip("/").casefold() == new_base:
+        if i != index and (c.get("model") or "") == model and endpoint(c.get("api_base") or vlm.get("api_base")) == new_base:
             raise ValueError("Model + Base URL đã có trong danh sách")
     creds[index]["model"] = model
     if (api_base or "").strip():
         creds[index]["api_base"] = api_base.strip()
     if (api_key or "").strip():
+        # Retain env-var references untouched if already configured
         creds[index]["api_key"] = api_key.strip()
     raw["vlm"] = apply_credentials(vlm, creds)
     return raw
@@ -2022,10 +2188,8 @@ def run_gui(start_hidden: bool) -> None:
         return f"Dự phòng {i}"
 
     def probe_key(slot: dict) -> str:
-        # Distinguish identical model IDs served by different providers.
         model = (slot.get("model") or f"slot-{slot.get('index')}").strip()
-        base = (slot.get("api_base") or "").strip().rstrip("/")
-        return f"{model} @ {base}" if base else model
+        return model + " @ " + model_cache_key(slot.get("api_base") or "", slot.get("api_key") or "")
 
     def model_row(parent, key: str, role: str, index: int = 0, n: int = 1):
         row = tk.Frame(parent, bg=C_SURFACE)
@@ -2086,7 +2250,7 @@ def run_gui(start_hidden: bool) -> None:
         return row
 
     def rebuild_rows(slots: list[dict]):
-        sig = tuple((s.get("index"), s.get("model")) for s in slots)
+        sig = tuple((s.get("index"), probe_key(s)) for s in slots)
         if sig == slot_sig["value"] and role_btns:
             return
         slot_sig["value"] = sig
@@ -2179,6 +2343,8 @@ def run_gui(start_hidden: bool) -> None:
         return b
 
     def apply_probe(key: str, result: dict | None, pending: bool = False):
+        if key not in probe_vars:
+            return
         lbl = probe_lbls.get(key)
         if pending:
             probe_vars[key].set("đang thử…")
@@ -2194,8 +2360,14 @@ def run_gui(start_hidden: bool) -> None:
     def persist_probe(key: str, result: dict):
         probes = dict(state.get("probe") or {})
         probes[key] = {"ok": result.get("ok"), "text": result.get("text"), "ms": result.get("ms"), "at": result.get("at")}
+        candidate = dict(state, probe=probes)
+        try:
+            save_state(candidate)
+        except (RuntimeError, OSError):
+            foot_var.set("Không thể lưu kết quả thử; dữ liệu cũ được giữ nguyên")
+            return False
         state["probe"] = probes
-        save_state(state)
+        return True
 
     def spare_items() -> list[dict]:
         raw = state.get("spare_models") or []
@@ -2215,8 +2387,14 @@ def run_gui(start_hidden: bool) -> None:
         fp = spare_fingerprint(item)
         return any(spare_fingerprint(slot) == fp for slot in live_slots())
 
+    audit_badges = AuditBadgeCache()
+
+    def audit_completed(*_):
+        audit_badges.clear()
+        refresh_spares()
+
     def refresh_spares(select: int | None = None):
-        items = spare_items()
+        items = audit_badges.hydrate(spare_items())
         spare_list.render(items)
         if select is not None and not spare_list.curselection() and 0 <= select < len(items):
             spare_list.selection_set(select)
@@ -2232,6 +2410,8 @@ def run_gui(start_hidden: bool) -> None:
         return idx, items[idx]
 
     def persist_spares(items: list[dict], select: int | None = None):
+        import copy
+        items = copy.deepcopy(items)
         candidate = dict(state, spare_models=items)
         try:
             save_state(candidate)
@@ -2293,6 +2473,7 @@ def run_gui(start_hidden: bool) -> None:
             return
         slots = live_slots()
         for item in chosen:
+            item["_probe_identity"] = credential_identity(item)
             item["api_key"] = inherit_key(item.get("api_base"), items, slots, item.get("api_key") or "")
         spare_batch["busy"] = True
         spare_batch["stop"].clear()
@@ -2308,7 +2489,7 @@ def run_gui(start_hidden: bool) -> None:
                         result = probe_model(item.get("model"), item.get("api_base"), item.get("api_key"))
                     except Exception as exc:
                         result = {"ok": False, "text": type(exc).__name__}
-                    uiq.put(("spare_probe", spare_fingerprint(item), result))
+                    uiq.put(("spare_probe", item["_probe_identity"], result))
                     completed += 1
             finally:
                 spare_batch["busy"] = False
@@ -2492,7 +2673,7 @@ def run_gui(start_hidden: bool) -> None:
             return
 
         from provider_security_auditor import get_latest_audit_report, launch_security_audit_ui
-        rep = get_latest_audit_report(base, model, max_age_s=86400.0)
+        rep = get_latest_audit_report(base, model, max_age_s=86400.0, api_key=key)
         colors_dict = dict(bg=C_BG, surface=C_SURFACE, ink=C_INK, muted=C_MUTED, line=C_LINE, accent=C_ACCENT, ok=C_OK, bad=C_BAD, warn=C_WARN, btn=C_BTN)
         if rep and rep.get("saved_report_file"):
             age_m = int(rep.get("report_age_s", 0) // 60)
@@ -2509,10 +2690,10 @@ def run_gui(start_hidden: bool) -> None:
             )
             ans = messagebox.askyesno(f"Báo cáo có sẵn — {model}", msg, parent=root)
             if ans:
-                launch_security_audit_ui(root, base, key, model, colors=colors_dict, font_family=FONT, cached_report=rep)
+                launch_security_audit_ui(root, base, key, model, colors=colors_dict, font_family=FONT, cached_report=rep, on_complete=audit_completed)
                 return
 
-        launch_security_audit_ui(root, base, key, model, colors=colors_dict, font_family=FONT)
+        launch_security_audit_ui(root, base, key, model, colors=colors_dict, font_family=FONT, on_complete=audit_completed)
 
     def edit_selected_spare(_event=None):
         _, item = selected_spare()
@@ -2844,9 +3025,9 @@ def run_gui(start_hidden: bool) -> None:
                     foot_var.set(item[1])
                 elif kind == "spare_probe":
                     _, fp, result = item
-                    items = spare_items()
+                    items = copy.deepcopy(spare_items())
                     for i, spare in enumerate(items):
-                        if spare_fingerprint(spare) != fp:
+                        if credential_identity(spare) != fp:
                             continue
                         spare["last_probe"] = {
                             "ok": result.get("ok"),
@@ -2855,17 +3036,21 @@ def run_gui(start_hidden: bool) -> None:
                             "at": result.get("at"),
                             "category": result.get("category"),
                         }
-                        persist_spares(items, i)
-                        foot_var.set(f"{short_model(spare.get('model'))}  ·  {result.get('text') or 'Fail'}")
+                        if persist_spares(items, i):
+                            foot_var.set(f"{short_model(spare.get('model'))}  ·  {result.get('text') or 'Fail'}")
                         break
                 elif kind == "probe":
                     _, key, result = item
-                    persist_probe(key, result)
-                    apply_probe(key, result)
-                    refresh_spares(spare_list.curselection()[0] if spare_list.curselection() else None)
-                    btn = probe_btns.get(key)
-                    if btn:
-                        btn.configure(state="normal")
+                    if key not in probe_vars:
+                        continue
+                    try:
+                        if persist_probe(key, result):
+                            apply_probe(key, result)
+                            refresh_spares()
+                    finally:
+                        btn = probe_btns.get(key)
+                        if btn:
+                            btn.configure(state="normal")
                 elif kind == "benchmark_progress":
                     _, result_win, progress, index, total, summary, render = item
                     if result_win.winfo_exists():
@@ -2943,14 +3128,18 @@ def run_gui(start_hidden: bool) -> None:
                     threading.Thread(target=lambda: uiq.put(("snap", collect(True), None)), daemon=True).start()
         except queue.Empty:
             pass
+        except Exception as exc:
+            log_app(f"UI event failed: {type(exc).__name__}")
+            foot_var.set("Không xử lý được sự kiện; Monitor vẫn tiếp tục cập nhật")
+        finally:
+            if not stop.is_set():
+                root.after(250, drain)
         if tray and tray.hwnd:
             msg = wintypes.MSG()
             user32 = ctypes.windll.user32
             while user32.PeekMessageW(ctypes.byref(msg), tray.hwnd, 0, 0, 1):
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
-        if not stop.is_set():
-            root.after(250, drain)
 
     def mark_pending(note: str):
         current["pending"] = compact_pending(current.get("pending"), note)
@@ -2965,9 +3154,11 @@ def run_gui(start_hidden: bool) -> None:
 
     def apply_conf_edit(mutator, note: str) -> bool:
         try:
-            bak = backup_ov_conf("slot-edit")
             raw = json.loads(CONF_PATH.read_text(encoding="utf-8"))
-            write_ov_conf(mutator(raw))
+            candidate = mutator(copy.deepcopy(raw))
+            validate_conf_targets(raw, candidate)
+            bak = backup_ov_conf("slot-edit")
+            write_ov_conf(candidate)
             log_app(f"slot edit backup={bak.name} note={note}")
             return True
         except Exception as e:
@@ -3125,6 +3316,9 @@ def run_gui(start_hidden: bool) -> None:
 
     def do_switch(key: str):
         if current["restarting"]:
+            return
+        if current.get("pending"):
+            foot_var.set("Cấu hình đã lưu nhưng runtime chưa nạp; chưa thể đổi slot đang dùng")
             return
         with snap_lock:
             snap = current["snap"] or {}
@@ -3715,7 +3909,7 @@ def run_gui(start_hidden: bool) -> None:
             }
             try:
                 from provider_security_auditor import launch_security_audit_ui
-                launch_security_audit_ui(win, base, key, model, colors=colors, font_family=FONT)
+                launch_security_audit_ui(win, base, key, model, colors=colors, font_family=FONT, on_complete=audit_completed)
             except Exception as ex:
                 status.set(f"Lỗi khởi động kiểm định: {ex}")
                 st_lbl.configure(fg=C_BAD)

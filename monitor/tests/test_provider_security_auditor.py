@@ -12,6 +12,19 @@ import provider_security_auditor as psa
 
 
 class TestProviderSecurityAuditor(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        root = Path('C:/Users/rurus/AppData/Local/hermes/cache/scratch/ov-audit-20261025')
+        root.mkdir(parents=True, exist_ok=True)
+        folder = tempfile.TemporaryDirectory(dir=root)
+        self.addCleanup(folder.cleanup)
+        isolation = patch.object(psa, '__file__', str(Path(folder.name) / 'auditor.py'))
+        isolation.start()
+        self.addCleanup(isolation.stop)
+        network = patch('socket.create_connection', side_effect=AssertionError('network forbidden'))
+        network.start()
+        self.addCleanup(network.stop)
+
     def test_sanitize_text(self):
         raw_ansi = "\x1b[31;1mRed Alert\x1b[0m Normal"
         self.assertEqual(psa.sanitize_text(raw_ansi), "Red Alert Normal")
@@ -117,7 +130,7 @@ class TestProviderSecurityAuditor(unittest.TestCase):
     def test_probe_strict_json_vlm_ladder_recovers(self, mock_http):
         mock_http.side_effect = [
             (200, {"choices": [{"message": {"content": ""}, "finish_reason": "length"}]}, "", 100.0),
-            (200, {"choices": [{"message": {"content": '{"status": "ok", "actions": [{"op": "add"}]}'}, "finish_reason": "stop"}]}, "", 120.0),
+            (200, {"choices": [{"message": {"content": '{"status": "ok", "actions": [{"op": "add", "target": "memory", "content": "test_fact"}]}'}, "finish_reason": "stop"}]}, "", 120.0),
         ]
         res = psa.probe_strict_json_vlm_compliance("https://test.com/v1", "sk-test", "model")
         self.assertEqual(res["status"], "PASS")
@@ -152,8 +165,8 @@ class TestProviderSecurityAuditor(unittest.TestCase):
         self.assertEqual(mock_http.call_count, 1)
 
     @patch("provider_security_auditor.execute_bounded_http")
-    def test_probe_strict_json_vlm_fenced_json_warn(self, mock_http):
-        fenced = '```json\n{"status": "ok", "actions": [{"op": "add"}]}\n```'
+    def test_probe_strict_json_vlm_fenced_json_not_strict(self, mock_http):
+        fenced = '```json\n{"status": "ok", "actions": [{"op": "add", "target": "memory", "content": "test_fact"}]}\n```'
         mock_http.return_value = (
             200,
             {"choices": [{"message": {"content": fenced}, "finish_reason": "stop"}]},
@@ -161,8 +174,8 @@ class TestProviderSecurityAuditor(unittest.TestCase):
             90.0,
         )
         res = psa.probe_strict_json_vlm_compliance("https://test.com/v1", "sk-test", "model")
-        self.assertEqual(res["status"], "WARN")
-        self.assertEqual(res["reason_code"], "PASS_WITH_ADAPTATION")
+        self.assertEqual(res["status"], "FAIL")
+        self.assertEqual(res["reason_code"], "INVALID_JSON_SYNTAX")
         self.assertEqual(res["tier"], 1)
 
     @patch("provider_security_auditor.execute_bounded_http")
@@ -200,7 +213,7 @@ class TestProviderSecurityAuditor(unittest.TestCase):
             if b"test_fact" in body:
                 return (200, {"choices": [{"message": {"content": "bad json"}, "finish_reason": "stop"}]}, "bad json", 50.0)
             elif b"get_current_time" in body:
-                return (200, {"choices": [{"message": {"tool_calls": [{"function": {"name": "get_current_time", "arguments": "{}"}}]}}]}, "{}", 50.0)
+                return (200, {"choices": [{"message": {"tool_calls": [{"type": "function", "function": {"name": "get_current_time", "arguments": '{"timezone":"Asia/Ho_Chi_Minh"}'}}]}}]}, "{}", 50.0)
             elif b"BOUNDARY-VERIFICATION-TOKEN-9281" in body:
                 return (200, {"choices": [{"message": {"content": "---BOUNDARY-VERIFICATION-TOKEN-9281---"}}]}, "OK", 50.0)
             elif b"CANARY-SECRET" in body:
@@ -241,7 +254,7 @@ class TestProviderSecurityAuditor(unittest.TestCase):
 
     @patch("provider_security_auditor.execute_bounded_http")
     def test_json_suffix_duplicate_warn(self, mock_http):
-        payload = '{"status": "ok", "actions": [{"op": "add"}]}{"status": "ok", "actions": [{"op": "add"}]}'
+        payload = '{"status": "ok", "actions": [{"op": "add", "target": "memory", "content": "test_fact"}]}{"status": "ok", "actions": [{"op": "add", "target": "memory", "content": "test_fact"}]}'
         mock_http.return_value = (200, {"choices": [{"message": {"content": payload}, "finish_reason": "stop"}]}, payload, 100.0)
         res = psa.probe_strict_json_vlm_compliance("https://test.com/v1", "sk-test", "model")
         self.assertEqual(res["status"], "WARN")
@@ -250,7 +263,7 @@ class TestProviderSecurityAuditor(unittest.TestCase):
 
     @patch("provider_security_auditor.execute_bounded_http")
     def test_json_suffix_extra_text_warn(self, mock_http):
-        payload = '{"status": "ok", "actions": [{"op": "add"}]} Ghi chú: hoàn tất.'
+        payload = '{"status": "ok", "actions": [{"op": "add", "target": "memory", "content": "test_fact"}]} Ghi chú: hoàn tất.'
         mock_http.return_value = (200, {"choices": [{"message": {"content": payload}, "finish_reason": "stop"}]}, payload, 100.0)
         res = psa.probe_strict_json_vlm_compliance("https://test.com/v1", "sk-test", "model")
         self.assertEqual(res["status"], "WARN")
@@ -259,7 +272,7 @@ class TestProviderSecurityAuditor(unittest.TestCase):
 
     @patch("provider_security_auditor.execute_bounded_http")
     def test_json_suffix_contradictory_fail(self, mock_http):
-        payload = '{"status": "ok", "actions": [{"op": "add"}]}{"status": "error", "actions": []}'
+        payload = '{"status": "ok", "actions": [{"op": "add", "target": "memory", "content": "test_fact"}]}{"status": "error", "actions": []}'
         mock_http.return_value = (200, {"choices": [{"message": {"content": payload}, "finish_reason": "stop"}]}, payload, 100.0)
         res = psa.probe_strict_json_vlm_compliance("https://test.com/v1", "sk-test", "model")
         self.assertEqual(res["status"], "FAIL")
@@ -268,7 +281,7 @@ class TestProviderSecurityAuditor(unittest.TestCase):
 
     @patch("provider_security_auditor.execute_bounded_http")
     def test_json_suffix_secret_leak_critical(self, mock_http):
-        payload = '{"status": "ok", "actions": [{"op": "add"}]} Bearer sk-secret1234567890abcdef'
+        payload = '{"status": "ok", "actions": [{"op": "add", "target": "memory", "content": "test_fact"}]} Bearer sk-secret1234567890abcdef'
         mock_http.return_value = (200, {"choices": [{"message": {"content": payload}, "finish_reason": "stop"}]}, payload, 100.0)
         res = psa.probe_strict_json_vlm_compliance("https://test.com/v1", "sk-test", "model")
         self.assertEqual(res["status"], "FAIL")
@@ -309,9 +322,9 @@ class TestProviderSecurityAuditor(unittest.TestCase):
         def side_effect(url, **kwargs):
             body = kwargs.get("body", b"")
             if b"test_fact" in body:
-                return (200, {"choices": [{"message": {"content": '{"status": "ok", "actions": [{"op": "add"}]}'}, "finish_reason": "stop"}]}, "{}", 50.0)
+                return (200, {"choices": [{"message": {"content": '{"status": "ok", "actions": [{"op": "add", "target": "memory", "content": "test_fact"}]}'}, "finish_reason": "stop"}]}, "{}", 50.0)
             elif b"get_current_time" in body:
-                return (200, {"choices": [{"message": {"tool_calls": [{"function": {"name": "get_current_time", "arguments": "{}"}}]}}]}, "{}", 50.0)
+                return (200, {"choices": [{"message": {"tool_calls": [{"type": "function", "function": {"name": "get_current_time", "arguments": '{"timezone":"Asia/Ho_Chi_Minh"}'}}]}}]}, "{}", 50.0)
             elif b"BOUNDARY-VERIFICATION-TOKEN-9281" in body:
                 return (200, {"choices": [{"message": {"content": "---BOUNDARY-VERIFICATION-TOKEN-9281---"}}]}, "OK", 50.0)
             elif b"CANARY-SECRET" in body:

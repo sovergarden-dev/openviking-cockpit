@@ -91,7 +91,6 @@ class ReserveTable(tk.Frame):
         xs = ttk.Scrollbar(frame, orient='horizontal', command=self.tree.xview)
         xs.grid(row=1, column=0, sticky='ew')
         self.tree.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
-        self.optional = tk.BooleanVar(value=self.preferences.get('show_note', False))
         defaults = {'model': 220, 'endpoint': 175, 'status': 150, 'ms': 85, 'at': 110, 'note': 120}
         caps = {'model': 230, 'endpoint': 235, 'status': 200, 'ms': 88, 'at': 116, 'note': 140}
         floors = {'model': 150, 'endpoint': 130, 'status': 120, 'ms': 66, 'at': 88, 'note': 70}

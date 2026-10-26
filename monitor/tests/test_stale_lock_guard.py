@@ -12,10 +12,8 @@ VENV_PY = HOME / ".openviking" / "venv" / "Scripts" / "python.exe"
 SYSTEM_PY = Path(sys.executable)
 MARKER = str(HOME / ".openviking" / "venv" / "Scripts" / "openviking-server.exe")
 
-BASE = Path(os.environ.get("TMPDIR") or HOME / "AppData/Local/hermes/cache/scratch") / "ov_guard_test"
-if BASE.exists():
-    shutil.rmtree(BASE)
-BASE.mkdir(parents=True)
+import tempfile
+BASE = Path(tempfile.mkdtemp(prefix="ov_guard_test-", dir=os.environ.get("TMPDIR") or HOME / "AppData/Local/hermes/cache/scratch"))
 
 assert VENV_PY.exists(), f"venv python missing: {VENV_PY}"
 assert not str(SYSTEM_PY).lower().startswith(str(HOME / ".openviking" / "venv").lower()), \
@@ -94,23 +92,7 @@ f5.write_text("4", encoding="utf-8")
 run_guard(f5)
 assert not f5.exists(), "T5 protected pid not removed"
 
-# T6: real production lock (when the server is live) -> kept
-real_lock = HOME / ".openviking" / "data-qwen06b" / ".openviking.pid"
-if real_lock.is_file():
-    import urllib.request
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:19330/health", timeout=3) as rq:
-            healthy = rq.status == 200
-    except Exception:
-        healthy = False
-    if healthy:
-        before = real_lock.read_text(encoding="utf-8").strip()
-        run_guard(real_lock)
-        assert real_lock.is_file() and real_lock.read_text(encoding="utf-8").strip() == before, \
-            "T6 live production lock was removed"
-        print("T6 live-lock check: KEPT (server running)")
-    else:
-        print("T6 live-lock check: skipped (server down)")
+# Production lock paths are never mutation targets in a test.
 
 shutil.rmtree(BASE, ignore_errors=True)
 print("STALE_LOCK_GUARD_OK")
