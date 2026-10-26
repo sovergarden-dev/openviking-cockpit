@@ -100,53 +100,26 @@ def _dpi() -> None:
             pass
 
 
-class _DATA_BLOB(ctypes.Structure):
-    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
-
-
-def dpapi_protect(text: str) -> str:
-    """Protect plaintext secret using Windows DPAPI CryptProtectData."""
-    if not text or text.startswith("dpapi:"):
-        return text
-    if sys.platform != "win32":
-        return text
-    try:
-        import base64
-        data = text.encode("utf-8")
-        in_blob = _DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_char)))
-        out_blob = _DATA_BLOB()
-        # CRYPTPROTECT_UI_FORBIDDEN = 1
-        if not ctypes.windll.crypt32.CryptProtectData(ctypes.byref(in_blob), "OpenViking DPAPI", None, None, None, 1, ctypes.byref(out_blob)):
-            return text
-        try:
-            raw = ctypes.string_at(out_blob.pbData, out_blob.cbData)
-            return "dpapi:" + base64.b64encode(raw).decode("ascii")
-        finally:
-            ctypes.windll.kernel32.LocalFree(out_blob.pbData)
-    except Exception:
-        return text
+from secret_store import (
+    dpapi_protect,
+    dpapi_unprotect_strict,
+    resolve_secret,
+    SecretStatus,
+    is_env_ref,
+    get_env_var_name,
+)
+from safe_write import (
+    safe_atomic_write_json,
+    safe_atomic_write_text,
+    interprocess_file_lock,
+    apply_restricted_file_acl,
+)
 
 
 def dpapi_unprotect(cipher: str) -> str:
-    """Unprotect DPAPI-encrypted secret. Transparent passthrough for plain strings."""
-    if not isinstance(cipher, str) or not cipher.startswith("dpapi:"):
-        return cipher or ""
-    if sys.platform != "win32":
-        return cipher
-    try:
-        import base64
-        raw = base64.b64decode(cipher[6:])
-        in_blob = _DATA_BLOB(len(raw), ctypes.cast(ctypes.create_string_buffer(raw), ctypes.POINTER(ctypes.c_char)))
-        out_blob = _DATA_BLOB()
-        if not ctypes.windll.crypt32.CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 1, ctypes.byref(out_blob)):
-            return cipher
-        try:
-            data = ctypes.string_at(out_blob.pbData, out_blob.cbData)
-            return data.decode("utf-8")
-        finally:
-            ctypes.windll.kernel32.LocalFree(out_blob.pbData)
-    except Exception:
-        return cipher
+    """Backwards-compatible unprotect shim returning plaintext or empty string on error."""
+    res = dpapi_unprotect_strict(cipher)
+    return res.value if res.status == SecretStatus.SECRET_READY else ""
 
 
 def log_app(msg: str) -> None:
@@ -422,13 +395,27 @@ def load_state() -> dict:
     }
     try:
         if STATE_PATH.exists():
+            import hashlib
             raw_state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-            # Decrypt DPAPI protected keys in memory
             spares = raw_state.get("spare_models")
             if isinstance(spares, list):
                 for s in spares:
                     if isinstance(s, dict) and "api_key" in s:
-                        s["api_key"] = dpapi_unprotect(s.get("api_key") or "")
+                        raw_key = (s.get("api_key") or "").strip()
+                        s["_enc"] = raw_key  # Preserved exact raw ciphertext from disk
+                        if raw_key.startswith("dpapi:"):
+                            res = dpapi_unprotect_strict(raw_key)
+                            if res.status == SecretStatus.SECRET_READY:
+                                s["api_key"] = res.value
+                                s["_sha"] = hashlib.sha256(res.value.encode("utf-8")).hexdigest()
+                                s["_dpapi_locked"] = False
+                            else:
+                                s["api_key"] = ""
+                                s["_sha"] = None
+                                s["_dpapi_locked"] = True
+                        else:
+                            s["_sha"] = hashlib.sha256(raw_key.encode("utf-8")).hexdigest() if raw_key else None
+                            s["_dpapi_locked"] = False
             d.update(raw_state)
     except Exception:
         pass
@@ -439,27 +426,32 @@ def save_state(d: dict) -> None:
     try:
         APP_DIR.mkdir(parents=True, exist_ok=True)
         import copy
+        import hashlib
         to_save = copy.deepcopy(d)
-        # Protect spare API keys with DPAPI on disk
         spares = to_save.get("spare_models")
         if isinstance(spares, list):
             for s in spares:
-                if isinstance(s, dict) and s.get("api_key"):
-                    s["api_key"] = dpapi_protect(s["api_key"])
-        payload = json.dumps(to_save, ensure_ascii=False, indent=2)
-        tmp = STATE_PATH.with_suffix(STATE_PATH.suffix + ".tmp")
-        with tmp.open("w", encoding="utf-8", newline="\n") as fh:
-            fh.write(payload)
-            fh.flush()
-            os.fsync(fh.fileno())
-        json.loads(tmp.read_text(encoding="utf-8"))
-        os.replace(tmp, STATE_PATH)
+                if isinstance(s, dict):
+                    raw_enc = s.pop("_enc", None)
+                    prev_sha = s.pop("_sha", None)
+                    is_locked = s.pop("_dpapi_locked", False)
+                    k = (s.get("api_key") or "").strip()
+
+                    # Invariant: If DPAPI locked and key wasn't edited, preserve original ciphertext
+                    if is_locked and not k and raw_enc:
+                        s["api_key"] = raw_enc
+                    elif k:
+                        # If key unchanged, preserve exact original ciphertext byte-for-byte
+                        curr_sha = hashlib.sha256(k.encode("utf-8")).hexdigest()
+                        if raw_enc and prev_sha and curr_sha == prev_sha:
+                            s["api_key"] = raw_enc
+                        elif not k.startswith("dpapi:"):
+                            # Newly provided or edited plaintext key -> encrypt with DPAPI
+                            s["api_key"] = dpapi_protect(k)
+
+        with interprocess_file_lock(APP_DIR / ".monitor-state.lock"):
+            safe_atomic_write_json(STATE_PATH, to_save, indent=2, restrict_acl=False)
     except Exception as e:
-        try:
-            if 'tmp' in locals() and tmp.exists():
-                tmp.unlink()
-        except OSError:
-            pass
         log_app(f"save_state {type(e).__name__}")
         raise RuntimeError("Không thể lưu monitor state") from e
 
@@ -742,7 +734,15 @@ def _slot(index: int, model, api_base, api_key, cid=None) -> dict:
     }
 
 
-def read_ov_conf() -> dict:
+def read_ov_conf_raw() -> dict:
+    """Read unexpanded raw JSON dictionary directly from ov.conf."""
+    try:
+        return json.loads(CONF_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def read_ov_conf(resolve_env: bool = False) -> dict:
     info = {
         "primary": None,
         "fallback": None,
@@ -759,7 +759,7 @@ def read_ov_conf() -> dict:
     }
     try:
         raw_text = CONF_PATH.read_text(encoding="utf-8")
-        raw = json.loads(os.path.expandvars(raw_text))
+        raw = json.loads(raw_text)
     except Exception as e:
         info["error"] = type(e).__name__
         return info
@@ -1220,9 +1220,21 @@ def backup_ov_conf(reason: str) -> Path:
 
 
 def write_ov_conf(raw: dict) -> None:
-    tmp = CONF_PATH.with_name("ov.conf.tmp")
-    tmp.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, CONF_PATH)
+    # Invariant: ov.conf must NEVER receive dpapi: cipher strings (OpenViking server does not support DPAPI)
+    vlm = raw.get("vlm") or {}
+    top_key = vlm.get("api_key") or ""
+    if isinstance(top_key, str) and top_key.strip().startswith("dpapi:"):
+        raise ValueError("Lỗi nghiêm trọng: ov.conf không được phép chứa chuỗi mã hóa dpapi:. Chỉ chấp nhận plaintext hoặc biến môi trường ${VAR}.")
+    creds = vlm.get("credentials")
+    if isinstance(creds, list):
+        for idx, c in enumerate(creds):
+            if isinstance(c, dict):
+                k = (c.get("api_key") or "").strip()
+                if k.startswith("dpapi:"):
+                    raise ValueError(f"Lỗi nghiêm trọng: Slot {idx} trong ov.conf chứa chuỗi mã hóa dpapi:. Chỉ chấp nhận plaintext hoặc biến môi trường ${{VAR}}.")
+
+    with interprocess_file_lock(APP_DIR / ".ov-writer.lock"):
+        safe_atomic_write_json(CONF_PATH, raw, indent=2, restrict_acl=True)
 
 
 def vlm_credentials_list(vlm: dict) -> list[dict]:
@@ -1752,6 +1764,23 @@ def snapshot_public(snap: dict) -> dict:
 def probe_model(model: str | None, api_base: str | None, api_key: str | None, timeout: float = 90.0) -> dict:
     if not model:
         return {"ok": False, "text": "Fail", "ms": None, "at": time.time()}
+
+    # Preflight secret resolution
+    raw_k = (api_key or "").strip()
+    effective_key = raw_k
+    resolver = globals().get("resolve_secret")
+    status_enum = globals().get("SecretStatus")
+    if raw_k and resolver is not None and status_enum is not None:
+        sec = resolver(raw_k)
+        if sec.status != status_enum.SECRET_READY:
+            category = "secret-unresolved"
+            detail = f"{sec.status.value}"
+            if sec.env_var_name:
+                detail += f" ({sec.env_var_name})"
+            log_app(f"probe {model} blocked: {detail}")
+            return {"ok": False, "text": detail, "ms": 0, "at": time.time(), "category": category}
+        effective_key = sec.value
+
     base = (api_base or "http://127.0.0.1:20128/v1").rstrip("/")
     url = base + "/chat/completions"
     payload = json.dumps({
@@ -1760,8 +1789,8 @@ def probe_model(model: str | None, api_base: str | None, api_key: str | None, ti
         "temperature": 0,
     }).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    if effective_key:
+        headers["Authorization"] = f"Bearer {effective_key}"
     t0 = time.perf_counter()
     code, body = http_json(url, timeout=timeout, method="POST", body=payload, headers=headers)
     ms = int((time.perf_counter() - t0) * 1000)

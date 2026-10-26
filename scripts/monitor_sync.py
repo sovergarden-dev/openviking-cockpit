@@ -11,9 +11,10 @@ import tempfile
 from datetime import datetime, timezone
 import uuid
 
-CORE_FILES = ('openviking-monitor.pyw', 'provider_security_auditor.py',
-              'reference_core_v31.py', 'reserve_table.py',
-              'openviking_monitor_notification.py', 'openviking.ico')
+CORE_FILES = ('secret_store.py', 'safe_write.py',
+              'provider_security_auditor.py', 'reference_core_v31.py',
+              'reserve_table.py', 'openviking_monitor_notification.py',
+              'openviking.ico', 'openviking-monitor.pyw')
 
 
 def sha(path: Path) -> str | None:
