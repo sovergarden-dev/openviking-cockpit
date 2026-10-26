@@ -1276,8 +1276,18 @@ def credential_identity(item: dict) -> tuple:
 
 
 def validate_conf_targets(before: dict, after: dict) -> None:
-    """Monitor mutation boundary only; existing credentials are grandfathered."""
+    """Monitor mutation boundary only; existing and top-level credentials are grandfathered."""
     existing = {credential_identity(item) for item in effective_credentials(before)}
+
+    # Grandfather top-level vlm.model from before state (prevents slot-vs-top shadowing lockout)
+    vlm_before = before.get("vlm") or {}
+    if vlm_before.get("model"):
+        existing.add(credential_identity({
+            "model": vlm_before.get("model"),
+            "api_base": vlm_before.get("api_base") or "",
+            "api_key": vlm_before.get("api_key") or ""
+        }))
+
     for item in effective_credentials(after):
         identity = credential_identity(item)
         if identity in existing:

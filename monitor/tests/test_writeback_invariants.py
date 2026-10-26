@@ -41,7 +41,15 @@ class TestWritebackInvariants(unittest.TestCase):
         }
         self.conf_path.write_text(json.dumps(self.initial_ov, indent=2), encoding="utf-8")
 
-        # Load openviking-monitor namespace
+        # Mock USERPROFILE environment variable before loading openviking-monitor.pyw
+        self._orig_userprofile = os.environ.get("USERPROFILE")
+        os.environ["USERPROFILE"] = str(self.root)
+        fake_ov = self.root / ".openviking"
+        fake_ov.mkdir(parents=True, exist_ok=True)
+        (fake_ov / "ov.conf").write_text(json.dumps(self.initial_ov, indent=2), encoding="utf-8")
+        (fake_ov / "monitor").mkdir(parents=True, exist_ok=True)
+
+        # Load openviking-monitor namespace in safe isolation
         self.ns = runpy.run_path(str(ROOT / "openviking-monitor.pyw"), run_name="invariants_test")
         # Override paths in namespace and in functions' globals
         self.ns["CONF_PATH"] = self.conf_path
@@ -54,6 +62,8 @@ class TestWritebackInvariants(unittest.TestCase):
                 self.ns[fn_name].__globals__["APP_DIR"] = self.app_dir
 
     def tearDown(self):
+        if self._orig_userprofile is not None:
+            os.environ["USERPROFILE"] = self._orig_userprofile
         self.tmp_dir.cleanup()
 
     def test_read_ov_conf_raw_preserves_env_var(self):
