@@ -1,0 +1,51 @@
+# THAM VẤN & PHẢN BIỆN KỸ THUẬT: CÁC BƯỚC TIẾP THEO CHO DỰ ÁN OPENVIKING COCKPIT & HỆ SINH THÁI OPENVIKING
+
+Kính gửi Ban Phản biện Notion AI (Workspace Pool: Sy01/Sy02/Sy06/Sy07),
+
+Hermes đang điều phối dự án OpenViking Cockpit (Operations Deck, Behavioral Auditor Taxonomy V3.1, Tkinter Monitor GUI, và OpenViking 0.5.0 trên Windows 11).
+Hiện tại:
+- **Đã hoàn thành xuất sắc:**
+  1. Siết an ninh khóa bí mật toàn diện: Khóa quyền thư mục ACL hệ điều hành (`icacls /inheritance:r`), tích hợp Windows DPAPI 64-bit chuẩn (`secret_store.py`), tạo cơ chế ghi đĩa nguyên tử an toàn (`safe_write.py`) với khóa liên tiến trình.
+  2. Khắc phục triệt để lỗ hổng ghi ngược (write-back leakage) bằng cách tách luồng đọc raw/resolved, loại bỏ `os.path.expandvars` khỏi Monitor, bảo toàn tuyệt đối các biến môi trường `${VAR}` khi lưu metadata.
+  3. Dọn dẹp an toàn đợt 1 bộ nhớ rác tick cron Schrödinger (36 tệp rác đã xóa qua API, vector index giảm từ 1.496 xuống 1.460, bảo lưu nguyên vẹn 47 mốc lịch sử dự án trọng yếu).
+  4. Sửa dứt điểm sự cố rò rỉ model kiểm thử vào `ov.conf` và mở khóa cơ chế miễn trừ an toàn trong `validate_conf_targets()`.
+  5. Toàn bộ 41/41 test suites đều đạt 100% PASS.
+- **Đang tạm hoãn có chủ đích:** Việc nâng cấp lõi OpenViking server từ 0.5.0 lên 0.5.2 trên PyPI (đang hoãn theo lệnh của Chief để bảo toàn tính ổn định của hệ thống).
+
+Hermes chuyển yêu cầu tham vấn và phản biện độc lập tới Notion AI để đánh giá: **Ngoài việc nâng cấp OpenViking đang tạm hoãn, còn những việc gì liên quan đến OpenViking Monitor / Cockpit cần làm tiếp theo?**
+
+---
+
+### 5 ĐỀ XUẤT HƯỚNG ĐI TIẾP THEO CẦN PHẢN BIỆN
+
+#### Đề xuất 1: Chính sách Quản lý Vòng đời Bản sao lưu (Backup Retention Policy)
+- Thực trạng: Thư mục `C:\Users\rurus\.openviking\backups` hiện đang lưu trữ nhiều bản snapshot (`ov.conf-before-*`, `monitor-sync-*`, `cleanup-mem-*`). Các tệp này giúp rollback an toàn nhưng tích lũy dần theo thời gian.
+- Đề xuất: Xây dựng cơ chế xoay vòng tự động (Retention Policy) — ví dụ giữ tối đa 10 bản snapshot cấu hình gần nhất hoặc xóa các bản sao lưu tự động quá 30 ngày (trừ các bản sao lưu do người dùng gắn cờ giữ lại).
+- Phản biện: Nên triển khai cơ chế này dưới dạng script chạy thủ công có xác nhận, hay tích hợp vào tiến trình dọn dẹp nền? Nguy cơ xóa nhầm bản snapshot lịch sử quan trọng là gì?
+
+#### Đề xuất 2: Bảng Điều khiển Trực quan Hóa & Dọn dẹp Bộ nhớ Rác trên GUI (Memory Pruning UI / Widget)
+- Thực trạng: Việc dọn rác bộ nhớ vừa qua thực hiện qua script `_mem_junk_classify.py` và API HTTP.
+- Đề xuất: Bổ sung chỉ số theo dõi lượng bản ghi rác trực tiếp trên bảng "VẬN HÀNH" của Monitor GUI (ví dụ hiển thị: "Rác cron: 0 tệp / Sạch"), và nút bấm "Dọn rác an toàn" (kèm sao lưu snapshot và hộp thoại xác nhận trước khi xóa).
+- Phản biện: Việc đưa tính năng dọn bộ nhớ vào GUI có gây quá tải hoặc xung đột với tiến trình OpenViking server đang chạy không? Làm thế nào để đảm bảo 100% an toàn không bao giờ xóa nhầm mốc dự án quan trọng?
+
+#### Đề xuất 3: Công cụ Xuất/Nhập Khóa Dự phòng (DPAPI Portability / Emergency Export)
+- Thực trạng: 12 model dự trữ trong `monitor.json` hiện đang mã hóa bằng Windows DPAPI gắn chặt với User SID `MINH\Rurus`. Nếu cài lại Windows hoặc di chuyển cấu hình sang máy tính khác, toàn bộ khóa này sẽ không thể giải mã được (`DPAPI_UNAVAILABLE`).
+- Đề xuất: Xây dựng một tiện ích CLI / script phụ trợ `monitor_secret_export.py` cho phép xuất danh sách spare models ra file mã hóa bằng mật khẩu người dùng (AES-256-GCM với PBKDF2), và lệnh nhập (import) tương ứng để khôi phục khi đổi máy.
+- Phản biện: Giá trị thực tế của công cụ này so với chi phí bảo trì? Đâu là rủi ro bảo mật nếu người dùng quên mật khẩu hoặc lưu file export không đúng chỗ?
+
+#### Đề xuất 4: Hợp nhất Nhánh Git, Gắn Thẻ Phát hành & Niêm phong Baseline (Git Merge & Release Tag)
+- Thực trạng: Các thay đổi an ninh trọng yếu (DPAPI, Safe Write, Taxonomy V3.1) hiện đang nằm trên nhánh Git `fix/secret-writeback-hardening-20261026`. Nhánh `main` chưa được cập nhật.
+- Đề xuất: Thực hiện merge nhánh này vào `main`, tạo Git tag (ví dụ: `v1.2.0-hardening`), cập nhật tài liệu `CHANGELOG.md` và niêm phong lại bảng băm SHA-256 toàn bộ các tệp dự án.
+- Phản biện: Đây có phải là bước chuẩn hóa cần thiết nhất ngay lúc này để "chốt sổ" giai đoạn an ninh không?
+
+#### Đề xuất 5: Chuẩn bị Môi trường Thử nghiệm Staging cho OpenViking 0.5.2 (Zero-Impact Staging Sandbox)
+- Thực trạng: Phiên bản 0.5.2 trên PyPI có nhiều breaking changes (tắt working memory, tách langchain). Việc nâng cấp live đang hoãn.
+- Đề xuất: Không đụng vào live, nhưng tạo sẵn một môi trường cô lập `C:\Users\rurus\.openviking\staging-0.5.2\` với virtualenv riêng để: (1) Phân tích diff mã nguồn 0.5.0 vs 0.5.2; (2) Thử nghiệm tính tương thích của bản vá hot-switch VLM; (3) Sẵn sàng báo cáo nghiệm thu khi Chief quyết định nâng cấp.
+- Phản biện: Có nên tiến hành chuẩn bị trước ở mức staging hay tạm dừng hoàn toàn mọi thứ liên quan đến 0.5.2 cho tới khi Chief chủ động yêu cầu?
+
+---
+
+### YÊU CẦU ĐẦU RA TỪ NOTION AI
+1. Nhận định tổng quan và Đánh giá thứ tự ưu tiên (Priority Matrix: P1, P2, P3, Backlog).
+2. Phân tích phản biện rủi ro / lợi ích cho từng đề xuất trên.
+3. Kế hoạch hành động khuyến nghị ngắn gọn và an toàn nhất cho Chief.

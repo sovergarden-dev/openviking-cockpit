@@ -1,0 +1,42 @@
+THAM VẤN ĐỘC LẬP — OPENVIKING COCKPIT / MONITOR
+Ref: 271e677abb064dceb3b7361420d5c9d5
+Ngày: 2026-10-26
+Nguồn: consult-20261026T105158-a370.txt trong cùng thư mục job.
+
+PHẠM VI VÀ GIỚI HẠN
+Đây là đánh giá thiết kế dựa trên tình trạng do Hermes báo cáo. Chưa kiểm tra repository, ACL, mã nguồn, log test, snapshot hoặc release notes OpenViking. 41/41 test suites PASS là thông tin đầu vào, chưa phải kiểm chứng độc lập hay bảo đảm an toàn tuyệt đối. Không thay đổi live, merge Git, xóa dữ liệu, xuất khóa hoặc cài staging trong lượt tham vấn này.
+
+KẾT LUẬN
+Ưu tiên đóng gói baseline có thể khôi phục trước khi mở rộng tính năng. Thứ tự khuyến nghị: P1 đề xuất 4 + kiểm thử phục hồi; P2 đề xuất 1 và đánh giá/triển khai tối thiểu đề xuất 3; P3 phần quan sát chỉ đọc của đề xuất 2; Backlog nút xóa trên GUI và phần thực thi staging của đề xuất 5 khi chưa có chấp thuận. P1/P2/P3 biểu thị thứ tự, không phải thời hạn hay quyền tự triển khai.
+
+1. GIT MERGE / RELEASE — P1
+Nên chốt giai đoạn hardening nhưng không merge mù quáng. Chạy test trên ứng viên merge với main hiện tại trong môi trường tách biệt; kiểm tra test không sửa cấu hình live; rà secret trong diff, lịch sử và tệp được theo dõi. Không đưa monitor.json thật, khóa DPAPI hoặc bản export vào Git. Kiểm tra phạm vi miễn trừ validate_conf_targets(): không được bypass xác thực rộng, phải chặn model test vào live và có negative tests.
+Gắn tag vào đúng commit đã kiểm tra; phiên bản theo quy ước dự án, không mặc định v1.2.0. Release manifest nên gồm commit, Python/dependency versions, lockfile, kết quả test, hợp đồng cấu hình và SHA-256 của các artifact bất biến; không tự băm manifest vào chính nó và không cố niêm phong log/cache/config đang thay đổi. Hash không tự chứng minh nguồn gốc; bảo vệ manifest/tag. Rollback phải bao gồm cả cấu hình/dữ liệu tương thích, không chỉ git checkout.
+Điều kiện nghiệm thu: thử restore vào thư mục riêng, kiểm tra cấu hình raw còn ${VAR}, DPAPI hoạt động trong bối cảnh hợp lệ, và không phát sinh truy cập/ghi live.
+
+2. BACKUP RETENTION — P2
+Bắt đầu bằng CLI chạy thủ công: inventory -> dry-run -> xét duyệt -> quarantine -> purge có phê duyệt. Chưa tích hợp xóa nền. Tách backup cấu hình, metadata, memory và dữ liệu/index; không áp dụng chung quy tắc 10 bản hoặc 30 ngày. Chưa đủ thông tin tần suất backup, kích thước, RPO/RTO để chốt ngưỡng. Giữ bản pre-hardening, release/known-good và pin; bảo vệ cả backup chain. Không diễn giải thiếu metadata là được phép xóa.
+Chỉ xử lý trong root chuẩn hóa; không đi qua junction/symlink/reparse point, kiểm tra lại hash/mtime trước thao tác, khóa liên tiến trình, fail closed khi thiếu bằng chứng. Quarantine không phải backup độc lập. Backup chứa secret phải có ACL tương đương; các bản cũ có thể chứa plaintext. Snapshot đa tệp không tự nhất quán chỉ vì từng tệp được ghi nguyên tử.
+
+3. DPAPI EMERGENCY EXPORT — P2, TÙY KHẢ NĂNG TÁI CẤP KHÓA
+Có giá trị nếu mất 12 khóa gây gián đoạn hoặc khó tái cấp. Nếu đã có password manager/vault chuẩn và quy trình tái cấp, ưu tiên dùng nó thay vì thêm một hệ mật mã tự quản. SID không phải điều kiện duy nhất của DPAPI: còn master key, profile và bối cảnh bảo vệ; tạo lại cùng tên user không bảo đảm giải mã. Không mặc định mọi trường hợp cài lại Windows đều mất khóa nếu đã có quy trình recovery phù hợp.
+Nếu triển khai: thư viện mật mã chuẩn; AES-256-GCM; KDF có tham số versioned (ưu tiên Argon2id/scrypt nếu phù hợp, PBKDF2-HMAC-SHA-256 vẫn là lựa chọn với tham số hiệu chỉnh); salt ngẫu nhiên và nonce không tái sử dụng với cùng khóa. Xác thực header/KDF/schema cùng payload, giới hạn kích thước và chi phí KDF khi import. Nhập mật khẩu qua prompt, không argv/env/log; không tạo plaintext tạm. Xuất ghi nguyên tử, ACL chặt; bảo đảm thư mục nhận an toàn, cảnh báo cloud sync. Import xác thực toàn bộ trước khi ghi, preview xung đột, không ghi đè ngầm, mã hóa lại bằng DPAPI user đích, rollback khi lỗi. Không khẳng định Python xóa sạch tuyệt đối plaintext trong RAM.
+Quên mật khẩu mạnh có thể không cứu được. Bản mã bị lộ cho phép đoán mật khẩu offline. Phải có diễn tập export/import bằng khóa giả và phục hồi ở profile thử nghiệm trước khi dùng thật.
+
+4. MEMORY UI — P3 CHỈ ĐỌC; NÚT XÓA ĐỂ BACKLOG
+Không thể bảo đảm 100% không xóa nhầm bằng classifier hoặc hộp thoại xác nhận. False positive là rủi ro mất dữ liệu chính. Giữ 47 mốc được báo cáo chỉ là kiểm tra hồi quy, không chứng minh mọi dữ liệu quan trọng đều được nhận diện. Không đồng nhất vector count với số tài liệu; cần kiểm tra semantics của API/index.
+Triển khai trước: số ứng viên nghi rác, thời điểm quét, độ tin cậy, lý do và trạng thái chưa xác định; không ghi 'Sạch' khi quét lỗi. Quét trong worker, UI update ở Tkinter main thread; timeout, hủy, cache và rate limit; không full scan mỗi tick. Nếu sau này cho xóa: lập manifest ứng viên cụ thể, backup nội dung+metadata có thể restore, loại mọi mục không chắc chắn, kiểm tra lại hash/mtime trước từng xóa, dùng API chính thức, batch nhỏ, một job tại một thời điểm, ngừng khi lỗi và kiểm tra phục hồi/index. Không xóa file trực tiếp dưới server và không coi snapshot cấu hình là backup memory.
+
+5. STAGING 0.5.2 — BACKLOG CHỜ CHIEF XÁC NHẬN PHẠM VI
+Lệnh hoãn nâng cấp live không tự động cho phép tải, cài hoặc chạy 0.5.2. Có thể soạn checklist trên giấy; chỉ làm diff/cài/chạy khi được chấp thuận phù hợp. Các thay đổi 'tắt working memory, tách langchain' trong tệp chưa được kiểm chứng bằng nguồn phát hành chính thức.
+Virtualenv và thư mục riêng không phải sandbox an ninh. Cần HOME/USERPROFILE/config/data/index/cache/temp/log và port riêng, không đọc live secrets, không dùng quyền ghi live; dùng Windows account riêng hoặc VM/Windows Sandbox, dữ liệu và khóa giả. Kiểm soát child process, scheduled tasks, môi trường kế thừa, endpoint API và ngân sách mạng. Thử hot-switch VLM, hợp đồng cấu hình, startup/shutdown, API, ingest/search/delete/reindex và dependency tách riêng; không copy bản vá 0.5.0 sang 0.5.2 mà chưa review. Đối chiếu trước/sau để xác nhận không ghi live và không gọi provider thật.
+
+KẾ HOẠCH AN TOÀN NHẤT CHO CHIEF
+A. Giữ nguyên OpenViking 0.5.0; không dọn nền và không thêm nút xóa lúc này.
+B. Xin duyệt gói P1: review ứng viên merge, kiểm tra secret/validation exemptions, test trên commit đích, thử restore trong môi trường riêng, rồi merge/tag và lập manifest.
+C. Lập inventory backup chỉ đọc, xác định RPO/RTO và quy tắc pin; chỉ xét purge khi restore đã đạt.
+D. Quyết định recovery khóa: vault/tái cấp hay encrypted export tối thiểu. Khóa thật chỉ tham gia sau khi đường phục hồi đã được kiểm thử.
+E. Thêm quan sát memory read-only; mọi thao tác xóa tiếp tục có kế hoạch và duyệt thủ công.
+F. Chờ Chief cho phép riêng trước khi chuẩn bị staging thực thi.
+
+Điểm còn thiếu cần kiểm chứng: provenance/coverage của 41 suites; tính đúng của ACL với identity thực thi; atomicity liên tệp; phạm vi miễn trừ validator; khả năng restore dữ liệu/index; backup có plaintext lịch sử hay không. Đây là việc hoàn thiện bằng chứng, không phải kết luận các cơ chế hiện tại đang lỗi.
