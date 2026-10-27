@@ -1,0 +1,67 @@
+THAM VẤN KỸ THUẬT OPENVIKING COCKPIT
+Ref: 83d4bf8c975b48a2881cf66641a1cb8e
+Ngày đánh giá: 2026-10-27, Asia/Saigon
+Phạm vi: Đã đọc tệp consult-20261026T233551-9b06.txt qua MCP và đối chiếu tài liệu Microsoft/Ollama. Chưa đọc launcher live, XML task, mã Monitor hoặc ov.conf; chưa chạy kiểm thử Windows và chưa thay đổi cấu hình live. Các hiện trạng trong đề bài là thông tin do Hermes cung cấp, không phải kết quả kiểm tra độc lập.
+
+KẾT LUẬN
+Chấp thuận có điều kiện việc đổi VBS sang Run(..., 0, True), đưa launcher vào Git, bổ sung xoay log và tự khởi động Monitor. Không chấp thuận giả định True đồng nghĩa schtasks /End chắc chắn diệt toàn bộ cây. Phải nghiệm thu bằng PID, creation time, listener và readiness. Mục tiêu dài hạn: một supervisor sở hữu vòng đời dịch vụ; GUI chỉ quan sát và gửi lệnh.
+
+MA TRẬN ƯU TIÊN
+P1: Sửa wait=True, truyền exit code; xác lập ownership và Stop/Restart có kiểm chứng; khóa single-instance; ngăn hai chủ sở hữu Ollama. Đưa patch vào canonical repo cùng đợt sửa. Nếu API key đã lộ, thu hồi/đổi key là P1.
+P2: Xoay cả server.log và ollama.log, báo lỗi rotation; thêm Monitor AtLogon và trigger cho backend nếu cần tự chạy; kiểm thử hợp đồng và Windows integration; cấu hình secret an toàn nếu chưa có bằng chứng lộ.
+P3: Supervisor Job Object có kiểm thử, log collector xoay khi đang chạy, metrics, triển khai atomic và rollback; nâng Job Object lên P1 nếu stop cây hiện tại không đáng tin.
+Backlog: Chuyển backend thành Windows Service khi thực sự cần chạy trước đăng nhập; dashboard/SLO nâng cao. Không gộp GUI/toast vào service session 0.
+
+1. QUYỀN KIỂM SOÁT TIẾN TRÌNH
+- Wait=True giữ wscript đợi cmd, nhưng không tự tạo Job Object, không tạo bảo đảm kill descendants và không biến force-stop thành graceful shutdown.
+- Dùng đường dẫn tuyệt đối cho cmd/script; đặt working directory; tránh start/detach bên trong CMD làm watchdog thoát sớm; WScript.Quit với mã trả về của shell.Run. Không dùng On Error Resume Next để nuốt lỗi.
+- PT0S cho phép chạy vô hạn theo ExecutionTimeLimit; không vô hiệu hóa điều kiện pin/idle, logoff, shutdown hoặc stop thủ công. Task hiện không trigger và dùng InteractiveToken: tên Autostart không bảo đảm chạy sau reboot hay trước đăng nhập.
+- Stop: đặt desired_state=stopped trước, chặn watchdog hồi sinh; yêu cầu graceful stop nếu được hỗ trợ; đợi deadline; ép dừng phần thuộc quyền quản lý; xác minh tiến trình/listener biến mất; chỉ Run lại sau khi stop hoàn tất. Timeout phải chuyển STOP_FAILED, không chạy thêm bản mới.
+- Không kill theo tên ollama.exe hoặc theo port đơn thuần. PID file phải kèm creation time/path/run_id; phát hiện PID reuse. taskkill /PID /T /F chỉ là phương án dự phòng sau khi xác minh ownership, không phải bảo đảm tương đương Job Object.
+- Job Object chuẩn: KILL_ON_JOB_CLOSE, handle không kế thừa, tạo child suspended rồi assign rồi resume; kiểm tra mọi lỗi assign/nested-job/breakaway. Không đưa Ollama dùng chung vào job của OpenViking. Kill job vẫn là hard kill; graceful trước, hard kill sau.
+
+2. XOAY LOG
+- 4,194,304 byte là 4 MiB. GTR nghĩa là vượt ngưỡng; GEQ nghĩa là chạm ngưỡng.
+- Xoay trước khi launch chỉ an toàn khi writer cũ và mọi handle liên quan đã đóng. Wrapper/khối batch có thể giữ handle, không chỉ Ollama.
+- FILE_SHARE_DELETE quyết định khả năng rename khi đang mở; rename thành công không làm writer tự chuyển sang file mới. Không biết flags thực tế khi chưa kiểm tra.
+- Batch an toàn tạm thời: stop writer thuộc quyền quản lý -> wait exit/close handles -> rotate với retry hữu hạn và error reporting -> start writer -> readiness. Nếu Ollama dùng chung, không dừng nó chỉ để xoay log.
+- Không nuốt lỗi move bằng >nul 2>&1 mà không kiểm tra kết quả; không copytruncate file đang ghi vì có race/mất dữ liệu. Rotation lỗi không được kéo theo cắt/xóa log gốc.
+- Chỉ xoay trước launch KHÔNG giới hạn dung lượng trong một phiên chạy dài. Muốn giới hạn thực tế: collector đọc stdout/stderr và tự quản lý file, xoay theo size/time, retention rõ ràng, drain cả hai luồng tránh deadlock. Không restart model mỗi lần đạt 4 MiB.
+- Giữ nhiều generation tùy ngân sách đĩa; giảm nhiễu health-check trong access log ở cấu hình được phiên bản hỗ trợ. Log lỗi phải được bảo toàn.
+
+3. MONITOR VÀ TỰ KHỞI ĐỘNG
+- Startup và AtLogon đều phụ thuộc đăng nhập; không phải boot-time monitoring. Khuyến nghị Task Scheduler AtLogon cho MINH\\Rurus, interactive, quyền tối thiểu, delay ngắn và RestartOnFailure có giới hạn. Không triển khai đồng thời cả Startup lẫn AtLogon.
+- Monitor dùng pythonw.exe đường dẫn tuyệt đối, venv và working directory đúng; single-instance bằng mutex; exception logging và exit code lỗi để scheduler có thể restart. Cần kiểm thử toast với thư viện/định danh ứng dụng thực tế.
+- Monitor không phụ thuộc backend: chạy sớm và hiển thị STARTING/DEGRADED. Startup chỉ là thứ tự danh nghĩa; readiness mới xác nhận dependency.
+- Gateway 20128 chỉ là dependency bắt buộc nếu luồng API thực tế đi qua nó. Lỗi gateway không nên gây vòng lặp restart Ollama. Tách process alive, HTTP ready và inference ready; probe nhẹ, timeout hữu hạn; tránh gọi inference mỗi 11 giây.
+- GUI không được là chủ thể duy nhất làm backend tự khởi động. Nếu backend cần AtLogon, thêm trigger riêng và kiểm tra không trùng launcher cũ.
+- Không thể toast trong lúc máy mất điện; sau reboot có thể báo dấu hiệu unclean shutdown. Chỉ giám sát từ máy khác mới phát hiện khi host tắt.
+
+4. CANONICAL REPO VÀ KIỂM THỬ
+- ops/ chứa VBS/CMD, task XML hoặc generator, script deploy có backup/hash/rollback; tests/ chứa contract và Windows integration. Live ~/.openviking là bản deploy, không sửa riêng rồi quên đồng bộ repo. Không commit key, log hoặc đường dẫn cá nhân cố định.
+- Contract không chỉ tìm substring: bỏ comment và normalize cú pháp; xác nhận invocation thật wait=True, quoted paths, exit-code propagation; cấm timeout trong runtime CMD, cấm detach ngoài thiết kế; kiểm tra cả hai log và xử lý lỗi rotate. Chấp nhận cơ chế delay tương đương khi nâng supervisor, không đóng băng mãi ping -n.
+- Integration bắt buộc: Run/End/Run, kill wrapper, crash server/Ollama, port conflict, gọi Run/Restart đồng thời, log dưới/bằng/trên 4 MiB và file lock, đường dẫn có dấu/khoảng trắng, login/reboot, không tác động Ollama ngoài ownership. Test phải thất bại nếu phát hiện orphan hoặc kill nhầm.
+- Chỉ gọi là TDD khi viết test đỏ trước thay đổi; test bổ sung sau vẫn hữu ích nhưng là regression test.
+
+5. LỘ TRÌNH HỆ SINHÁI
+- Hai process mang tên Ollama chưa chứng minh có hai server: có thể là tray/server/runner. Kiểm tra command line, executable path, listening port, account và model residency. Ollama.lnk trong Startup là dấu hiệu có thể trùng ownership với watchdog, chưa phải bằng chứng.
+- Chọn một trong hai mô hình: Ollama shared do thành phần riêng quản lý, OpenViking không kill; hoặc Ollama dedicated có endpoint và owner rõ ràng. Không để cả tray startup và watchdog tranh cùng endpoint.
+- Khi thực sự thiếu VRAM: đo trước; thử OLLAMA_MAX_LOADED_MODELS=1 và OLLAMA_NUM_PARALLEL=1 như baseline, đánh đổi throughput; tinh chỉnh context/keep_alive theo tải chat và embedding. Không suy ra mức tiết kiệm nếu chưa đo. Xác minh biến được phiên bản cài đặt hỗ trợ.
+- Không mặc định ov.conf nội suy ${ENV_VAR}. Kiểm tra schema/loader của phiên bản OpenViking đang chạy; ưu tiên env override nếu được hỗ trợ hoặc secret store + runtime config hạn chế ACL nếu không. Environment variables không phải vault; không in key hoặc truyền trên command line. Kiểm tra environment của tiến trình task mới thay vì giả định setx cập nhật tiến trình đang chạy.
+- Port Guard chỉ phát hiện/xác minh; không chiếm port bằng cách kill process lạ. Dùng identity + readiness; một supervisor duy nhất điều phối restart có backoff/jitter, cooldown và circuit breaker. Stop chủ động không được bị coi là crash. Cấu hình/ngữ cảnh xác thực lỗi thì fail rõ thay vì retry vô hạn.
+
+KẾ HOẠCH TRIỂN KHAI AN TOÀN
+A. Backup launcher/XML; ghi PID+creation time+command line+listener, phân loại owner Ollama và điểm startup; không sao chép key vào báo cáo.
+B. Viết regression test; commit bản canonical; sửa wait=True/exit code/absolute paths; giữ delay headless đã xác minh. Triển khai một thay đổi mỗi lần, có rollback.
+C. Thử Stop/Run có deadline và xác nhận ownership. Nếu còn orphan, chưa công bố restart sạch và tạm chặn auto-restart không kiểm soát; triển khai supervisor/Job Object.
+D. Thêm pre-launch rotation hai log có phát hiện lỗi, công khai rằng chưa phải hard cap 4 MiB; sau đó mới nâng collector nếu cần.
+E. Thêm AtLogon Monitor single-instance; thêm trigger backend nếu cần; thử login/reboot và gateway khởi động chậm.
+F. Nghiệm thu đề xuất: ít nhất 10 vòng Start-Stop-Start, không orphan/duplicate/kill nhầm; fake child chết cùng wrapper theo contract; log lock không mất dữ liệu; không có restart storm; một Monitor sau login, cảnh báo có chống lặp. Đây là tiêu chí đề xuất, chưa phải kết quả đo.
+
+NGUỒN CHÍNH THỨC
+- https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/schtasks-end
+- https://learn.microsoft.com/en-us/windows/win32/procthread/terminating-a-process
+- https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects
+- https://learn.microsoft.com/en-us/windows/win32/taskschd/taskschedulerschema-executiontimelimit-settingstype-element
+- https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
+- https://docs.ollama.com/faq

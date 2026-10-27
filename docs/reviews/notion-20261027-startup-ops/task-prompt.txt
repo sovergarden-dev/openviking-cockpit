@@ -1,0 +1,61 @@
+# THAM VẤN & PHẢN BIỆN KỸ THUẬT: VẬN HÀNH CHUỖI KHỞI ĐỘNG ẨN, KIỂM SOÁT TIẾN TRÌNH VÀ LỘ TRÌNH NÂNG CẤP DỰ ÁN OPENVIKING COCKPIT
+
+Kính gửi Ban Phản biện Notion AI (Workspace Pool: Sy01/Sy02/Sy06/Sy07),
+
+Hermes đang thực hiện đợt rà soát toàn diện sau khi chuyển đổi thành công tác vụ khởi động OpenViking sang chế độ không cửa sổ (windowless launcher). Chúng tôi cần sự tham vấn, phản biện độc lập từ Notion AI để tìm ra giải pháp tối ưu cho chuỗi vận hành và xác định các đề xuất tiếp theo cho dự án OpenViking Cockpit.
+
+---
+
+### BỐI CẢNH KỸ THUẬT VÀ PHÁT HIỆN GẦN NHẤT
+
+1. **Chuỗi khởi động ẩn vừa thiết lập:**
+   - Tác vụ `OpenViking Autostart` (Scheduled Task chạy bằng tài khoản người dùng `MINH\Rurus`, `InteractiveToken`, không trigger) được cấu hình gọi:
+     `wscript.exe //B "C:\Users\rurus\.openviking\start-openviking-hidden.vbs"`
+   - Tệp VBS hiện tại thực hiện:
+     `shell.Run "cmd.exe /d /c start-openviking-hidden.cmd", 0, False` (tham số chờ `bWaitOnReturn = False`).
+   - Tệp CMD chạy watchdog giám sát, gọi `ollama serve` (ghi log vào `logs/ollama.log`) và `openviking-server.exe` (ghi log vào `logs/server.log`).
+   - Đã phát hiện và xử lý lỗi ngầm: Trong console ẩn (windowless), lệnh `timeout /t N /nobreak` trả về mã lỗi 125 ngay lập tức (không dừng). Do đó, watchdog đã chuyển sang dùng `ping -n (N+1) 127.0.0.1 >nul` để giữ độ trễ khởi động lại chính xác.
+
+2. **Các lỗ hổng / khoảng trống kỹ thuật mới được phát hiện:**
+   - **Vấn đề 1 (`bWaitOnReturn = False` làm mất quyền kiểm soát của Scheduled Task):**
+     Khi VBS gọi `shell.Run` với `False`, tiến trình `wscript.exe` kết thúc ngay sau khi sinh ra `cmd.exe`. Do đó, tác vụ trong Task Scheduler chuyển trạng thái từ `Running` về `Ready`, mất quyền sở hữu tiến trình cây con. Hệ quả là khi Monitor gọi `schtasks /End /TN "OpenViking Autostart"`, lệnh này không thể ngắt được tiến trình watchdog `cmd.exe` đang chạy ngầm, làm hỏng logic tái khởi động sạch của Cockpit.
+   - **Vấn đề 2 (`ollama.log` chưa có cơ chế xoay vòng 4MB):**
+     `server.log` đã có cơ chế xoay vòng tại ngưỡng 4MB (`move /y server.log server.log.old`). Tuy nhiên, `ollama.log` (nhận luồng Gin HTTP access log mỗi 11 giây) hiện chưa được xoay vòng, có nguy cơ phình to liên tục theo thời gian.
+   - **Vấn đề 3 (Thiếu cơ chế tự khởi động cho Monitor Cockpit):**
+     Hiện tại thư mục `shell:startup` của Windows đã có `9router.vbs`, `Hermes_Gateway.vbs`, `Ollama.lnk`, nhưng **chưa có OpenViking Monitor**. Nếu máy tính khởi động lại mà người dùng không mở Monitor bằng tay, sẽ không có giao diện giám sát hay cảnh báo toast khi server sập.
+   - **Vấn đề 4 (Tệp launcher chưa được quản lý mã nguồn trong repo và thiếu kiểm thử hợp đồng):**
+     `start-openviking-hidden.cmd` và `.vbs` hiện chỉ nằm trực tiếp ở thư mục live `~/.openviking`, chưa có bản canonical trong Git repo và chưa có bài kiểm thử TDD để chặn các lỗi như `timeout /t` hoặc `False`.
+
+---
+
+### 5 CÂU HỎI THAM VẤN & PHẢN BIỆN CHUYÊN SÂU
+
+#### Câu 1: Khắc phục quyền kiểm soát tiến trình (`bWaitOnReturn = True` vs Job Object)
+- Đề xuất: Sửa dòng lệnh VBS thành `shell.Run cmd, 0, True`. Khi đó `wscript.exe` duy trì sự sống suốt vòng đời của watchdog, giữ Scheduled Task ở trạng thái `Running`. Lệnh `schtasks /End` sẽ hạ gục toàn bộ cây tiến trình (`wscript` -> `cmd` -> `ollama` / `server`), và lệnh `schtasks /Run` kế tiếp sẽ sinh ra chuỗi tiến trình mới hoàn toàn.
+- Phản biện: Giải pháp này có rủi ro phụ nào không (ví dụ task bị Windows tự động ngắt theo timeout mặc định không nếu `ExecutionTimeLimit` đã là `PT0S`)? Có cần thêm cơ chế dọn dẹp tiến trình con mồ côi (orphan process) khi kill đột ngột không?
+
+#### Câu 2: Chính sách Xoay vòng Log cho Ollama Gin Engine
+- Đề xuất: Bổ sung đoạn mã xoay vòng trước khi khởi chạy `ollama serve`:
+  `if exist "%OLLAMA_LOG%" for %%A in ("%OLLAMA_LOG%") do if %%~zA GTR 4194304 move /y "%OLLAMA_LOG%" "%OLLAMA_LOG%.old" >nul 2>&1`
+- Phản biện: Khi `ollama serve` đang mở tệp log với cờ chia sẻ của Windows, lệnh `move /y` có thể bị lỗi file lock nếu tiến trình đang giữ handle không? Cách xử lý xoay vòng an toàn nhất trong batch script Windows là gì?
+
+#### Câu 3: Tự động khởi động Monitor GUI (`OpenViking_Monitor.vbs` trong Startup)
+- Đề xuất: Tạo tệp `OpenViking_Monitor.vbs` trong thư mục Windows Startup (`shell:startup`) gọi `pythonw.exe openviking-monitor.pyw` để Monitor luôn chạy nền cùng hệ thống, bảo đảm phát hiện sập nguồn và bắn thông báo toast kịp thời.
+- Phản biện: Đặt trong thư mục Startup người dùng hay đưa vào Task Scheduler? Trình tự khởi động giữa Monitor, Gateway 20128 và OpenViking Server có cần phụ thuộc lẫn nhau không?
+
+#### Câu 4: Đưa Launcher Scripts vào Quản lý Mã nguồn (Canonical Repo & TDD)
+- Đề xuất: Đưa `start-openviking-hidden.cmd` và `.vbs` vào repo `openviking-cockpit` (thư mục `ops/`), viết bài kiểm thử hợp đồng (`test_launcher_contract.py`) kiểm tra nghiêm ngặt:
+  1. VBS chứa `, 0, True` (cấm `, 0, False`).
+  2. CMD sử dụng `ping -n` (cấm tuyệt đối `timeout /t`).
+  3. CMD có cơ chế xoay vòng log cho cả server và ollama.
+- Phản biện: Đánh giá tính cần thiết của việc chuẩn hóa này đối với sự bền vững lâu dài của dự án.
+
+#### Câu 5: Lộ trình Nâng cấp & Đề xuất Tổng thể Tiếp theo
+- Ngoài các vấn đề trên, Ban Phản biện nhận định còn những khía cạnh nào liên quan đến hệ sinh thái OpenViking cần được tối ưu (ví dụ: tối ưu VRAM khi có 2 tiến trình Ollama, chuyển đổi 4 API key trong `ov.conf` sang biến môi trường Windows, hay cơ chế tự phục hồi của Port Guard)?
+
+---
+
+### YÊU CẦU ĐẦU RA TỪ NOTION AI
+1. Nhận định tổng quan và Đánh giá thứ tự ưu tiên (Priority Matrix: P1, P2, P3, Backlog).
+2. Phân tích phản biện rủi ro / lợi ích chi tiết cho 5 câu hỏi trên.
+3. Kế hoạch hành động khuyến nghị ngắn gọn, an toàn nhất để triển khai ngay.
