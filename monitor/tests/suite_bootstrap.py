@@ -70,7 +70,7 @@ def main():
     try:
         if uses_pytest:
             import pytest
-            return pytest.main(['-q','-p','no:cacheprovider',str(path)])
+            return pytest.main(['-q','-p','no:cacheprovider','--rootdir',str(path.parent),str(path)])
         actual_run(str(path),run_name='__main__')
         return 0
     finally:
