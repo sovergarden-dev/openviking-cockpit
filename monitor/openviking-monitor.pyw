@@ -1275,8 +1275,22 @@ def credential_identity(item: dict) -> tuple:
     return (item.get("model") or "", model_cache_key(item.get("api_base") or "", item.get("api_key") or ""))
 
 
-def validate_conf_targets(before: dict, after: dict) -> None:
-    """Monitor mutation boundary only; existing and top-level credentials are grandfathered."""
+def validate_conf_targets(before: dict, after: dict) -> list[dict]:
+    """Monitor mutation boundary; existing and top-level credentials are grandfathered.
+
+    Two admission standards, because a primary slot and a failover slot carry
+    different risk:
+
+    * slot 0 (primary) is the credential that writes memories by default, so it
+      must be memory-admitted (``memory_permitted`` true, no safety stop).
+    * slots >= 1 are failover. A conditional verdict (level 3, "dùng tạm", no
+      safety stop) is accepted with an explicit operator confirmation returned to
+      the caller — a dead backup slot is worse than a conditional one, and a
+      level-3 model can never satisfy the primary rule, which used to dead-lock
+      every edit of a broken backup slot.
+
+    Raises ValueError when a target may not be written at all. Never writes.
+    """
     existing = {credential_identity(item) for item in effective_credentials(before)}
 
     # Grandfather top-level vlm.model from before state (prevents slot-vs-top shadowing lockout)
@@ -1288,7 +1302,8 @@ def validate_conf_targets(before: dict, after: dict) -> None:
             "api_key": vlm_before.get("api_key") or ""
         }))
 
-    for item in effective_credentials(after):
+    conditional = []
+    for index, item in enumerate(effective_credentials(after)):
         identity = credential_identity(item)
         if identity in existing:
             continue
@@ -1297,12 +1312,26 @@ def validate_conf_targets(before: dict, after: dict) -> None:
             report = get_latest_audit_report(item["api_base"], item["model"], api_key=item["api_key"])
             verdict = report.get("verdict", {}) if isinstance(report, dict) else {}
             permitted = verdict.get("memory_permitted") is True and verdict.get("safety_stop") is False
+            level = verdict.get("verdict_level")
+            level_ok = type(level) is int and level >= 3
         except Exception:
-            permitted = False
+            permitted, level, level_ok, verdict = False, None, False, {}
         if not permitted:
-            raise ValueError("Chạy kiểm định an toàn trước cho đúng Base URL, model và API key. "
-                             "Cần báo cáo còn hạn, hợp lệ và cho phép memory; chưa ghi ov.conf.")
+            slot_name = "slot chính" if index == 0 else f"slot dự phòng {index}"
+            if index == 0 or not level_ok:
+                raise ValueError(
+                    f"Chạy kiểm định an toàn trước cho đúng Base URL, model và API key ({slot_name}). "
+                    "Cần báo cáo còn hạn, hợp lệ và cho phép memory; chưa ghi ov.conf."
+                )
+            conditional.append({
+                "slot": index,
+                "model": item.get("model") or "",
+                "api_base": item.get("api_base") or "",
+                "level": level,
+                "why": verdict.get("why") or "",
+            })
         existing.add(identity)
+    return conditional
 
 
 def apply_credentials(vlm: dict, creds: list[dict]) -> dict:
@@ -3195,9 +3224,26 @@ def run_gui(start_hidden: bool) -> None:
         try:
             raw = json.loads(CONF_PATH.read_text(encoding="utf-8"))
             candidate = mutator(copy.deepcopy(raw))
-            validate_conf_targets(raw, candidate)
+            conditional = validate_conf_targets(raw, candidate)
+            if conditional:
+                lines = "\n".join(
+                    f"• Slot dự phòng {item['slot']}: {short_model(item['model'])} — "
+                    f"MỨC {item['level']} (dùng tạm)\n  {item['why'][:180]}"
+                    for item in conditional
+                )
+                body = (
+                    "Model dự phòng chưa đạt chuẩn memory (chỉ MỨC 3 — dùng tạm):\n\n"
+                    f"{lines}\n\n"
+                    "Nó sẽ được dùng cho extraction khi slot chính lỗi, nên chất lượng memory "
+                    "có thể thấp hơn chuẩn.\nVẫn lưu vào ov.conf?"
+                )
+                if not messagebox.askyesno(WINDOW_TITLE, body, parent=root):
+                    log_app(f"slot edit conditional-admission declined slots={[i['slot'] for i in conditional]}")
+                    return False
             bak = backup_ov_conf("slot-edit")
             write_ov_conf(candidate)
+            if conditional:
+                log_app(f"slot edit conditional-admission accepted slots={[i['slot'] for i in conditional]}")
             log_app(f"slot edit backup={bak.name} note={note}")
             return True
         except Exception as e:
