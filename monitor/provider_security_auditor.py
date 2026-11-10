@@ -1522,6 +1522,9 @@ def launch_security_audit_ui(
     font_family: str = "Segoe UI",
     cached_report: Optional[Dict[str, Any]] = None,
     on_complete: Optional[Callable[[Dict[str, Any]], None]] = None,
+    on_failure: Optional[Callable[[str], None]] = None,
+    on_cancel: Optional[Callable[[], None]] = None,
+    close_on_complete: bool = False,
 ) -> None:
     """Khởi chạy hộp thoại kiểm định an toàn & ranh giới hành vi đa luồng non-blocking trên Tkinter."""
     import threading
@@ -1573,13 +1576,31 @@ def launch_security_audit_ui(
     events = queue.Queue()
     deadline = time.monotonic() + AUDIT_TIMEOUT_S
     finished = False
+    failure_notified = False
     try:
         scope = _cache_scope(api_base, model, api_key)
     except (ValueError, TypeError):
         scope = None
 
+    def notify_failure(code: str) -> None:
+        nonlocal failure_notified
+        if failure_notified or on_failure is None:
+            return
+        failure_notified = True
+        try:
+            on_failure(code)
+        except Exception:
+            pass
+
     def cancel_pending():
         stop_event.set()
+        if not finished:
+            notify_failure("AUDIT_CANCELLED")
+            if on_cancel is not None:
+                try:
+                    on_cancel()
+                except Exception:
+                    pass
         if not finished and scope is not None and cached_report is None:
             _invalidate_scope(scope)
 
@@ -1739,6 +1760,7 @@ def launch_security_audit_ui(
             status_var.set(code)
             status_lbl.configure(fg=c_bad)
             stop_btn.configure(state="disabled")
+            notify_failure(code)
 
     def run_worker():
         try:
@@ -1803,6 +1825,8 @@ def launch_security_audit_ui(
                             on_complete(current)
                         except Exception as exc:
                             terminal_error(f"COMPLETION_CALLBACK_FAILED: {type(exc).__name__}")
+                    if close_on_complete and not closed.is_set():
+                        close_dialog()
         except queue.Empty:
             pass
         if not finished and not closed.is_set():

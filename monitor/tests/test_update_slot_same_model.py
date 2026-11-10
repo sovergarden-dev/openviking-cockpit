@@ -1,6 +1,8 @@
 import ast
+import sys
 from pathlib import Path
 p = Path(__file__).resolve().parent.parent / 'openviking-monitor.pyw'
+sys.path.insert(0, str(p.parent))
 t = ast.parse(p.read_text(encoding="utf-8"))
 env = {"MAX_SLOTS": 4}
 for name in ("vlm_credentials_list", "apply_credentials", "update_slot", "append_slot"):

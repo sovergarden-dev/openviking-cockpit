@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,6 +13,7 @@ sys.path.insert(0, str(ROOT))
 import runpy
 import secret_store
 from secret_store import SecretStatus, dpapi_protect, dpapi_unprotect_strict
+import conf_gate
 
 class TestWritebackInvariants(unittest.TestCase):
     def setUp(self):
@@ -51,6 +53,14 @@ class TestWritebackInvariants(unittest.TestCase):
 
         # Load openviking-monitor namespace in safe isolation
         self.ns = runpy.run_path(str(ROOT / "openviking-monitor.pyw"), run_name="invariants_test")
+        self.ns["_validate_conf_targets_policy"] = conf_gate.validate_conf_targets
+        self.ns["AuditRequired"] = conf_gate.AuditRequired
+        self.ns["compute_conf_drift"] = conf_gate.compute_conf_drift
+        self.ns["validate_conf_targets"] = conf_gate.validate_conf_targets
+        import contextlib
+        self.ns["interprocess_file_lock"] = lambda _path: contextlib.nullcontext()
+        self.ns["safe_atomic_write_json"] = lambda path, data, **_kwargs: path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self.ns["backup_ov_conf"] = self._make_backup
         # Override paths in namespace and in functions' globals
         self.ns["CONF_PATH"] = self.conf_path
         self.ns["STATE_PATH"] = self.state_path
@@ -60,6 +70,11 @@ class TestWritebackInvariants(unittest.TestCase):
                 self.ns[fn_name].__globals__["CONF_PATH"] = self.conf_path
                 self.ns[fn_name].__globals__["STATE_PATH"] = self.state_path
                 self.ns[fn_name].__globals__["APP_DIR"] = self.app_dir
+
+    def _make_backup(self, reason):
+        backup = self.root / f"backup-{reason}.json"
+        backup.write_bytes(self.conf_path.read_bytes())
+        return backup
 
     def tearDown(self):
         if self._orig_userprofile is not None:
@@ -89,6 +104,94 @@ class TestWritebackInvariants(unittest.TestCase):
             self.assertNotIn("sk-super-secret-12345", saved_text)
         finally:
             os.environ.pop("MOCK_SLOT_KEY", None)
+
+    def test_checked_writer_rejects_stale_audit_snapshot_without_backup(self):
+        changed = json.loads(self.conf_path.read_text(encoding="utf-8"))
+        changed["vlm"]["model"] = "concurrent-model"
+        self.conf_path.write_text(json.dumps(changed), encoding="utf-8")
+        raw_candidate = json.loads(json.dumps(changed))
+        with self.assertRaisesRegex(RuntimeError, "changed during audit"):
+            self.ns["write_ov_conf_checked"](raw_candidate, "stale-digest")
+
+    def test_checked_writer_revalidates_policy_while_locked(self):
+        baseline = self.ns["read_ov_conf_raw"]()
+        candidate = json.loads(json.dumps(baseline))
+        candidate["vlm"]["credentials"][0]["model"] = "new-gemini-model"
+        # The policy must be invoked again by the checked writer under its lock.
+        validate_globals = self.ns["write_ov_conf_checked"].__globals__
+        original_policy = validate_globals["validate_conf_targets"]
+        policy = Mock(return_value=[])
+        validate_globals["validate_conf_targets"] = policy
+        try:
+            backup = self.ns["write_ov_conf_checked"](
+                candidate,
+                self.ns["_conf_digest"](baseline),
+                before=baseline,
+                expected_advisories=[],
+            )
+        finally:
+            validate_globals["validate_conf_targets"] = original_policy
+        policy.assert_called_once_with(baseline, candidate)
+        self.assertTrue(backup.is_file())
+        self.assertEqual(json.loads(self.conf_path.read_text(encoding="utf-8")), candidate)
+
+    def test_checked_writer_rolls_back_only_its_own_failed_publish(self):
+        baseline = self.ns["read_ov_conf_raw"]()
+        candidate = json.loads(json.dumps(baseline))
+        candidate["vlm"]["credentials"][0]["model"] = "partial-write-model"
+        writer_globals = self.ns["write_ov_conf_checked"].__globals__
+        old_writer = writer_globals["safe_atomic_write_json"]
+        calls = {"count": 0}
+        def fail_after_publish(path, data, **kwargs):
+            calls["count"] += 1
+            old_writer(path, data, **kwargs)
+            if calls["count"] == 1:
+                raise OSError("injected post-publish failure")
+        writer_globals["safe_atomic_write_json"] = fail_after_publish
+        writer_globals["validate_conf_targets"] = lambda _before, _after: []
+        try:
+            with self.assertRaisesRegex(OSError, "injected post-publish"):
+                self.ns["write_ov_conf_checked"](
+                    candidate,
+                    self.ns["_conf_digest"](baseline),
+                    before=baseline,
+                    expected_advisories=[],
+                )
+        finally:
+            writer_globals["safe_atomic_write_json"] = old_writer
+            writer_globals["validate_conf_targets"] = conf_gate.validate_conf_targets
+        self.assertEqual(json.loads(self.conf_path.read_text(encoding="utf-8")), baseline)
+
+    def test_checked_writer_preserves_newer_concurrent_content_on_rollback_path(self):
+        baseline = self.ns["read_ov_conf_raw"]()
+        candidate = json.loads(json.dumps(baseline))
+        candidate["vlm"]["credentials"][0]["model"] = "attempted-model"
+        concurrent = json.loads(json.dumps(baseline))
+        concurrent["vlm"]["credentials"][0]["model"] = "concurrent-newer-model"
+        writer_globals = self.ns["write_ov_conf_checked"].__globals__
+        old_writer = writer_globals["safe_atomic_write_json"]
+        calls = {"count": 0}
+        def simulate_concurrent_change(path, data, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                path.write_text(json.dumps(concurrent, indent=2), encoding="utf-8")
+                raise OSError("injected write failure after concurrent edit")
+            return old_writer(path, data, **kwargs)
+        writer_globals["safe_atomic_write_json"] = simulate_concurrent_change
+        writer_globals["validate_conf_targets"] = lambda _before, _after: []
+        try:
+            with self.assertRaisesRegex(RuntimeError, "newer contents were preserved"):
+                self.ns["write_ov_conf_checked"](
+                    candidate,
+                    self.ns["_conf_digest"](baseline),
+                    before=baseline,
+                    expected_advisories=[],
+                )
+        finally:
+            writer_globals["safe_atomic_write_json"] = old_writer
+            writer_globals["validate_conf_targets"] = conf_gate.validate_conf_targets
+        self.assertEqual(json.loads(self.conf_path.read_text(encoding="utf-8")), concurrent)
 
     def test_write_ov_conf_rejects_dpapi_cipher(self):
         """write_ov_conf rejects any credential starting with dpapi:."""

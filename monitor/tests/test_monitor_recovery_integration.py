@@ -10,6 +10,9 @@ import types
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import conf_gate
 
 SOURCE = Path(__file__).resolve().parents[1] / 'openviking-monitor.pyw'
 TREE = ast.parse(SOURCE.read_text(encoding='utf-8'))
@@ -80,21 +83,29 @@ class MutationGateRecoveryTests(unittest.TestCase):
         self.module_patch.start()
         self.addCleanup(self.module_patch.stop)
         self.env = load_functions(CONF_PATH=self.path, backup_ov_conf=Mock(return_value=Path('fixture-backup')),
-                                  write_ov_conf=Mock(), log_app=Mock(), messagebox=Mock())
+                                  write_ov_conf=Mock(), write_ov_conf_checked=Mock(return_value=Path('fixture-backup')),
+                                  log_app=Mock(), messagebox=Mock(), AuditRequired=conf_gate.AuditRequired,
+                                  _validate_conf_targets_policy=conf_gate.validate_conf_targets,
+                                  compute_conf_drift=conf_gate.compute_conf_drift,
+                                  conf_digest=Mock(return_value='fixture-digest'),
+                                  start_inline_audit=Mock())
+        self.reader.reset_mock()
         self.apply = nested(self.env, 'apply_conf_edit')
 
     def accepted(self):
-        return {'verdict': {'classifier_version': 'current-validator-version', 'verdict_level': 4,
-                            'memory_permitted': True, 'safety_stop': False}}
+        return {'report_age_s': 1, 'verdict': {'classifier_version': 'current-validator-version', 'verdict_level': 4,
+                                               'memory_permitted': True, 'safety_stop': False}}
 
     def test_missing_audit_blocks_before_backup_and_write(self):
         self.assertFalse(self.apply(lambda raw: self.env['append_slot'](raw, 'new'), 'fixture edit'))
         self.env['backup_ov_conf'].assert_not_called()
         self.env['write_ov_conf'].assert_not_called()
-        self.reader.assert_called_once_with('https://a.invalid/Path', 'new', api_key='fixture-a')
-        message = self.env['messagebox'].showerror.call_args.args[1]
-        self.assertIn('kiểm định', message)
-        self.assertNotIn('fixture-a', message)
+        self.reader.assert_called_once_with('https://a.invalid/Path', 'new',
+                                            max_age_s=conf_gate.AUDIT_TTL_STALE_PROBE_S,
+                                            api_key='fixture-a')
+        self.env['start_inline_audit'].assert_called_once()
+        self.env['backup_ov_conf'].assert_not_called()
+        self.env['write_ov_conf_checked'].assert_not_called()
 
     def test_changed_key_path_model_require_exact_fresh_validation(self):
         for field, value in [('api_key', 'fixture-b'), ('api_base', 'https://a.invalid/path'), ('model', 'new')]:
@@ -112,18 +123,25 @@ class MutationGateRecoveryTests(unittest.TestCase):
     def test_validated_report_permits_and_unchanged_policy_needs_none(self):
         self.reader.return_value = self.accepted()
         self.assertTrue(self.apply(lambda raw: self.env['append_slot'](raw, 'new'), 'fixture edit'))
-        self.reader.assert_called_once_with('https://a.invalid/Path', 'new', api_key='fixture-a')
+        self.reader.assert_called_once_with('https://a.invalid/Path', 'new',
+                                            max_age_s=conf_gate.AUDIT_TTL_STALE_PROBE_S,
+                                            api_key='fixture-a')
         self.reader.reset_mock()
         self.reader.return_value = None
         self.assertTrue(self.apply(lambda raw: self.env['update_failback'](raw, 2, 3, 4), 'policy'))
         self.reader.assert_not_called()
 
-    def test_reorder_effective_credentials_does_not_freeze_existing_slots(self):
+    def test_promoting_existing_backup_to_primary_requires_primary_admission(self):
         raw = config()
-        raw['vlm']['credentials'].append({'model': 'second'})
+        raw['vlm']['credentials'].append({'id': 'second-slot', 'model': 'second', 'api_base': 'https://b.invalid/v1', 'api_key': 'fixture-b'})
+        raw['vlm']['credentials'][0]['id'] = 'first-slot'
         self.path.write_text(json.dumps(raw), encoding='utf-8')
-        self.assertTrue(self.apply(lambda value: self.env['swap_slots'](value, 0, 1), 'reorder'))
-        self.reader.assert_not_called()
+        self.reader.return_value = self.accepted()
+        self.assertTrue(self.apply(lambda value: self.env['swap_slots'](value, 0, 1), 'promote'))
+        self.reader.assert_called_once_with('https://b.invalid/v1', 'second',
+                                            max_age_s=conf_gate.AUDIT_TTL_STALE_PROBE_S,
+                                            api_key='fixture-b')
+        self.env['write_ov_conf_checked'].assert_called_once()
 
     def test_validator_failure_is_closed_without_exception_secret(self):
         self.reader.side_effect = RuntimeError('fixture-secret-do-not-display')
@@ -189,9 +207,12 @@ class BadgeRecoveryTests(unittest.TestCase):
 
     def test_all_audit_launches_refresh_on_completion_and_reader_has_key(self):
         launches = [n for n in ast.walk(TREE) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'launch_security_audit_ui']
-        self.assertEqual(3, len(launches))
+        self.assertEqual(4, len(launches))
         for launch in launches:
             self.assertIn('on_complete', [kw.arg for kw in launch.keywords])
+        inline = [node for node in launches if any(kw.arg == 'close_on_complete' for kw in node.keywords)]
+        self.assertEqual(1, len(inline))
+        self.assertIn('on_failure', [kw.arg for kw in inline[0].keywords])
         reads = [n for n in ast.walk(TREE) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'get_latest_audit_report']
         for read in reads:
             self.assertIn('api_key', [kw.arg for kw in read.keywords])

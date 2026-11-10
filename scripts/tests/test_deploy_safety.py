@@ -54,6 +54,20 @@ class DeploymentSafetyTests(unittest.TestCase):
             self.assertTrue(all((dest/n).read_bytes()==b'old source' for n in module.CORE_FILES))
             self.assertEqual((dest/'monitor.json').read_text(), 'protected')
 
+    def test_monitor_text_plan_ignores_line_ending_only_drift(self):
+        module = self.load_sync()
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as directory:
+            base = Path(directory)
+            source, dest = base/'source', base/'dest'
+            source.mkdir(); dest.mkdir()
+            for name in module.CORE_FILES:
+                payload = b'line one\r\nline two\r\n' if name.endswith(('.py', '.pyw')) else b'opaque binary\x00\xff'
+                (source/name).write_bytes(payload)
+                (dest/name).write_bytes(payload.replace(b'\r\n', b'\n') if name.endswith(('.py', '.pyw')) else payload)
+            plan = module.make_plan(source, dest)
+            self.assertEqual(plan['changed_count'], 0)
+            self.assertTrue(all(not row['changed'] for row in plan['files']))
+
     def test_plan_rejects_destination_drift(self):
         module = self.load_sync()
         with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as directory:

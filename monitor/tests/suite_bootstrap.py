@@ -44,7 +44,7 @@ def main():
                     'queue':{},'vectors':{'count':10},'usage':{},'retrieval':{},'conf':conf,
                     'listeners':{'ov':[{'pid':'4242','addr':'127.0.0.1:19330'}],'ollama':[],'gateway':[]},
                     'task':{'status':'Ready','last_result':'0'},'issues':[],'failover':False,'active':0,
-                    'live':{'index':0,'n':1,'manual_hold':False,'credential_ids':['legacy-primary']},'failover_detail':'',
+                    'live':{'index':0,'n':1,'manual_hold':False,'credential_ids':['credential-0']},'failover_detail':'',
                     'ov_down_since':None,'ov_procs':None}
         def no_probe(*args,**kwargs):
             raise RuntimeError('Real provider probes forbidden in tests')

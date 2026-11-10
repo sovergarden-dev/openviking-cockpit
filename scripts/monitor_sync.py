@@ -11,14 +11,36 @@ import tempfile
 from datetime import datetime, timezone
 import uuid
 
-CORE_FILES = ('secret_store.py', 'safe_write.py',
+CORE_FILES = ('secret_store.py', 'safe_write.py', 'conf_gate.py',
               'provider_security_auditor.py', 'reference_core_v31.py',
               'reserve_table.py', 'openviking_monitor_notification.py',
               'openviking.ico', 'openviking-monitor.pyw')
 
 
+TEXT_SYNC_SUFFIXES = {'.py', '.pyw'}
+
+
+def _content_sha(path: Path, raw: bytes) -> str:
+    if path.suffix.casefold() in TEXT_SYNC_SUFFIXES:
+        if raw.startswith(bytes((239, 187, 191))):
+            raw = raw[3:]
+        normalized = bytearray()
+        index = 0
+        while index < len(raw):
+            byte = raw[index]
+            if byte == 13:
+                normalized.append(10)
+                index += 2 if index + 1 < len(raw) and raw[index + 1] == 10 else 1
+            else:
+                normalized.append(byte)
+                index += 1
+        raw = bytes(normalized)
+    return hashlib.sha256(raw).hexdigest()
+
+
 def sha(path: Path) -> str | None:
-    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+    """Hash Python text canonically to avoid deploying newline-only rewrites."""
+    return _content_sha(path, path.read_bytes()) if path.is_file() else None
 
 
 def safe_child(root: Path, relative: str) -> Path:
@@ -97,7 +119,7 @@ def apply_plan(plan: dict, backup_root: Path, *, check_running: bool = True) -> 
         name = row['path']
         src, target = safe_child(source,name), safe_child(dest,name)
         payloads[name] = src.read_bytes()
-        if hashlib.sha256(payloads[name]).hexdigest() != row['source_sha256'] or sha(target) != row['destination_sha256']:
+        if _content_sha(src, payloads[name]) != row['source_sha256'] or sha(target) != row['destination_sha256']:
             raise RuntimeError('Concurrent source/destination drift before backup')
         if target.is_file():
             _publish(backup/'original'/name,target.read_bytes())
@@ -115,7 +137,7 @@ def apply_plan(plan: dict, backup_root: Path, *, check_running: bool = True) -> 
                 raise RuntimeError('Concurrent destination drift during publish')
             applied.append(row)
             _publish(target,payloads[name])
-            if sha(target) != row['source_sha256']:
+            if _content_sha(target, target.read_bytes()) != row['source_sha256']:
                 raise RuntimeError('Post-write verification failed')
         receipt['status']='applied'
         _publish(backup/'receipt.json',json.dumps(receipt,indent=2).encode())

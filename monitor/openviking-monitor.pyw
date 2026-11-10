@@ -13,6 +13,7 @@ if str(_APP_DIR) not in sys.path:
 
 import ctypes
 import copy
+import hashlib
 import json
 import os
 import queue
@@ -29,6 +30,7 @@ from ctypes import wintypes
 from datetime import datetime, timezone
 
 from openviking_monitor_notification import NotificationController
+from conf_gate import AuditRequired, compute_conf_drift, validate_conf_targets as _validate_conf_targets_policy
 
 CREATE_NO_WINDOW = 0x08000000
 MUTEX_NAME = "Local\\OpenVikingMonitor.rurus"
@@ -727,7 +729,7 @@ def redact(text: str) -> str:
 def _slot(index: int, model, api_base, api_key, cid=None) -> dict:
     return {
         "index": index,
-        "id": cid or f"slot-{index}",
+        "id": cid or f"credential-{index}",
         "model": model,
         "api_base": api_base,
         "api_key": api_key,
@@ -787,15 +789,15 @@ def read_ov_conf(resolve_env: bool = False) -> dict:
     elif isinstance(vlm.get("backup"), dict) and vlm["backup"].get("model"):
         b = vlm["backup"]
         slots = [
-            _slot(0, vlm.get("model"), vlm.get("api_base"), vlm.get("api_key"), "legacy-primary"),
-            _slot(1, b.get("model"), b.get("api_base") or vlm.get("api_base"), b.get("api_key") or vlm.get("api_key"), "legacy-backup"),
+            _slot(0, vlm.get("model"), vlm.get("api_base"), vlm.get("api_key"), "credential-0"),
+            _slot(1, b.get("model"), b.get("api_base") or vlm.get("api_base"), b.get("api_key") or vlm.get("api_key"), "credential-1"),
         ]
         info["api_key"] = vlm.get("api_key")
         info["backup_api_key"] = slots[1]["api_key"]
         info["backup_api_base"] = slots[1]["api_base"]
     else:
         if vlm.get("model"):
-            slots = [_slot(0, vlm.get("model"), vlm.get("api_base"), vlm.get("api_key"), "default")]
+            slots = [_slot(0, vlm.get("model"), vlm.get("api_base"), vlm.get("api_key"), "credential-0")]
         info["api_key"] = vlm.get("api_key")
     info["slots"] = slots
     if len(slots) > 1:
@@ -1019,6 +1021,7 @@ def collect(include_ready: bool = False) -> dict:
                     active = int(s.get("index") or 0)
                     break
     failover = active > 0
+    config_drift = compute_conf_drift(slots, live)
     snap = {
         "ts": time.time(),
         "elapsed_ms": int((time.perf_counter() - t0) * 1000),
@@ -1043,6 +1046,7 @@ def collect(include_ready: bool = False) -> dict:
         "failover": failover,
         "active": active,
         "live": live,
+        "config_drift": config_drift,
         "failover_detail": issues["detail"],
         "ov_down_since": OV_DOWN["since"],
         "ov_procs": OV_DOWN["procs"],
@@ -1099,6 +1103,8 @@ def sentence(snap: dict) -> tuple[str, str]:
         return "Ollama sập · retrieval đọc vector cũ, extraction thì không", "warn"
     if not gw:
         return "Cổng model 20128 không LISTEN · VLM sẽ lỗi", "warn"
+    if snap.get("config_drift", {}).get("drift"):
+        return "ov.conf khác chuỗi slot đang nạp · kiểm tra trước khi restart", "warn"
     if snap.get("failover"):
         if using.strip().casefold() == primary.strip().casefold():
             return f"Đang failover sang {using} · đang kiểm tra", "warn"
@@ -1237,12 +1243,70 @@ def write_ov_conf(raw: dict) -> None:
         safe_atomic_write_json(CONF_PATH, raw, indent=2, restrict_acl=True)
 
 
+def _conf_digest(raw: dict) -> str:
+    payload = json.dumps(raw, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def write_ov_conf_checked(
+    raw: dict,
+    expected_digest: str,
+    reason: str = "slot-edit",
+    *,
+    before: dict | None = None,
+    expected_advisories: list[dict] | None = None,
+) -> Path:
+    """Atomically write only if the config and admission result still match."""
+    vlm = raw.get("vlm") or {}
+    top_key = vlm.get("api_key") or ""
+    if isinstance(top_key, str) and top_key.strip().startswith("dpapi:"):
+        raise ValueError("ov.conf cannot contain DPAPI ciphertext")
+    creds = vlm.get("credentials")
+    if isinstance(creds, list):
+        for index, item in enumerate(creds):
+            if isinstance(item, dict) and (item.get("api_key") or "").strip().startswith("dpapi:"):
+                raise ValueError(f"Slot {index} cannot write DPAPI ciphertext to ov.conf")
+
+    lock_path = APP_DIR / ".ov-writer.lock"
+    with interprocess_file_lock(lock_path):
+        current_raw = json.loads(CONF_PATH.read_text(encoding="utf-8"))
+        if _conf_digest(current_raw) != expected_digest:
+            raise RuntimeError("ov.conf changed during audit; no write was made")
+        if before is not None:
+            if _conf_digest(before) != expected_digest:
+                raise RuntimeError("Validated baseline does not match audited configuration")
+            conditional = validate_conf_targets(before, raw)
+            if conditional != (expected_advisories or []):
+                raise RuntimeError("Admission result changed during final write check")
+        backup = backup_ov_conf(reason)
+        try:
+            safe_atomic_write_json(CONF_PATH, raw, indent=2, restrict_acl=True)
+            written = json.loads(CONF_PATH.read_text(encoding="utf-8"))
+            if _conf_digest(written) != _conf_digest(raw):
+                raise RuntimeError("Post-write verification failed")
+        except Exception as write_error:
+            try:
+                observed = json.loads(CONF_PATH.read_text(encoding="utf-8"))
+            except Exception as read_error:
+                raise RuntimeError(f"Write failed and current config cannot be verified; backup retained at {backup}") from read_error
+            observed_digest = _conf_digest(observed)
+            if observed_digest == _conf_digest(raw):
+                safe_atomic_write_json(CONF_PATH, current_raw, indent=2, restrict_acl=True)
+                restored = json.loads(CONF_PATH.read_text(encoding="utf-8"))
+                if _conf_digest(restored) != expected_digest:
+                    raise RuntimeError(f"Write failed and automatic rollback could not be verified; backup retained at {backup}") from write_error
+            elif observed_digest != expected_digest:
+                raise RuntimeError(f"Write failed after another config change; newer contents were preserved and backup retained at {backup}") from write_error
+            raise
+    return backup
+
+
 def vlm_credentials_list(vlm: dict) -> list[dict]:
     creds = vlm.get("credentials")
     if isinstance(creds, list) and creds:
         return [dict(c) for c in creds]
     out = [{
-        "id": "legacy-primary",
+        "id": "credential-0",
         "provider": vlm.get("provider"),
         "model": vlm.get("model"),
         "api_key": vlm.get("api_key"),
@@ -1251,7 +1315,7 @@ def vlm_credentials_list(vlm: dict) -> list[dict]:
     b = vlm.get("backup")
     if isinstance(b, dict) and b.get("model"):
         out.append({
-            "id": "legacy-backup",
+            "id": "credential-1",
             "provider": b.get("provider") or vlm.get("provider"),
             "model": b.get("model"),
             "api_key": b.get("api_key") or vlm.get("api_key"),
@@ -1276,62 +1340,9 @@ def credential_identity(item: dict) -> tuple:
 
 
 def validate_conf_targets(before: dict, after: dict) -> list[dict]:
-    """Monitor mutation boundary; existing and top-level credentials are grandfathered.
+    """Compatibility adapter for the standalone admission policy."""
+    return _validate_conf_targets_policy(before, after)
 
-    Two admission standards, because a primary slot and a failover slot carry
-    different risk:
-
-    * slot 0 (primary) is the credential that writes memories by default, so it
-      must be memory-admitted (``memory_permitted`` true, no safety stop).
-    * slots >= 1 are failover. A conditional verdict (level 3, "dùng tạm", no
-      safety stop) is accepted with an explicit operator confirmation returned to
-      the caller — a dead backup slot is worse than a conditional one, and a
-      level-3 model can never satisfy the primary rule, which used to dead-lock
-      every edit of a broken backup slot.
-
-    Raises ValueError when a target may not be written at all. Never writes.
-    """
-    existing = {credential_identity(item) for item in effective_credentials(before)}
-
-    # Grandfather top-level vlm.model from before state (prevents slot-vs-top shadowing lockout)
-    vlm_before = before.get("vlm") or {}
-    if vlm_before.get("model"):
-        existing.add(credential_identity({
-            "model": vlm_before.get("model"),
-            "api_base": vlm_before.get("api_base") or "",
-            "api_key": vlm_before.get("api_key") or ""
-        }))
-
-    conditional = []
-    for index, item in enumerate(effective_credentials(after)):
-        identity = credential_identity(item)
-        if identity in existing:
-            continue
-        try:
-            from provider_security_auditor import get_latest_audit_report
-            report = get_latest_audit_report(item["api_base"], item["model"], api_key=item["api_key"])
-            verdict = report.get("verdict", {}) if isinstance(report, dict) else {}
-            permitted = verdict.get("memory_permitted") is True and verdict.get("safety_stop") is False
-            level = verdict.get("verdict_level")
-            level_ok = type(level) is int and level >= 3
-        except Exception:
-            permitted, level, level_ok, verdict = False, None, False, {}
-        if not permitted:
-            slot_name = "slot chính" if index == 0 else f"slot dự phòng {index}"
-            if index == 0 or not level_ok:
-                raise ValueError(
-                    f"Chạy kiểm định an toàn trước cho đúng Base URL, model và API key ({slot_name}). "
-                    "Cần báo cáo còn hạn, hợp lệ và cho phép memory; chưa ghi ov.conf."
-                )
-            conditional.append({
-                "slot": index,
-                "model": item.get("model") or "",
-                "api_base": item.get("api_base") or "",
-                "level": level,
-                "why": verdict.get("why") or "",
-            })
-        existing.add(identity)
-    return conditional
 
 
 def apply_credentials(vlm: dict, creds: list[dict]) -> dict:
@@ -1378,8 +1389,10 @@ def append_slot(raw: dict, model: str, api_base: str | None = None, api_key: str
         raise ValueError("Model + Base URL đã có trong danh sách")
     if len(creds) >= MAX_SLOTS:
         raise ValueError(f"Tối đa {MAX_SLOTS} model")
+    from conf_gate import credential_id
     creds.append({
-        "id": f"backup-{len(creds)}",
+        "id": credential_id(model, (api_base or "").strip() or old_base,
+                            (api_key or "").strip() or src.get("api_key") or vlm.get("api_key")),
         "provider": src.get("provider") or "openai",
         "model": model,
         "api_key": (api_key or "").strip() or src.get("api_key") or vlm.get("api_key"),
@@ -1398,23 +1411,34 @@ def update_slot(raw: dict, index: int, model: str, api_base: str | None = None, 
     if index < 0 or index >= len(creds):
         raise ValueError("Slot không tồn tại")
     from urllib.parse import urlsplit
+    from conf_gate import credential_id
+
     def endpoint(value):
         parsed = urlsplit((value or "").strip())
         return parsed._replace(scheme=parsed.scheme.lower(), netloc=parsed.netloc.lower(),
                                path=parsed.path.rstrip("/"), fragment="").geturl()
+
     old_base = creds[index].get("api_base") or vlm.get("api_base") or ""
+    old_model = creds[index].get("model") or (vlm.get("model") if index == 0 else None)
+    old_key = creds[index].get("api_key") or vlm.get("api_key") or ""
+    old_fingerprint = credential_id(old_model, endpoint(old_base), old_key)
     new_base = endpoint(api_base or old_base)
     if not (api_key or "").strip() and new_base != endpoint(old_base):
         raise ValueError("Base URL đã đổi; nhập API key cho endpoint mới")
-    for i, c in enumerate(creds):
-        if i != index and (c.get("model") or "") == model and endpoint(c.get("api_base") or vlm.get("api_base")) == new_base:
+    for i, item in enumerate(creds):
+        if i != index and (item.get("model") or "") == model and endpoint(item.get("api_base") or vlm.get("api_base")) == new_base:
             raise ValueError("Model + Base URL đã có trong danh sách")
+
     creds[index]["model"] = model
     if (api_base or "").strip():
         creds[index]["api_base"] = api_base.strip()
     if (api_key or "").strip():
-        # Retain env-var references untouched if already configured
         creds[index]["api_key"] = api_key.strip()
+    new_key = creds[index].get("api_key") or vlm.get("api_key") or ""
+    effective_base = endpoint(creds[index].get("api_base") or vlm.get("api_base") or "")
+    new_fingerprint = credential_id(model, effective_base, new_key)
+    if new_fingerprint != old_fingerprint:
+        creds[index]["id"] = new_fingerprint
     raw["vlm"] = apply_credentials(vlm, creds)
     return raw
 
@@ -3220,11 +3244,105 @@ def run_gui(start_hidden: bool) -> None:
         current["snap"] = snap
         paint(snap)
 
-    def apply_conf_edit(mutator, note: str) -> bool:
+    def conf_digest(raw: dict) -> str:
+        payload = json.dumps(raw, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def start_inline_audit(request: AuditRequired, mutator, note: str, detail: str, expected_digest: str, finish_action: str):
+        if current["restarting"]:
+            return
+        credentials = list(request._audit_credentials)
+        if not credentials:
+            messagebox.showerror(WINDOW_TITLE, "Không có đủ thông tin để kiểm định; ov.conf chưa được ghi.", parent=root)
+            return
+        from provider_security_auditor import launch_security_audit_ui
+        colors_dict = dict(bg=C_BG, surface=C_SURFACE, ink=C_INK, muted=C_MUTED, line=C_LINE, accent=C_ACCENT, ok=C_OK, bad=C_BAD, warn=C_WARN, btn=C_BTN)
+        pending = {"index": 0, "failed": False}
+
+        def fail_audit(code: str):
+            pending["failed"] = True
+            safe_code = redact(code)
+            log_app(f"slot edit inline-audit failed code={safe_code}")
+            foot_var.set("Kiểm định chưa hoàn tất; ov.conf chưa được ghi")
+            root.after(0, lambda c=safe_code: messagebox.showerror(
+                WINDOW_TITLE, f"Kiểm định chưa hoàn tất ({c}). ov.conf chưa được ghi.", parent=root))
+
+        def show_next_audit():
+            if pending["failed"] or current["restarting"]:
+                return
+            index = pending["index"]
+            if index >= len(credentials):
+                try:
+                    if not apply_conf_edit(
+                        mutator, note, detail,
+                        finish_action=finish_action,
+                        expected_digest=expected_digest,
+                        allow_inline_audit=False,
+                    ):
+                        return
+                    if finish_action == "save":
+                        mark_pending(note)
+                    else:
+                        begin_restart(None, note)
+                except Exception as exc:
+                    code = type(exc).__name__
+                    log_app(f"slot edit inline-audit commit {code}")
+                    foot_var.set(f"Kiểm định xong nhưng chưa ghi ov.conf: {code}")
+                    messagebox.showerror(WINDOW_TITLE, f"Kiểm định đã xong nhưng cấu hình chưa được ghi ({code}).", parent=root)
+                return
+
+            target = credentials[index]
+            model = target.get("model") or ""
+            base = target.get("api_base") or ""
+            key = target.get("api_key") or ""
+            if not model or not base or not key:
+                pending["failed"] = True
+                messagebox.showerror(WINDOW_TITLE, "Model, endpoint hoặc API key không hợp lệ; ov.conf chưa được ghi.", parent=root)
+                return
+
+            def audit_complete(_report):
+                pending["index"] += 1
+                root.after(0, show_next_audit)
+
+            def audit_failure(code):
+                pending["failed"] = True
+                log_app(f"slot edit inline-audit failed code={redact(code)}")
+                root.after(0, lambda c=redact(code): messagebox.showerror(
+                    WINDOW_TITLE, f"Kiểm định chưa hoàn tất ({c}). ov.conf chưa được ghi.", parent=root))
+
+            launch_security_audit_ui(
+                root, base, key, model,
+                colors=colors_dict,
+                font_family=FONT,
+                on_complete=audit_complete,
+                on_failure=audit_failure,
+                close_on_complete=True,
+            )
+
+        show_next_audit()
+
+    def apply_conf_edit(
+        mutator,
+        note: str,
+        detail: str = "",
+        *,
+        finish_action: str = "save",
+        expected_digest: str | None = None,
+        allow_inline_audit: bool = True,
+    ) -> bool:
         try:
             raw = json.loads(CONF_PATH.read_text(encoding="utf-8"))
+            observed_digest = conf_digest(raw)
+            if expected_digest is not None and observed_digest != expected_digest:
+                raise RuntimeError("ov.conf changed during audit; no write was made")
             candidate = mutator(copy.deepcopy(raw))
-            conditional = validate_conf_targets(raw, candidate)
+            try:
+                conditional = validate_conf_targets(raw, candidate)
+            except AuditRequired as request:
+                if not allow_inline_audit:
+                    raise RuntimeError("A fresh audit is required after revalidation; no write was made")
+                start_inline_audit(request, mutator, note, detail, observed_digest, finish_action)
+                return False
             if conditional:
                 lines = "\n".join(
                     f"• Slot dự phòng {item['slot']}: {short_model(item['model'])} — "
@@ -3240,8 +3358,13 @@ def run_gui(start_hidden: bool) -> None:
                 if not messagebox.askyesno(WINDOW_TITLE, body, parent=root):
                     log_app(f"slot edit conditional-admission declined slots={[i['slot'] for i in conditional]}")
                     return False
-            bak = backup_ov_conf("slot-edit")
-            write_ov_conf(candidate)
+            bak = write_ov_conf_checked(
+                candidate,
+                observed_digest,
+                reason="slot-edit",
+                before=raw,
+                expected_advisories=conditional,
+            )
             if conditional:
                 log_app(f"slot edit conditional-admission accepted slots={[i['slot'] for i in conditional]}")
             log_app(f"slot edit backup={bak.name} note={note}")
@@ -3301,7 +3424,7 @@ def run_gui(start_hidden: bool) -> None:
             return
         if parent:
             parent.destroy()
-        if not apply_conf_edit(mutator, note):
+        if not apply_conf_edit(mutator, note, detail=detail, finish_action=choice):
             return
         if choice == "save":
             mark_pending(note)
