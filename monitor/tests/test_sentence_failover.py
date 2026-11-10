@@ -38,6 +38,21 @@ assert text.count("gemini-3.8-flash-high") == 1, f'tên model bị lặp: {text!
 text, tone = sentence(base(failover=False))
 assert tone == "ok" and text.startswith("Khỏe · "), (text, tone)
 
+# Drift must be visible before restart, but hard service outages take priority.
+drift = base(config_drift={"drift": True, "reason": "fixture"})
+text, tone = sentence(drift)
+assert text == "ov.conf khác chuỗi slot đang nạp · kiểm tra trước khi restart" and tone == "warn", (text, tone)
+
+openviking_down_with_drift = base(ov_up=False, config_drift={"drift": True, "reason": "fixture"})
+openviking_down_with_drift["ov_procs"] = 0
+openviking_down_with_drift["task"] = {"status": "Ready"}
+text, tone = sentence(openviking_down_with_drift)
+assert text == "OpenViking đang tắt · bấm Chạy OpenViking" and tone == "warn", (text, tone)
+
+gateway_down_with_drift = base(gateway_up=False, config_drift={"drift": True, "reason": "fixture"})
+text, tone = sentence(gateway_down_with_drift)
+assert text == "Cổng model 20128 không LISTEN · VLM sẽ lỗi" and tone == "warn", (text, tone)
+
 # Watchdog treo socket: cổng đóng lâu mà tiến trình còn sống -> chẩn đoán rõ, tone bad
 hang = base(ov_up=False)
 hang["ov_procs"] = 3

@@ -143,6 +143,103 @@ class MutationGateRecoveryTests(unittest.TestCase):
                                             api_key='fixture-b')
         self.env['write_ov_conf_checked'].assert_called_once()
 
+    def test_inline_audit_runs_targets_sequentially_and_commits_after_revalidation(self):
+        baseline = config()
+        self.path.write_text(json.dumps(baseline), encoding='utf-8')
+        callbacks = []
+        launches = []
+        reports = {}
+        self.reader.side_effect = lambda base, model, max_age_s=None, api_key=None: reports.get((base, model, api_key))
+        self.auditor.get_latest_audit_report = self.reader
+        def launch(_parent, base, key, model, **kwargs):
+            launches.append((base, key, model, kwargs))
+        self.auditor.launch_security_audit_ui = launch
+        self.module_patch.stop()
+        self.module_patch = patch.dict(sys.modules, provider_security_auditor=self.auditor)
+        self.module_patch.start()
+        self.addCleanup(self.module_patch.stop)
+        root = types.SimpleNamespace(after=lambda _delay, callback: callbacks.append(callback))
+        foot_var = Mock()
+        checked_write = Mock(return_value=Path('fixture-backup'))
+        self.env.update(
+            root=root,
+            current={'restarting': False, 'pending': None, 'snap': None},
+            foot_var=foot_var,
+            redact=lambda value: value,
+            C_BG='bg', C_SURFACE='surface', C_INK='ink', C_MUTED='muted', C_LINE='line',
+            C_ACCENT='accent', C_OK='ok', C_BAD='bad', C_WARN='warn', C_BTN='button', FONT='font',
+            write_ov_conf_checked=checked_write,
+            mark_pending=Mock(), begin_restart=Mock(),
+            conf_digest=lambda raw: __import__('hashlib').sha256(
+                json.dumps(raw, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+            ).hexdigest(),
+        )
+        self.env['write_ov_conf_checked'] = checked_write
+        self.env['start_inline_audit'] = nested(self.env, 'start_inline_audit')
+        self.apply = nested(self.env, 'apply_conf_edit')
+        def mutate(raw):
+            raw['vlm']['credentials'].extend([
+                {'id': 'new-one', 'model': 'backup-one', 'api_base': 'https://b.invalid/v1', 'api_key': 'fixture-b'},
+                {'id': 'new-two', 'model': 'backup-two', 'api_base': 'https://c.invalid/v1', 'api_key': 'fixture-c'},
+            ])
+            return raw
+
+        self.assertFalse(self.apply(mutate, 'add two backups'))
+        self.assertEqual(1, len(launches))
+        self.assertEqual(('https://b.invalid/v1', 'fixture-b', 'backup-one'), launches[0][:3])
+        self.assertTrue(launches[0][3]['close_on_complete'])
+        self.assertFalse(checked_write.called)
+
+        reports[('https://b.invalid/v1', 'backup-one', 'fixture-b')] = self.accepted()
+        launches[0][3]['on_complete'](self.accepted())
+        self.assertEqual(1, len(callbacks))
+        callbacks.pop(0)()
+        self.assertEqual(2, len(launches))
+        self.assertEqual(('https://c.invalid/v1', 'fixture-c', 'backup-two'), launches[1][:3])
+        self.assertFalse(checked_write.called)
+
+        reports[('https://c.invalid/v1', 'backup-two', 'fixture-c')] = self.accepted()
+        launches[1][3]['on_complete'](self.accepted())
+        callbacks.pop(0)()
+        checked_write.assert_called_once()
+        self.env['mark_pending'].assert_called_once_with('add two backups')
+        self.assertEqual(2, len(launches), 'revalidation must not reopen inline audits')
+
+    def test_inline_audit_failure_updates_footer_and_never_commits(self):
+        self.path.write_text(json.dumps(config()), encoding='utf-8')
+        launches = []
+        callbacks = []
+        self.reader.return_value = None
+        self.auditor.launch_security_audit_ui = lambda _parent, base, key, model, **kwargs: launches.append(kwargs)
+        self.module_patch.stop()
+        self.module_patch = patch.dict(sys.modules, provider_security_auditor=self.auditor)
+        self.module_patch.start()
+        self.addCleanup(self.module_patch.stop)
+        foot_var = Mock()
+        checked_write = Mock()
+        self.env.update(
+            root=types.SimpleNamespace(after=lambda _delay, callback: callbacks.append(callback)),
+            current={'restarting': False, 'pending': None, 'snap': None},
+            foot_var=foot_var, redact=lambda value: value,
+            C_BG='bg', C_SURFACE='surface', C_INK='ink', C_MUTED='muted', C_LINE='line',
+            C_ACCENT='accent', C_OK='ok', C_BAD='bad', C_WARN='warn', C_BTN='button', FONT='font',
+            write_ov_conf_checked=checked_write,
+            conf_digest=lambda raw: __import__('hashlib').sha256(
+                json.dumps(raw, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+            ).hexdigest(),
+        )
+        self.env['start_inline_audit'] = nested(self.env, 'start_inline_audit')
+        self.apply = nested(self.env, 'apply_conf_edit')
+        self.assertFalse(self.apply(lambda raw: self.env['append_slot'](raw, 'new'), 'add backup'))
+        self.assertEqual(1, len(launches))
+        launches[0]['on_failure']('AUDIT_CANCELLED')
+        self.assertTrue(callbacks)
+        callbacks.pop(0)()
+        foot_var.set.assert_called_once_with('Kiểm định chưa hoàn tất; ov.conf chưa được ghi')
+        checked_write.assert_not_called()
+        self.assertEqual(config(), json.loads(self.path.read_text(encoding='utf-8')))
+        self.assertEqual(1, len(launches), 'cancelled audit must not advance to the next credential')
+
     def test_validator_failure_is_closed_without_exception_secret(self):
         self.reader.side_effect = RuntimeError('fixture-secret-do-not-display')
         self.assertFalse(self.apply(lambda raw: self.env['append_slot'](raw, 'new'), 'fixture edit'))

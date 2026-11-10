@@ -3259,14 +3259,6 @@ def run_gui(start_hidden: bool) -> None:
         colors_dict = dict(bg=C_BG, surface=C_SURFACE, ink=C_INK, muted=C_MUTED, line=C_LINE, accent=C_ACCENT, ok=C_OK, bad=C_BAD, warn=C_WARN, btn=C_BTN)
         pending = {"index": 0, "failed": False}
 
-        def fail_audit(code: str):
-            pending["failed"] = True
-            safe_code = redact(code)
-            log_app(f"slot edit inline-audit failed code={safe_code}")
-            foot_var.set("Kiểm định chưa hoàn tất; ov.conf chưa được ghi")
-            root.after(0, lambda c=safe_code: messagebox.showerror(
-                WINDOW_TITLE, f"Kiểm định chưa hoàn tất ({c}). ov.conf chưa được ghi.", parent=root))
-
         def show_next_audit():
             if pending["failed"] or current["restarting"]:
                 return
@@ -3306,9 +3298,16 @@ def run_gui(start_hidden: bool) -> None:
 
             def audit_failure(code):
                 pending["failed"] = True
-                log_app(f"slot edit inline-audit failed code={redact(code)}")
-                root.after(0, lambda c=redact(code): messagebox.showerror(
-                    WINDOW_TITLE, f"Kiểm định chưa hoàn tất ({c}). ov.conf chưa được ghi.", parent=root))
+                safe_code = redact(code)
+                log_app(f"slot edit inline-audit failed code={safe_code}")
+                root.after(0, lambda c=safe_code: (
+                    foot_var.set("Kiểm định chưa hoàn tất; ov.conf chưa được ghi"),
+                    messagebox.showerror(
+                        WINDOW_TITLE,
+                        f"Kiểm định chưa hoàn tất ({c}). ov.conf chưa được ghi.",
+                        parent=root,
+                    ),
+                ))
 
             launch_security_audit_ui(
                 root, base, key, model,
