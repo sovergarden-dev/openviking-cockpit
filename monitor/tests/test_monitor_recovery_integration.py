@@ -321,6 +321,7 @@ class ProbeRecoveryTests(unittest.TestCase):
                                   foot_var=Mock(), refresh_spares=Mock(), short_model=lambda x: x,
                                   probe_vars={}, probe_lbls={}, probe_btns={}, root=Mock(),
                                   stop=threading.Event(), tray=None, uiq=queue.Queue(), log_app=Mock())
+        self.env['save_runtime_state'] = self.env['save_state']
         for name in ('probe_key', 'spare_items', 'persist_spares', 'persist_probe', 'apply_probe', 'drain'):
             nested(self.env, name)
 

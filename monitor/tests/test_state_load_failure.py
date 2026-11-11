@@ -44,7 +44,7 @@ with tempfile.TemporaryDirectory(prefix='ov-state-load-', dir=os.environ['TMPDIR
     valid = b'{"watch_keys":[],"spare_models":[],"watch_auto_enabled":true,"auto_probe_enabled":true}'
     target.write_bytes(valid)
     for failure in (PermissionError, OSError, FileNotFoundError):
-        with patch.object(Path, 'read_text', side_effect=failure('synthetic-sensitive-detail')):
+        with patch.object(Path, 'read_bytes', side_effect=failure('synthetic-sensitive-detail')):
             loaded = namespace['load_state']()
         assert loaded.get('_state_load_error'), 'existing unreadable file did not lock state'
         assert not loaded['watch_auto_enabled'] and not loaded['auto_probe_enabled']
@@ -55,10 +55,10 @@ with tempfile.TemporaryDirectory(prefix='ov-state-load-', dir=os.environ['TMPDIR
         else:
             raise AssertionError('read failure allowed state overwrite')
         assert target.read_bytes() == valid
-    with patch.object(Path, 'exists', return_value=False), patch.object(Path, 'read_text', side_effect=PermissionError('synthetic-sensitive-detail')):
+    with patch.object(Path, 'exists', return_value=False), patch.object(Path, 'read_bytes', side_effect=PermissionError('synthetic-sensitive-detail')):
         loaded = namespace['load_state']()
     assert loaded.get('_state_load_error'), 'exists() hid an unreadable existing file'
-    with patch.object(Path, 'read_text', side_effect=FileNotFoundError('synthetic-sensitive-detail')), \
+    with patch.object(Path, 'read_bytes', side_effect=FileNotFoundError('synthetic-sensitive-detail')), \
          patch.object(Path, 'lstat', side_effect=PermissionError('synthetic-sensitive-detail')), \
          patch('os.path.lexists', return_value=False):
         loaded = namespace['load_state']()

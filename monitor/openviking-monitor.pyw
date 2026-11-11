@@ -387,6 +387,21 @@ def short_model(name: str | None) -> str:
     return n.split("/")[-1]
 
 
+class StateRevisionError(RuntimeError):
+    """An existing runtime snapshot no longer owns the on-disk state revision."""
+
+
+def _state_disk_revision() -> str | None:
+    try:
+        return hashlib.sha256(STATE_PATH.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        try:
+            STATE_PATH.lstat()
+        except FileNotFoundError:
+            return None
+        raise
+
+
 def load_state() -> dict:
     d = {
         "run_with_windows": False,
@@ -405,18 +420,19 @@ def load_state() -> dict:
         "watch_auto_enabled": False,
         "watch_auto_minutes": 10,
         "watch_auto_migrated": True,
+        "_state_revision": None,
     }
     try:
         import hashlib
         try:
-            raw_text = STATE_PATH.read_text(encoding="utf-8")
+            raw_bytes = STATE_PATH.read_bytes()
         except FileNotFoundError:
             try:
                 STATE_PATH.lstat()
             except FileNotFoundError:
                 return d
             raise
-        raw_state = json.loads(raw_text)
+        raw_state = json.loads(raw_bytes.decode("utf-8"))
         if not isinstance(raw_state, dict):
             raise ValueError("Monitor state phải là JSON object")
         if raw_state.get("watch_keys") is None:
@@ -448,6 +464,7 @@ def load_state() -> dict:
         if not raw_state.get("watch_auto_migrated"):
             raw_state.update(watch_auto_enabled=False, auto_probe_enabled=False, watch_auto_migrated=True)
         d.update(raw_state)
+        d["_state_revision"] = hashlib.sha256(raw_bytes).hexdigest()
     except Exception:
         d.update(_state_load_error="Không đọc được monitor.json. Auto đã tắt và lưu đã khóa để giữ dữ liệu gốc. Khôi phục file từ bản sao lưu rồi mở lại Monitor.",
                  watch_auto_enabled=False, auto_probe_enabled=False)
@@ -461,10 +478,13 @@ def save_state(d: dict) -> None:
             raise ValueError("Không ghi đè monitor state không đọc được")
         if d.get("_watch_state_error"):
             raise ValueError("Không ghi đè state THEO DÕI đang hỏng")
+        if d.get("_state_revision_error"):
+            raise StateRevisionError(d["_state_revision_error"])
         APP_DIR.mkdir(parents=True, exist_ok=True)
         import copy
         import hashlib
         to_save = copy.deepcopy(d)
+        to_save.pop("_state_revision", None)
         watches = to_save.get("watch_keys", [])
         validate_watch_records(watches)
         to_save.update(watch_auto_migrated=True, auto_probe_enabled=False)
@@ -489,7 +509,18 @@ def save_state(d: dict) -> None:
                             s["api_key"] = dpapi_protect(k)
 
         with interprocess_file_lock(APP_DIR / ".monitor-state.lock"):
-            safe_atomic_write_json(STATE_PATH, to_save, indent=2, restrict_acl=False)
+            message = "monitor.json đã thay đổi hoặc không xác minh được sau khi nạp. Auto đã tắt và lưu đã khóa; giữ nguyên file rồi mở lại Monitor để nạp lại."
+            try:
+                revision = _state_disk_revision()
+            except OSError:
+                raise StateRevisionError(message) from None
+            if revision != d.get("_state_revision"):
+                raise StateRevisionError(message)
+            d["_state_revision"] = safe_atomic_write_json(STATE_PATH, to_save, indent=2, restrict_acl=False)
+    except StateRevisionError as e:
+        d.update(_state_revision_error=str(e), watch_auto_enabled=False, auto_probe_enabled=False)
+        log_app("monitor state revision conflict; persistent writes disabled")
+        raise
     except Exception as e:
         log_app(f"save_state {type(e).__name__}")
         raise RuntimeError("Không thể lưu monitor state") from e
@@ -2314,8 +2345,9 @@ def run_gui(start_hidden: bool) -> None:
         watch_panel.close()
         spare_batch["stop"].set()
         try:
-            state["geometry"] = root.geometry()
-            save_state(state)
+            candidate = dict(state, geometry=root.geometry())
+            save_runtime_state(candidate)
+            state["geometry"] = candidate["geometry"]
         except Exception:
             pass
         stop.set()
@@ -2391,12 +2423,13 @@ def run_gui(start_hidden: bool) -> None:
         dot_vars[key] = (c, oval)
 
     state_error = state.get("_state_load_error") or state.get("_watch_state_error") or ""
+    warning = tk.Label(root, name="state_warning", text=state_error, bg=C_ELEVATED,
+                       fg=C_WARN, font=(FONT, 9, "bold"), anchor="w", justify="left",
+                       wraplength=840, padx=10, pady=6)
+    warning.bind("<Configure>", lambda event: warning.configure(wraplength=max(1, event.width - 20)))
     if state_error:
-        warning = tk.Label(root, name="state_warning", text=state_error, bg=C_ELEVATED,
-                           fg=C_WARN, font=(FONT, 9, "bold"), anchor="w", justify="left",
-                           wraplength=840, padx=10, pady=6)
         warning.pack(fill="x", padx=18, pady=(0, 4))
-        warning.bind("<Configure>", lambda event: warning.configure(wraplength=max(1, event.width - 20)))
+    settings_error = tk.StringVar(value=state_error)
     foot_var = tk.StringVar(value=state_error)
     foot_label = tk.Label(root, name="shared_status", textvariable=foot_var, bg=C_BG,
                           fg=C_WARN, font=(FONT, 8), anchor="w", justify="left",
@@ -2404,6 +2437,24 @@ def run_gui(start_hidden: bool) -> None:
     foot_label.pack(side="bottom", fill="x", padx=18, pady=(0, 6))
     body = tk.Frame(root, bg=C_BG)
     body.pack(fill="both", expand=True, padx=18, pady=6)
+
+    def save_runtime_state(candidate):
+        nonlocal state_error
+        try:
+            save_state(candidate)
+        except StateRevisionError:
+            state_error = candidate["_state_revision_error"]
+            state.update(_state_revision_error=state_error,
+                         watch_auto_enabled=False, auto_probe_enabled=False)
+            watch_panel.batch.cancel()
+            watch_panel.auto.set(False)
+            watch_panel.render()
+            warning.configure(text=state_error)
+            warning.pack(fill="x", padx=18, pady=(0, 4), before=foot_label)
+            settings_error.set(state_error)
+            raise
+        if "_state_revision" in candidate:
+            state["_state_revision"] = candidate["_state_revision"]
 
     def card(parent, title, note: str = ""):
         fr = tk.Frame(parent, bg=C_SURFACE, highlightbackground=C_LINE, highlightthickness=1)
@@ -2678,7 +2729,7 @@ def run_gui(start_hidden: bool) -> None:
         probes[key] = {"ok": result.get("ok"), "text": result.get("text"), "ms": result.get("ms"), "at": result.get("at")}
         candidate = dict(state, probe=probes)
         try:
-            save_state(candidate)
+            save_runtime_state(candidate)
         except (RuntimeError, OSError):
             foot_var.set("Không thể lưu kết quả thử; dữ liệu cũ được giữ nguyên")
             return False
@@ -2730,7 +2781,7 @@ def run_gui(start_hidden: bool) -> None:
         items = copy.deepcopy(items)
         candidate = dict(state, spare_models=items)
         try:
-            save_state(candidate)
+            save_runtime_state(candidate)
         except RuntimeError:
             foot_var.set("Không thể lưu dự trữ; dữ liệu cũ được giữ nguyên")
             return False
@@ -3104,7 +3155,7 @@ def run_gui(start_hidden: bool) -> None:
 
     from watch_panel import WatchPanel
     watch_panel = WatchPanel(
-        overview_content, state=state, save=save_state, probe=probe_model, emit=uiq.put,
+        overview_content, state=state, save=save_runtime_state, probe=probe_model, emit=uiq.put,
         status=foot_var.set,
         sources=lambda: [(f"Slot {i + 1}", item) for i, item in enumerate(live_slots())] +
                         [("Dự trữ", item) for item in spare_items()],
@@ -4158,7 +4209,7 @@ def run_gui(start_hidden: bool) -> None:
                         request_key = model_cache_key(base, key)
                         updated_cache = dict(list_cache, **{request_key: list(ids)})
                         try:
-                            save_state(dict(state, model_lists=updated_cache))
+                            save_runtime_state(dict(state, model_lists=updated_cache))
                         except RuntimeError:
                             status.set("Không lưu được danh sách model")
                             return
@@ -4525,7 +4576,7 @@ def run_gui(start_hidden: bool) -> None:
                 font=(FONT, 10), anchor="w",
             ).pack(fill="x", padx=16, pady=2)
 
-        settings_error = tk.StringVar(value=state_error)
+        settings_error.set(state_error)
         tk.Label(win, textvariable=settings_error, bg=C_BG, fg=C_WARN, font=(FONT, 9),
                  wraplength=420, justify="left").pack(fill="x", padx=16, pady=(8, 0))
 
@@ -4533,7 +4584,7 @@ def run_gui(start_hidden: bool) -> None:
             changes = {key: bool(value.get()) for key, value in vars_.items()}
             candidate = dict(state, **changes)
             try:
-                save_state(candidate)
+                save_runtime_state(candidate)
             except (RuntimeError, OSError, ValueError):
                 settings_error.set(state_error or "Không lưu được Cài đặt; tùy chọn cũ được giữ nguyên. Kiểm tra quyền ghi hoặc cảnh báo dữ liệu THEO DÕI.")
                 foot_var.set(settings_error.get())
@@ -4638,11 +4689,13 @@ def run_gui(start_hidden: bool) -> None:
         if (width, height) != (root.winfo_width(), root.winfo_height()):
             root.geometry(f"{width}x{height}")
         if final:
-            state["geometry_autofit"] = True
+            candidate = dict(state, geometry_autofit=True)
             try:
-                save_state(state)
+                save_runtime_state(candidate)
             except Exception:
                 pass
+            else:
+                state["geometry_autofit"] = True
 
     root.after(1500, auto_fit_once)
     root.after(4500, lambda: auto_fit_once(True))

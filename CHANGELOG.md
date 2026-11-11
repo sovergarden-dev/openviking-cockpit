@@ -37,6 +37,13 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 - Added a persistent, wrapping recovery warning independent of transient status messages, with the same instructions in Settings. Logs record only a fixed diagnostic, not raw file contents or exception messages.
 - Added isolated regression tests for damaged documents, read/stat failures, save-gate ordering, explicit restore/reopen and the actual startup/Settings/Watch/exit callbacks.
 
+### State Revision Conflict Guard
+- State loading records SHA-256 of the exact UTF-8 file bytes; a verified first-run absence has a distinct empty baseline. Revision metadata remains in memory, not in `monitor.json`.
+- State saves compare that expected revision under the existing interprocess lock immediately before atomic publication. External edits, damage, deletion, unexpected creation and unverifiable reads refuse the save and preserve the current file.
+- Own successful saves advance the shared GUI revision across Watch, Reserve, probe cache, Settings, auto-fit and exit. Stale candidates cannot inherit a newer revision implicitly.
+- A detected conflict stops Watch Auto, cancels queued work and keeps a wrapping recovery banner plus Settings instructions until Monitor is reopened. Failed saves do not apply candidate settings or Windows startup changes.
+- Added synthetic revision/GUI regressions for first-run conflicts, raw newline changes, read/stat failures, stale candidates, lock ordering, failed publication/retry and sequential own saves. The lock coordinates participating writers; arbitrary writers that ignore it are not a filesystem compare-and-swap transaction.
+
 ### Test Isolation
 - Made `suite_bootstrap.py` create its own per-suite scratch profile before executing test code, including standalone invocations outside the full runner.
 - Added a subprocess sentinel regression that proves writes stay in the isolated profile and leave the caller's Monitor state untouched.

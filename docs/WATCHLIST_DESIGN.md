@@ -108,6 +108,15 @@ Phản biện là cổng thiết kế, không phải bằng chứng code đã đ
 - Khôi phục: đóng Monitor, giữ lại file hỏng, khôi phục `monitor.json` hợp lệ từ bản sao lưu riêng rồi mở lại. Backup `monitor-sync-*` chỉ chứa nguồn, không chứa state; không tự đặt lại mặc định hay suy đoán credential.
 - Kiểm thử chỉ dùng dữ liệu giả và guard filesystem/network. Không thử sửa, đọc nội dung hoặc khôi phục state live để tái hiện lỗi này.
 
+## Chống ghi đè state thay đổi sau khi nạp
+
+- `load_state()` đọc raw bytes, giải mã UTF-8 rồi lưu SHA-256 vào `_state_revision` trong RAM; không chuẩn hóa CRLF trước khi tính hash. File thực sự chưa có dùng revision `None`. Revision do nội dung JSON tự khai báo không được tin.
+- `save_state()` so sánh revision của candidate với file hiện tại bên trong `.monitor-state.lock`, ngay trước writer. File mới xuất hiện, bị xóa, đổi byte, bị hỏng hoặc không xác minh được đều chặn ghi. Chỉ own save thành công mới tiến revision; lỗi writer không được tự nhận file mới làm baseline.
+- Các luồng GUI đi qua `save_runtime_state()`: sau own save truyền revision mới về shared state; khi xung đột đặt `_state_revision_error`, tắt Auto, hủy công việc Watch chưa gửi và hiển thị banner/Settings bền vững. Settings, Watch, Reserve và cache chỉ áp dụng candidate sau khi lưu thành công; startup/thoát cũng không ghi đè state ngoài.
+- Khôi phục yêu cầu đóng/mở lại Monitor để nạp file đã được người dùng xác nhận. Không tự hợp nhất credential, không tự đặt lại mặc định, không tự mở khóa khi file cũ xuất hiện lại.
+- Phạm vi đảm bảo: phát hiện drift đã xảy ra tại lần kiểm tra trước khi ghi, và tuần tự hóa writer cùng dùng khóa. Writer ngoài bỏ qua khóa vẫn có thể đua trong khoảng kiểm tra–replace; không tuyên bố filesystem compare-and-swap hoặc chặn được mọi công cụ chỉnh file.
+- Chỉ triển khai mục revision guard trong đợt này. Backup state tự động, runner DPI/CI và multi-monitor không thuộc phạm vi.
+
 ## Kết quả nghiệm thu bản hai tab ban đầu
 
 - Phản biện xác nhận ba lỗi race/DPAPI/state: `passed=true`, không có lỗi logic hoặc bảo mật chặn. Gợi ý UX không được xem là bằng chứng lỗi đã sửa.

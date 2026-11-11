@@ -37,7 +37,7 @@ print('CLIPBOARD_EXPIRY_OK')
 state = {'spare_models': [{'model': 'old'}]}
 def fail_save(candidate):
     raise RuntimeError('simulated write failure')
-env = {'state': state, 'save_state': fail_save, 'refresh_spares': lambda x: None, 'foot_var': root}
+env = {'state': state, 'save_runtime_state': fail_save, 'refresh_spares': lambda x: None, 'foot_var': root}
 persist = callback('persist_spares', env)
 try:
     persist([{'model': 'new'}])
