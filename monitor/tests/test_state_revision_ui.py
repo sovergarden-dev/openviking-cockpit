@@ -18,7 +18,15 @@ target = glob['STATE_PATH']
 side_effects, errors, probes = [], [], []
 glob['set_run_with_windows'] = lambda enabled: side_effects.append(enabled) or True
 glob['probe_model'] = lambda *a, **k: probes.append(1)
-original_init, original_loop = tk.Tk.__init__, tk.Tk.mainloop
+original_init, original_loop, original_after = tk.Tk.__init__, tk.Tk.mainloop, tk.Tk.after
+final_fit = []
+
+
+def controlled_after(root, milliseconds, callback=None, *args):
+    if milliseconds == 4500 and callable(callback) and callback.__name__ == '<lambda>':
+        final_fit.append(callback)
+        return 'fixture-final-autofit'
+    return original_after(root, milliseconds, callback, *args)
 
 
 def scaled_init(root, *args, **kwargs):
@@ -39,6 +47,7 @@ def button(parent, text):
 def loop(root, *args):
     root.report_callback_exception = lambda *exc: errors.append(exc[0].__name__)
     try:
+        assert len(final_fit) == 1, 'final startup auto-fit callback missing'
         root.update()
         panel = next(w for w in walk(root) if w.winfo_name() == 'watch_panel')
         assert panel.store(dict(alias='Fixture', model='fixture', api_base='https://fixture.invalid/v1', api_key='synthetic-revision'))
@@ -86,11 +95,7 @@ def loop(root, *args):
         assert warning.winfo_ismapped() and 'mở lại Monitor' in warning.cget('text'), 'status update erased recovery banner'
         assert target.read_bytes() == newer_bytes
         os.environ.pop('MONITOR_NO_AUTOFIT', None)
-        after_callbacks = [root.tk.splitlist(root.tk.call('after', 'info', item))[0]
-                           for item in root.tk.splitlist(root.tk.call('after', 'info'))]
-        final_fit = [command for command in after_callbacks if command.endswith('<lambda>')]
-        assert len(final_fit) == 1, 'final startup auto-fit callback missing'
-        root.tk.call(final_fit[0])
+        final_fit[0]()
         assert target.read_bytes() == newer_bytes, 'startup auto-fit overwrote external state'
         assert not state.get('geometry_autofit'), 'failed auto-fit save changed shared state'
         button(settings, 'Hủy').invoke()
@@ -111,9 +116,9 @@ def loop(root, *args):
             pass
 
 
-tk.Tk.__init__, tk.Tk.mainloop = scaled_init, loop
+tk.Tk.__init__, tk.Tk.mainloop, tk.Tk.after = scaled_init, loop, controlled_after
 os.environ['MONITOR_NO_AUTOFIT'] = '1'
 try:
     ns['run_gui'](start_hidden=False)
 finally:
-    tk.Tk.__init__, tk.Tk.mainloop = original_init, original_loop
+    tk.Tk.__init__, tk.Tk.mainloop, tk.Tk.after = original_init, original_loop, original_after

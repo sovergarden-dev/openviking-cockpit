@@ -29,25 +29,33 @@ def apply_restricted_file_acl(target_path: Union[str, Path]) -> bool:
     """
     if sys.platform != "win32":
         return True
-    p = str(Path(target_path).resolve())
-    username = os.environ.get("USERNAME", "Rurus")
-    userdomain = os.environ.get("USERDOMAIN", "")
-    full_user = f"{userdomain}\\{username}" if userdomain else username
-    
-    # Run icacls to reset inheritance and grant exclusive permissions
-    # /inheritance:r removes all inherited ACEs
-    # /grant grants explicit Full control
-    cmd = [
-        "icacls", p,
-        "/inheritance:r",
-        "/grant:r", "NT AUTHORITY\\SYSTEM:(F)",
-        "/grant:r", "BUILTIN\\Administrators:(F)",
-        "/grant:r", f"{full_user}:(F)"
-    ]
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$p = ConvertFrom-Json ([Console]::In.ReadToEnd())
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$sddl = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;$sid)"
+$section = [System.Security.AccessControl.AccessControlSections]::Access
+$acl = if ((Get-Item -LiteralPath $p -Force).PSIsContainer) {
+    New-Object System.Security.AccessControl.DirectorySecurity
+} else {
+    New-Object System.Security.AccessControl.FileSecurity
+}
+$acl.SetSecurityDescriptorSddlForm($sddl, $section)
+if ((Get-Item -LiteralPath $p -Force).PSIsContainer) {
+    [System.IO.Directory]::SetAccessControl($p, $acl)
+} else {
+    [System.IO.File]::SetAccessControl($p, $acl)
+}
+$actual = (Get-Acl -LiteralPath $p).GetSecurityDescriptorSddlForm($section)
+if (($actual -replace '^D:PAI', 'D:P') -ne $sddl) { throw 'Restricted ACL readback mismatch' }
+"""
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=5.0)
+        res = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            input=json.dumps(str(Path(target_path).absolute())), capture_output=True,
+            text=True, check=False, timeout=5.0, creationflags=subprocess.CREATE_NO_WINDOW)
         return res.returncode == 0
-    except (subprocess.TimeoutExpired, Exception):
+    except (OSError, subprocess.SubprocessError):
         return False
 
 

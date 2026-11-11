@@ -44,6 +44,13 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 - A detected conflict stops Watch Auto, cancels queued work and keeps a wrapping recovery banner plus Settings instructions until Monitor is reopened. Failed saves do not apply candidate settings or Windows startup changes.
 - Added synthetic revision/GUI regressions for first-run conflicts, raw newline changes, read/stat failures, stale candidates, lock ordering, failed publication/retry and sequential own saves. The lock coordinates participating writers; arbitrary writers that ignore it are not a filesystem compare-and-swap transaction.
 
+### Verified Monitor State Backups
+- Changed saves preserve the valid pre-change `monitor.json` bytes under `backups/monitor-state/<sha256>/`, with a SHA-256/byte-count/UTC manifest, fsync, readback and atomic directory publication. DPAPI ciphertext is copied without decryption or normalization.
+- Backup failure, corruption, unsafe reparse paths or access-control failure blocks state publication. Existing snapshots are verified before reuse; unchanged state is not rewritten or archived again.
+- Restricted ACLs now replace the DACL with SYSTEM, Administrators and the actual current Windows SID, removing explicit extra grants as well as inheritance, with exact access-section readback. Repeated application does not require SACL privileges.
+- Successful saves retain new ciphertext metadata in memory so an unchanged credential is not re-encrypted on each later save. Failed saves do not advance that metadata.
+- Added isolated fault, deduplication, DPAPI-lock, raw-newline, junction, restore/reopen and GUI transaction tests. Restore remains explicit; no automatic unlock, cross-machine DPAPI guarantee or automatic snapshot deletion.
+
 ### Windows Taskbar Identity and Icon
 - Monitor shortcuts now persist `System.AppUserModel.ID` matching the process identity, which is set before Tk creates any windows.
 - Bundled the existing blue sailboat artwork at 16–256 pixels and made shortcuts, windows and tray prefer it over the legacy Helper resource.

@@ -463,6 +463,7 @@ def load_state() -> dict:
                         s["_dpapi_locked"] = False
         if not raw_state.get("watch_auto_migrated"):
             raw_state.update(watch_auto_enabled=False, auto_probe_enabled=False, watch_auto_migrated=True)
+        raw_state.pop("_state_key_cache", None)
         d.update(raw_state)
         d["_state_revision"] = hashlib.sha256(raw_bytes).hexdigest()
     except Exception:
@@ -470,6 +471,74 @@ def load_state() -> dict:
                  watch_auto_enabled=False, auto_probe_enabled=False)
         log_app("monitor state unreadable; persistent writes disabled")
     return d
+
+
+def backup_state(raw_bytes: bytes) -> Path:
+    """Preserve exact, valid disk bytes; callers hold the state writer lock."""
+    import shutil
+    import tempfile
+
+    document = json.loads(raw_bytes.decode("utf-8"))
+    if not isinstance(document, dict):
+        raise ValueError("Backup state phải là JSON object")
+    watches = document.get("watch_keys")
+    validate_watch_records([] if watches is None else watches)
+    spares = document.get("spare_models")
+    if spares is not None and (not isinstance(spares, list) or any(
+            not isinstance(s, dict) or (s.get("api_key") is not None and not isinstance(s["api_key"], str))
+            for s in spares)):
+        raise ValueError("Backup state có danh sách dự trữ hỏng")
+    digest = hashlib.sha256(raw_bytes).hexdigest()
+    root = APP_DIR.parent / "backups" / "monitor-state"
+    target = root / digest
+    for path in (root.parent, root, target, target / "monitor.json", target / "manifest.json"):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        if path.is_symlink() or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise ValueError("Không dùng reparse point cho backup state")
+    root.mkdir(parents=True, exist_ok=True)
+    if not apply_restricted_file_acl(root):
+        raise PermissionError("Không giới hạn được quyền backup state")
+    if target.exists():
+        for path in (target, target / "monitor.json", target / "manifest.json"):
+            if not apply_restricted_file_acl(path):
+                raise PermissionError("Không giới hạn được quyền backup state")
+        if (target / "monitor.json").read_bytes() != raw_bytes:
+            raise OSError("Backup state không khớp SHA-256")
+        manifest = json.loads((target / "manifest.json").read_bytes())
+        if not isinstance(manifest, dict) or manifest.get("sha256") != digest or manifest.get("byte_count") != len(raw_bytes):
+            raise OSError("Manifest backup state không hợp lệ")
+        stamp = manifest.get("created_utc")
+        if not isinstance(stamp, str) or not stamp.endswith("+00:00"):
+            raise ValueError("Thời điểm backup state không hợp lệ")
+        datetime.fromisoformat(stamp)
+        return target
+    stage = Path(tempfile.mkdtemp(prefix=".pending-", dir=root))
+    try:
+        if not apply_restricted_file_acl(stage):
+            raise PermissionError("Không giới hạn được quyền backup state")
+        manifest = dict(sha256=digest, byte_count=len(raw_bytes),
+                        created_utc=datetime.now(timezone.utc).isoformat())
+        for name, payload in (("monitor.json", raw_bytes),
+                              ("manifest.json", json.dumps(manifest, indent=2).encode("utf-8"))):
+            path = stage / name
+            with path.open("xb") as handle:
+                if not apply_restricted_file_acl(path):
+                    raise PermissionError("Không giới hạn được quyền backup state")
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if path.read_bytes() != payload:
+                raise OSError("Backup state không khớp dữ liệu đã ghi")
+        stage.rename(target)
+        if (target / "monitor.json").read_bytes() != raw_bytes:
+            raise OSError("Backup state không khớp sau khi xuất bản")
+        return target
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
 
 
 def save_state(d: dict) -> None:
@@ -485,6 +554,8 @@ def save_state(d: dict) -> None:
         import hashlib
         to_save = copy.deepcopy(d)
         to_save.pop("_state_revision", None)
+        cached_keys = to_save.pop("_state_key_cache", {})
+        key_cache = {}
         watches = to_save.get("watch_keys", [])
         validate_watch_records(watches)
         to_save.update(watch_auto_migrated=True, auto_probe_enabled=False)
@@ -504,9 +575,13 @@ def save_state(d: dict) -> None:
                         curr_sha = hashlib.sha256(k.encode("utf-8")).hexdigest()
                         if raw_enc and prev_sha and curr_sha == prev_sha and (records is not watches or raw_enc.startswith("dpapi:")):
                             s["api_key"] = raw_enc
+                        elif curr_sha in cached_keys:
+                            s["api_key"] = cached_keys[curr_sha]
                         elif not k.startswith("dpapi:"):
                             # Newly provided or edited plaintext key -> encrypt with DPAPI
                             s["api_key"] = dpapi_protect(k)
+                        if s["api_key"].startswith("dpapi:"):
+                            key_cache[curr_sha] = s["api_key"]
 
         with interprocess_file_lock(APP_DIR / ".monitor-state.lock"):
             message = "monitor.json đã thay đổi hoặc không xác minh được sau khi nạp. Auto đã tắt và lưu đã khóa; giữ nguyên file rồi mở lại Monitor để nạp lại."
@@ -516,7 +591,25 @@ def save_state(d: dict) -> None:
                 raise StateRevisionError(message) from None
             if revision != d.get("_state_revision"):
                 raise StateRevisionError(message)
+            if revision is not None:
+                try:
+                    previous = STATE_PATH.read_bytes()
+                except OSError:
+                    raise StateRevisionError(message) from None
+                if hashlib.sha256(previous).hexdigest() != revision:
+                    raise StateRevisionError(message)
+                payload = (json.dumps(to_save, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+                if payload == previous:
+                    return
+                backup_state(previous)
+                try:
+                    current = _state_disk_revision()
+                except OSError:
+                    raise StateRevisionError(message) from None
+                if current != revision:
+                    raise StateRevisionError(message)
             d["_state_revision"] = safe_atomic_write_json(STATE_PATH, to_save, indent=2, restrict_acl=False)
+            d["_state_key_cache"] = key_cache
     except StateRevisionError as e:
         d.update(_state_revision_error=str(e), watch_auto_enabled=False, auto_probe_enabled=False)
         log_app("monitor state revision conflict; persistent writes disabled")
@@ -2520,8 +2613,9 @@ def run_gui(start_hidden: bool) -> None:
             warning.pack(fill="x", padx=18, pady=(0, 4), before=foot_label)
             settings_error.set(state_error)
             raise
-        if "_state_revision" in candidate:
-            state["_state_revision"] = candidate["_state_revision"]
+        for name in ("_state_revision", "_state_key_cache"):
+            if name in candidate:
+                state[name] = candidate[name]
 
     def card(parent, title, note: str = ""):
         fr = tk.Frame(parent, bg=C_SURFACE, highlightbackground=C_LINE, highlightthickness=1)
