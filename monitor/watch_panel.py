@@ -1,0 +1,348 @@
+"""Independent, bounded credential watchlist. All persistence stays in monitor.json."""
+import copy
+import time
+import tkinter as tk
+from tkinter import messagebox, ttk
+
+from watch_keys import MAX_WATCHES, WatchBatch, apply_watch_result, upsert_watch
+
+
+class WatchPanel(tk.Frame):
+    def __init__(self, parent, *, state, save, probe, emit, status, sources, colors, font):
+        self.colors, self.font = colors, font
+        super().__init__(parent, name='watch_panel', bg=colors['surface'],
+                         highlightbackground=colors['line'], highlightthickness=1)
+        self.state, self.save, self.probe = state, save, probe
+        self.emit, self.status, self.sources = emit, status, sources
+        self.batch = WatchBatch()
+        self.closed = False
+        self.deadlines = {}
+        self.count = tk.StringVar()
+        self.detail = tk.StringVar()
+        self.auto = tk.BooleanVar(value=bool(state.get('watch_auto_enabled')))
+        self.minutes = tk.StringVar(value='1' if state.get('watch_auto_minutes') == 1 else '10')
+        head = tk.Frame(self, bg=colors['surface'])
+        head.pack(fill='x', padx=12, pady=(8, 4))
+        tk.Label(head, text='THEO DÕI', bg=colors['surface'], fg=colors['accent'],
+                 font=(font, 8, 'bold')).pack(side='left')
+        tk.Label(head, textvariable=self.count, bg=colors['surface'], fg=colors['muted'],
+                 font=(font, 8)).pack(side='left', padx=8)
+        auto_bar = tk.Frame(head, bg=colors['surface'])
+        auto_bar.pack(side='right')
+        self.auto_check = tk.Checkbutton(auto_bar, text='Auto thử', variable=self.auto,
+                        command=self.save_auto, bg=colors['surface'], fg=colors['ink'],
+                        selectcolor=colors['btn'], activebackground=colors['surface'],
+                        activeforeground=colors['ink'], font=(font, 8))
+        self.auto_check.pack(side='left')
+        self.auto_menu = ttk.Combobox(auto_bar, textvariable=self.minutes, values=('1', '10'),
+                                     state='readonly', width=3, font=(font, 8))
+        self.auto_menu.pack(side='left', padx=(4, 3))
+        self.auto_menu.bind('<<ComboboxSelected>>', self.save_auto)
+        tk.Label(auto_bar, text='phút', bg=colors['surface'], fg=colors['muted'],
+                 font=(font, 8)).pack(side='left')
+        tk.Label(self, text='Tối đa 7 key độc lập. Thử có thể tiêu token; không đổi slot OpenViking.',
+                 bg=colors['surface'], fg=colors['muted'], font=(font, 8), anchor='w',
+                 width=1).pack(fill='x', padx=12, pady=(0, 6))
+        table = tk.Frame(self, bg=colors['surface'])
+        from tkinter import font as tkfont
+        style = ttk.Style(self)
+        row_font = (font, 9)
+        style.configure('Watch.Treeview', font=row_font,
+                        rowheight=tkfont.Font(self, font=row_font).metrics('linespace') + 6)
+        style.configure('Watch.Treeview.Heading', font=(font, 8, 'bold'), padding=(4, 2))
+        columns = ('alias', 'model', 'status', 'ms', 'last', 'auto')
+        self.tree = ttk.Treeview(table, name='watch_tree', columns=columns, show='headings',
+                                selectmode='browse', height=7, style='Watch.Treeview')
+        for col, title, width in zip(columns, ('Tên gợi nhớ', 'Model thử', 'Kết quả', 'ms', 'Lần thử', 'Auto'),
+                                     (142, 180, 184, 62, 106, 66)):
+            self.tree.heading(col, text=title)
+            self.tree.column(col, width=width, minwidth=width if col in ('ms', 'last', 'auto') else 80,
+                             stretch=col in ('alias', 'model', 'status'))
+        vertical = ttk.Scrollbar(table, orient='vertical', command=self.tree.yview)
+        horizontal = ttk.Scrollbar(table, orient='horizontal', command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        table.rowconfigure(0, weight=1)
+        table.columnconfigure(0, weight=1)
+        self.tree.grid(row=0, column=0, sticky='nsew')
+        vertical.grid(row=0, column=1, sticky='ns')
+        horizontal.grid(row=1, column=0, sticky='ew')
+        for tag, color in (('ok', 'ok'), ('bad', 'bad'), ('locked', 'warn')):
+            self.tree.tag_configure(tag, foreground=colors[color])
+        self.tree.bind('<<TreeviewSelect>>', lambda _: self.show_detail())
+        self.tree.bind('<Double-Button-1>', lambda _: self.edit())
+        self.tree.bind('<Delete>', self.delete)
+        self.tree.bind('<space>', self.toggle_auto)
+        self.tree.bind('<ButtonRelease-1>', self.click_auto)
+        detail_label = tk.Label(self, textvariable=self.detail, bg=colors['surface'], fg=colors['muted'],
+                                font=(font, 8), anchor='w', width=1)
+        actions = tk.Frame(self, bg=colors['surface'])
+        actions.pack(side='bottom', fill='x', padx=8, pady=(0, 8))
+        detail_label.pack(side='bottom', fill='x', padx=12, pady=4)
+        table.pack(fill='both', expand=True, padx=8)
+        self.add_btn = self.button(actions, '+ Thêm key', lambda: self.edit(new=True), accent=True)
+        self.button(actions, 'Lấy từ…', self.pick_source)
+        self.button(actions, 'Sửa', self.edit)
+        self.button(actions, 'Thử ngay', self.probe_selected)
+        self.button(actions, 'Bật/tắt Auto', self.toggle_auto)
+        self.button(actions, 'Dừng', self.cancel)
+        self.button(actions, 'Xóa', self.delete, right=True)
+        self.batch.sync(self.items())
+        now, mono = time.time(), time.monotonic()
+        for record in self.items():
+            due = max(record.get('next_probe_at') or 0, record.get('cooldown_until') or 0)
+            self.deadlines[record['id']] = mono + min(3600, max(0, due - now))
+        self.render()
+        self.bind('<Destroy>', self.on_destroy)
+
+    def button(self, parent, text, command, *, accent=False, right=False):
+        c = self.colors
+        button = tk.Button(parent, text=text, command=command, bg=c['btn'],
+                           fg=c['accent'] if accent else c['ink'], activebackground=c['hover'],
+                           activeforeground=c['ink'], relief='flat', font=(self.font, 9),
+                           padx=8, pady=3, cursor='hand2')
+        button.pack(side='right' if right else 'left', padx=(0, 5))
+        return button
+
+    def items(self):
+        return self.state.get('watch_keys') or []
+
+    def selected(self):
+        selected = self.tree.selection()
+        return next((item for item in self.items() if selected and item['id'] == selected[0]), None)
+
+    def persist(self, records, **settings):
+        candidate = dict(self.state, watch_keys=records, **settings)
+        try:
+            self.save(candidate)
+        except (RuntimeError, OSError, ValueError):
+            self.batch.cancel()
+            self.auto.set(False)
+            self.status('Không lưu được THEO DÕI; dữ liệu cũ được giữ nguyên. Auto đã tạm dừng.')
+            return False
+        self.state.update(watch_keys=records, **settings)
+        self.batch.sync(records)
+        self.render()
+        return True
+
+    def store(self, incoming):
+        previous = next((item for item in self.items() if item['id'] == incoming.get('id')), None)
+        try:
+            records = upsert_watch(self.items(), incoming)
+        except ValueError as exc:
+            self.status(str(exc))
+            return False
+        if not self.persist(records):
+            return False
+        record = next(item for item in records if item['id'] == incoming.get('id')) if incoming.get('id') else records[-1]
+        if previous is None or any(previous.get(k) != record.get(k) for k in ('model', 'api_base', 'api_key', 'auto_enabled')):
+            self.deadlines[record['id']] = time.monotonic()
+        self.tree.selection_set(record['id'])
+        self.status('Đã lưu key theo dõi. Không thay đổi slot hoặc ov.conf.')
+        return True
+
+    def render(self):
+        selected = self.tree.selection()
+        existing = set(self.tree.get_children())
+        keep = {item['id'] for item in self.items()}
+        for identifier in existing - keep:
+            self.tree.delete(identifier)
+        for item in self.items():
+            probe = item.get('last_probe') or {}
+            locked = bool(item.get('_dpapi_locked'))
+            at = probe.get('at')
+            last = time.strftime('%H:%M %d/%m', time.localtime(at)) if at else 'Chưa thử'
+            text = 'Khóa DPAPI' if locked else probe.get('text') or 'Chưa thử'
+            tag = 'locked' if locked else ('ok' if probe.get('ok') else 'bad') if probe else ''
+            values = (item.get('alias') or 'Không đặt tên', item.get('model'), text,
+                      probe.get('ms') if probe.get('ms') is not None else '—', last,
+                      'Bật' if item.get('auto_enabled') else 'Tắt')
+            if item['id'] in existing:
+                self.tree.item(item['id'], values=values, tags=(tag,))
+            else:
+                self.tree.insert('', 'end', iid=item['id'], values=values, tags=(tag,))
+        if selected and selected[0] in keep:
+            self.tree.selection_set(selected[0])
+        self.count.set(f'{len(keep)}/{MAX_WATCHES}')
+        self.add_btn.configure(state='disabled' if len(keep) >= MAX_WATCHES else 'normal')
+        self.show_detail()
+
+    def show_detail(self):
+        record = self.selected()
+        if not record:
+            self.detail.set('Chọn một dòng. Space bật/tắt Auto; double-click để sửa.' if self.items()
+                            else 'Chưa có key. Thêm mới hoặc sao chép độc lập từ Dự trữ / slot.')
+            return
+        reason = record.get('auto_disabled_reason') or ''
+        remaining = max(0, self.deadlines.get(record['id'], 0) - time.monotonic())
+        schedule = (f' · thử sau {int(remaining) + 1}s' if remaining else ' · đến lịch') if record.get('auto_enabled') and self.auto.get() else ''
+        self.detail.set(f"{record.get('api_base')}" + (f' · {reason}' if reason else schedule))
+
+    def toggle_auto(self, _event=None):
+        record = self.selected()
+        if not record:
+            self.status('Chọn key theo dõi để bật/tắt Auto.')
+            return 'break'
+        if record.get('_dpapi_locked'):
+            self.status('Key đang khóa DPAPI. Nhập lại key trước khi bật Auto.')
+            return 'break'
+        self.store(dict(record, auto_enabled=not record.get('auto_enabled')))
+        return 'break'
+
+    def click_auto(self, event):
+        if self.tree.identify_region(event.x, event.y) == 'cell' and self.tree.identify_column(event.x) == '#6':
+            self.toggle_auto()
+
+    def save_auto(self, _event=None):
+        enabled, minutes = bool(self.auto.get()), int(self.minutes.get())
+        if self.persist(copy.deepcopy(self.items()), watch_auto_enabled=enabled, watch_auto_minutes=minutes):
+            if not enabled:
+                self.batch.cancel()
+            self.status('Auto THEO DÕI đã bật; chỉ thử những dòng bật Auto.' if enabled else 'Đã tắt Auto THEO DÕI. Request đã gửi vẫn có thể hoàn tất.')
+        else:
+            self.minutes.set(str(self.state.get('watch_auto_minutes') or 10))
+
+    def tick(self):
+        if self.closed or not self.auto.get() or self.batch.busy:
+            return
+        now = time.monotonic()
+        due = [item for item in self.items() if item.get('auto_enabled') and
+               now >= self.deadlines.get(item['id'], 0)]
+        self.batch.start(due, self.probe, self.emit, auto=True)
+        self.show_detail()
+
+    def probe_selected(self):
+        record = self.selected()
+        if not record:
+            self.status('Chọn key theo dõi để thử.')
+        elif self.batch.busy:
+            self.status('Đang thử. Dừng để bỏ các request chưa gửi.')
+        elif self.batch.start([record], self.probe, self.emit):
+            self.status('Đang thử key đã chọn; timeout 20 giây, tối đa 64 output token.')
+        else:
+            self.status('Key rỗng hoặc đang khóa DPAPI; không gửi request.')
+
+    def event(self, event):
+        if self.closed:
+            return
+        if event[0] == 'watch_done':
+            self.batch.complete(event[1])
+            return
+        if event[0] != 'watch_result':
+            return
+        _, run_id, identifier, revision, result = event
+        if not self.batch.accepts(run_id, identifier, revision):
+            return
+        records = copy.deepcopy(self.items())
+        for index, record in enumerate(records):
+            if record['id'] != identifier:
+                continue
+            updated = apply_watch_result(record, result, interval=int(self.minutes.get()) * 60)
+            records[index] = updated
+            if self.persist(records):
+                delay = max(0, updated['next_probe_at'] - updated['last_probe']['at'])
+                self.deadlines[identifier] = time.monotonic() + delay
+                self.show_detail()
+                old = record.get('last_probe') or {}
+                latest = updated['last_probe']
+                if (old.get('ok'), old.get('text')) != (latest['ok'], latest['text']):
+                    self.status('THEO DÕI · ' + latest['text'] + (' · Auto tự tắt' if updated['auto_disabled_reason'] else ''))
+            break
+
+    def cancel(self):
+        self.batch.cancel()
+        self.status('Đã dừng lô thử. Request đang gửi không thể thu hồi; kết quả trễ được bỏ.')
+
+    def delete(self, _event=None):
+        record = self.selected()
+        if record and messagebox.askyesno('Xóa key theo dõi', 'Xóa dòng đã chọn khỏi THEO DÕI? Không ảnh hưởng Dự trữ hoặc slot.', parent=self):
+            if self.persist([copy.deepcopy(item) for item in self.items() if item['id'] != record['id']]):
+                self.deadlines.pop(record['id'], None)
+                self.status('Đã xóa key theo dõi. Dự trữ và slot giữ nguyên.')
+        return 'break'
+
+    def edit(self, *, new=False, source=None):
+        record = None if new else self.selected()
+        if not new and not record:
+            self.status('Chọn key theo dõi để sửa.')
+            return
+        if new and len(self.items()) >= MAX_WATCHES:
+            self.status('Tối đa 7 key theo dõi.')
+            return
+        initial = source or record or {}
+        win = tk.Toplevel(self)
+        win.title('Thêm key theo dõi' if new else 'Sửa key theo dõi')
+        win.configure(bg=self.colors['surface'])
+        win.transient(self.winfo_toplevel())
+        win.resizable(False, False)
+        win.grab_set()
+        win.bind('<Escape>', lambda _: win.destroy())
+        fields = {}
+        for name, label in (('alias', 'Tên gợi nhớ'), ('model', 'Model dùng để thử'),
+                            ('api_base', 'Base URL (kết thúc bằng /v1)'), ('api_key', 'API key')):
+            tk.Label(win, text=label, bg=self.colors['surface'], fg=self.colors['muted'],
+                     font=(self.font, 9), anchor='w').pack(fill='x', padx=16, pady=(9, 3))
+            fields[name] = tk.StringVar(value=initial.get(name) or '')
+            ttk.Entry(win, name='watch_' + name, textvariable=fields[name], width=52,
+                      show='•' if name == 'api_key' else '').pack(fill='x', padx=16)
+        error = tk.StringVar(value='Key được mã hóa DPAPI. Không kế thừa key từ endpoint khác.')
+        tk.Label(win, textvariable=error, bg=self.colors['surface'], fg=self.colors['warn'],
+                 font=(self.font, 8), wraplength=440, justify='left').pack(fill='x', padx=16, pady=10)
+        buttons = tk.Frame(win, bg=self.colors['surface'])
+        buttons.pack(fill='x', padx=16, pady=(0, 12))
+        def save():
+            incoming = dict({'id': record['id']} if record else {},
+                            **{name: value.get() for name, value in fields.items()})
+            if self.store(incoming):
+                win.destroy()
+            else:
+                error.set('Không lưu được. Kiểm tra key, model, URL và dòng trạng thái chung.')
+        self.button(buttons, 'Lưu', save, accent=True)
+        self.button(buttons, 'Hủy', win.destroy, right=True)
+        win.update_idletasks()
+        root = self.winfo_toplevel()
+        x = max(0, min(root.winfo_rootx() + 30, root.winfo_screenwidth() - win.winfo_reqwidth() - 30))
+        y = max(0, min(root.winfo_rooty() + 60, root.winfo_screenheight() - win.winfo_reqheight() - 70))
+        win.geometry(f'+{x}+{y}')
+
+    def pick_source(self):
+        if len(self.items()) >= MAX_WATCHES:
+            self.status('Tối đa 7 key theo dõi; xóa một dòng trước khi thêm.')
+            return
+        sources = list(self.sources())
+        win = tk.Toplevel(self)
+        win.title('Sao chép vào THEO DÕI')
+        win.configure(bg=self.colors['surface'])
+        win.transient(self.winfo_toplevel())
+        win.bind('<Escape>', lambda _: win.destroy())
+        tk.Label(win, text='Chọn bản gốc. Key được sao chép độc lập; không đổi slot hoặc Dự trữ.',
+                 bg=self.colors['surface'], fg=self.colors['muted'], font=(self.font, 9)).pack(padx=12, pady=10)
+        tree = ttk.Treeview(win, columns=('source', 'model', 'endpoint'), show='headings', selectmode='browse', height=10)
+        for col, title, width in (('source', 'Nguồn', 110), ('model', 'Model', 220), ('endpoint', 'Endpoint', 240)):
+            tree.heading(col, text=title)
+            tree.column(col, width=width)
+        tree.pack(fill='both', expand=True, padx=12)
+        for index, (label, item) in enumerate(sources):
+            tree.insert('', 'end', iid=str(index), values=(label, item.get('model'), item.get('api_base')))
+        def choose():
+            selection = tree.selection()
+            if not selection:
+                return
+            _, item = sources[int(selection[0])]
+            if item.get('_dpapi_locked') or not item.get('api_key'):
+                self.status('Bản gốc không có key đọc được. Không kế thừa key ngầm.')
+                return
+            source = {name: item.get(name) or '' for name in ('model', 'api_base', 'api_key')}
+            win.destroy()
+            self.edit(new=True, source=source)
+        buttons = tk.Frame(win, bg=self.colors['surface'])
+        buttons.pack(fill='x', padx=12, pady=10)
+        self.button(buttons, 'Sao chép và sửa', choose, accent=True)
+        self.button(buttons, 'Hủy', win.destroy, right=True)
+
+    def on_destroy(self, event):
+        if event.widget is self:
+            self.close()
+
+    def close(self):
+        self.closed = True
+        self.batch.cancel()

@@ -2,7 +2,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests: 27/27 PASS](https://img.shields.io/badge/tests-27%2F27%20passed-brightgreen.svg)]()
+[![Tests: 59/59 PASS](https://img.shields.io/badge/tests-59%2F59%20passed-brightgreen.svg)]()
 [![Standard Library Only](https://img.shields.io/badge/dependencies-stdlib--only-success.svg)]()
 
 **OpenViking Cockpit** là bộ công cụ buồng lái giám sát vận hành thời gian thực, quản trị cân bằng tải định tuyến slot, và **Khung kiểm định an toàn ranh giới hành vi nhà cung cấp AI (Provider Behavioral Safety & Boundary Auditor — Taxonomy V3.1)** được phát triển dành riêng cho hệ sinh thái **OpenViking** (Local Vector DB & Autonomous AI Agent System).
@@ -20,10 +20,19 @@ Hệ thống được thiết kế theo triết lý **Disaster Recovery Engineer
 - **Khối Thẻ Model Chống Cắt Chữ:** Tối ưu hóa layout hình học trên Tkinter, bảo đảm các nhãn đo mili-giây (ms) và mã lỗi HTTP luôn hiển thị đủ 100% trên các độ phân giải từ 880px đến 1400px.
 
 ### 2. Bảng Danh Sách Mô Hình Dự Trữ (Reserve Pool Manager)
+- Tab **Dự trữ** riêng, dùng toàn vùng nội dung. Không có Auto thử; request chỉ chạy khi người dùng chọn thao tác thử/kiểm định.
 - Quản lý hàng chục endpoint LLM dự phòng với tính năng tìm kiếm nhanh, lọc theo trạng thái và endpoint.
 - Bảng co giãn tự nhiên (`autofit`), tự động ẩn/hiện cột ghi chú, hỗ trợ chuột phải thao tác nhanh (Đưa vào slot, Thử độ trễ, Chép key, Kiểm định an toàn).
 - **Huy Hiệu Phân Cấp An Toàn [M1] → [M5]:** Tự động hiển thị mức đánh giá an toàn ngay trên cột Trạng thái nếu model đã được kiểm định.
 - **Cache Đo Lường 24 Giờ:** Tự động ghi nhớ báo cáo kiểm định gần nhất trong 24h; cho phép mở xem lại tức thì mà không cần chạy lại mạng.
+
+### Theo Dõi Key Độc Lập
+- Khung **THEO DÕI** trong tab **Tổng quan**, tối đa **7 key**, không tìm kiếm. Hai key cùng endpoint/model vẫn là hai bản ghi riêng.
+- Tên gợi nhớ, model thử, kết quả, độ trễ, lần thử và Auto từng dòng; công tắc Auto tổng mặc định **tắt**, chu kỳ 1 hoặc 10 phút.
+- Key lưu bằng **Windows DPAPI**. Lấy từ Dự trữ/slot là sao chép chủ động, độc lập; không tự kế thừa key theo endpoint.
+- Worker tuần tự, timeout 20 giây, tối đa 64 output token/request. Thử có thể tiêu token; kết quả chỉ xác nhận key + endpoint + model tại thời điểm đó, không chứng minh quota còn lại hay mức an toàn provider.
+- Lỗi dùng backoff tối đa 60 phút; hai lỗi 401/403 liên tiếp tự tắt Auto dòng đó. Dừng/tắt Auto không thu hồi request đã gửi; kết quả trễ sau sửa/xóa/hủy bị bỏ.
+- Lưu/thử THEO DÕI không sửa `ov.conf`, không chuyển slot, không khởi động lại server. Vòng Auto thử slot cũ bị loại bỏ; migration không tự bật Auto mới.
 
 ### 3. Bộ Kiểm Định An Toàn Provider (Taxonomy V3.1 Auditor)
 Phân tầng kiểm thử độc lập 3-Tier với 7 probe cốt lõi và probe mở rộng:
@@ -72,14 +81,16 @@ openviking-cockpit/
 │   ├── provider_security_auditor.py     # Module kiểm định an toàn & ranh giới hành vi
 │   ├── reference_core_v31.py           # Lõi toán học & chốt an ninh V3.1 (Pure Policy)
 │   ├── reserve_table.py                # Bảng quản lý mô hình dự trữ (Treeview Autofit)
+│   ├── watch_keys.py                   # Giới hạn 7 key, worker và backoff độc lập
+│   ├── watch_panel.py                  # Khung THEO DÕI trong tab Tổng quan
 │   ├── openviking_monitor_notification.py # Bộ điều khiển thông báo hệ thống (Toasts)
 │   ├── openviking.ico                  # Icon ứng dụng
-│   └── tests/                          # Toàn bộ 27 test suites hồi quy
+│   └── tests/                          # 55 suite Monitor + 4 suite deploy tích hợp
 │       ├── run_all_tests.py            # Test runner tổng thể
 │       ├── test_reference_core_v31.py  # 84 unit tests tham chiếu V3.1
 │       ├── test_provider_security_auditor.py # 24 unit tests kiểm định an toàn
 │       ├── check_layout_runtime.py     # Kiểm thử hình học giao diện (880px-1400px)
-│       └── ... (23 suites khác)
+│       └── ...
 ├── docs/
 │   ├── TAXONOMY_V3_1.md                # Đặc tả kiến trúc kiểm định V3.1 toàn văn
 │   └── TAXONOMY_V2_2.md                # Đặc tả kiến trúc V2.2
@@ -104,11 +115,23 @@ openviking-cockpit/
 pythonw monitor/openviking-monitor.pyw
 ```
 
-### Chạy Toàn Bộ 27 Test Suites:
-```cmd
-python monitor/tests/run_all_tests.py
+### Chạy Toàn Bộ 59 Test Suites:
+```powershell
+$env:PYTHONPATH = ""
+& "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe" monitor/tests/run_all_tests.py --runtime-helpers
 ```
-Toàn bộ 27 test suites (bao gồm 84 unit tests của lõi V3.1) sẽ chạy và báo `Result: ALL PASSED`.
+Chạy bằng Python 3.11 (Tk 8.6). Runner tích hợp **55 suite Monitor + 4 suite deploy**; `--runtime-helpers` bật hai suite runtime dùng fixture/provider giả lập. `suite_bootstrap.py` tự tạo home và cấu hình giả riêng cho mỗi suite, kể cả khi chạy trực tiếp ngoài runner; audit hook chặn truy cập thư mục `.openviking` live và socket guard chặn provider thật. Ma trận giao diện có startup từ 1020×640, kích thước tối thiểu 880×560, 880×800, 996×960 và các bề ngang 1100/1400; dashboard lẫn slot editor chạy ở Tk scaling **1.333333 / 1.666667 / 2.0** (Windows **100% / 125% / 150%**). Dashboard phải hiện tối thiểu 3 hàng THEO DÕI đầy đủ và cuộn tới key thứ 7. Màn hình thấp có thể cần tăng chiều cao cửa sổ; không tuyên bố hỗ trợ Windows 200% từ Tk scaling 2.0.
+```powershell
+$env:PYTHONPATH = ""
+foreach ($scale in @("1.333333", "1.666667", "2.0")) {
+    $env:MONITOR_TEST_SCALE = $scale
+    & "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe" monitor/tests/suite_bootstrap.py monitor/tests/check_layout_runtime.py
+    if ($LASTEXITCODE -ne 0) { throw "Dashboard layout failed at Tk scale $scale" }
+    & "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe" monitor/tests/suite_bootstrap.py monitor/tests/test_slot_editor_layout.py
+    if ($LASTEXITCODE -ne 0) { throw "Slot editor layout failed at Tk scale $scale" }
+}
+Remove-Item Env:MONITOR_TEST_SCALE -ErrorAction SilentlyContinue
+```
 
 ---
 

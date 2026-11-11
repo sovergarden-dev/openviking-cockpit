@@ -1548,6 +1548,16 @@ def launch_security_audit_ui(
     win.transient(parent)
     win.minsize(820, 600)
     win.geometry("860x640")
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            win.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id()
+            val = ctypes.c_int(1)
+            for attr in (20, 19):
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val), ctypes.sizeof(val))
+        except Exception:
+            pass
 
     # Header
     hdr = tk.Frame(win, bg=c_surface, padx=16, pady=12)
@@ -1712,29 +1722,51 @@ def launch_security_audit_ui(
             notebook.add(tab2, text="2. Chi tiết Hạng mục (Tier 0/1/2)")
 
             cols = ("id", "name", "tier", "risk", "status")
-            tree = ttk.Treeview(tab2, columns=cols, show="headings", height=8)
+            tree_wrap = tk.Frame(tab2, bg=c_surface)
+            tree_wrap.pack(fill="both", expand=True)
+            tree = ttk.Treeview(tree_wrap, columns=cols, show="headings", height=8)
             tree.heading("id", text="Mã")
             tree.heading("name", text="Hạng mục kiểm định")
             tree.heading("tier", text="Phân tầng")
             tree.heading("risk", text="Mức rủi ro")
             tree.heading("status", text="Kết quả")
-            tree.column("id", width=120)
+            tree.column("id", width=130)
             tree.column("name", width=340)
             tree.column("tier", width=80, anchor="center")
             tree.column("risk", width=90, anchor="center")
             tree.column("status", width=110, anchor="center")
-            tree.pack(fill="both", expand=True)
+            tree.tag_configure("st_pass", foreground=c_ok)
+            tree.tag_configure("st_fail", foreground=c_bad)
+            tree.tag_configure("st_inc", foreground=c_warn)
+            sb_cls = getattr(ttk, "Scrollbar", None)
+            if sb_cls is not None:
+                t2_scroll = sb_cls(tree_wrap, orient="vertical", command=tree.yview)
+                tree.configure(yscrollcommand=t2_scroll.set)
+                tree.pack(side="left", fill="both", expand=True)
+                t2_scroll.pack(side="right", fill="y")
+            else:
+                tree.pack(fill="both", expand=True)
 
             for r in results:
                 t_val = f"Tier {r.get('tier', 1)}"
-                tree.insert("", "end", values=(r.get("id"), r.get("name"), t_val, r.get("risk_level"), r.get("status")))
+                st_str = str(r.get("status") or "")
+                st_tag = "st_pass" if st_str == "PASS" else ("st_fail" if st_str == "FAIL" else "st_inc")
+                tree.insert("", "end", values=(r.get("id"), r.get("name"), t_val, r.get("risk_level"), st_str), tags=(st_tag,))
 
             # Tab 3: Bằng chứng thô & Raw Logs
             tab3 = tk.Frame(notebook, bg=c_surface, padx=12, pady=10)
             notebook.add(tab3, text="3. Bằng chứng thô (Redacted)")
 
-            raw_txt = tk.Text(tab3, bg=c_bg, fg=c_ink, font=("Consolas", 9), relief="flat", padx=8, pady=8)
-            raw_txt.pack(fill="both", expand=True)
+            raw_wrap = tk.Frame(tab3, bg=c_bg)
+            raw_wrap.pack(fill="both", expand=True)
+            raw_txt = tk.Text(raw_wrap, bg=c_bg, fg=c_ink, font=("Consolas", 9), relief="flat", padx=8, pady=8)
+            if sb_cls is not None:
+                raw_scroll = sb_cls(raw_wrap, orient="vertical", command=raw_txt.yview)
+                raw_txt.configure(yscrollcommand=raw_scroll.set)
+                raw_txt.pack(side="left", fill="both", expand=True)
+                raw_scroll.pack(side="right", fill="y")
+            else:
+                raw_txt.pack(fill="both", expand=True)
             raw_content = json.dumps(report, indent=2, ensure_ascii=False)
             raw_txt.insert("1.0", raw_content)
             raw_txt.configure(state="disabled")

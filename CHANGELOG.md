@@ -2,6 +2,43 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
+## [Unreleased]
+
+### Separate Reserve Tab and Independent Key Watchlist
+- Moved DỰ TRỮ into its own full-width tab. Its controls use two rows and keep manual probes/audits; the previous slot Auto loop is removed.
+- Added THEO DÕI to Tổng quan: at most 7 independent credentials, no search, global Auto switch plus per-row Auto. Both default off; migration does not reuse the old Auto setting.
+- Added DPAPI-protected watch persistence, strict endpoint/key validation, stable IDs/revisions and stale-response rejection. Watch edits, probes and imports never apply slots or write `ov.conf`.
+- Sequential watch probes use 20-second timeouts and a 64-output-token budget. Backoff caps at 60 minutes; two consecutive 401/403 responses disable that row's Auto.
+- Provider response bodies and raw exception messages are excluded from saved probe failures. Authenticated requests reject unsafe URLs and redirects.
+- Strengthened high-DPI geometry assertions to require 3 fully visible watch rows, not merely a nonempty partial-row bounding box, and scrolling to row 7.
+- Added `watch_keys.py` and `watch_panel.py` to the transactional source deployment manifest.
+- Fixed the edit-modal race that could re-enable Auto after background auth failures; editor saves merge only current user fields against the latest record.
+- Rejected user-entered `dpapi:` envelopes. Null watch lists normalize to empty; malformed nonempty watch data disables Auto and state writes, shows a warning, and preserves original bytes instead of silently discarding credentials.
+
+### Test Isolation
+- Made `suite_bootstrap.py` create its own per-suite scratch profile before executing test code, including standalone invocations outside the full runner.
+- Added a subprocess sentinel regression that proves writes stay in the isolated profile and leave the caller's Monitor state untouched.
+- Added a filesystem audit guard against live `.openviking` access, including direct absolute paths.
+- Drained pending Tk theme events before destroying the note-field test root to avoid callbacks targeting a destroyed interpreter.
+
+### Monitor UI Recovery & DPI Validation — 2026-11-11
+- Reworked the Monitor palette, slot/editor hierarchy, reserve table sizing, audit result styling, and modal dark titlebars.
+- Restored the three-round benchmark action alongside protocol verification and security audit controls.
+- Kept probe failures visibly failed regardless of a prior provider audit level.
+- Guarded benchmark completion/failure events after Escape or dialog closure.
+- Scaling validation uses Tk's Windows DPI factors: **1.3333 (100%)**, **1.6667 (125%)**, and **2.0 (150%)**, with four live and four spare fixture rows plus seven watch rows, populated queue/vector/usage/retrieval telemetry, long endpoints, and failed-probe details.
+- Dashboard regression checks run at 880×560, 996×960, 1020×640, and 880/1100/1400×800. Startup fit grows a default 1020×640 window to the measured overview content height within screen bounds; hidden reserve content cannot inflate its bounds.
+- Reduced MODEL control padding, wrapped model names and retained complete role labels at high DPI. Long reserve cells have per-column fit checks and a tested horizontal scrollbar.
+- Reserve-table column-width persistence survives hiding/showing the note column and restarting the table.
+- Added four-slot split-boundary and minimum-window event-loop regression coverage.
+- Added regression coverage for benchmark modal cancellation, stale completion events, add/edit/spare geometry, and high-DPI endpoint fit.
+
+### Scaling Limits
+
+- Startup sizing cannot exceed the usable screen height (screen height minus 120 px); when the measured content is taller, vertical controls require scrolling or a taller display.
+- The 200% case is outside the currently verified envelope.
+- Benchmark cancellation stops queued probes but does not interrupt a currently executing HTTP request; timeout bounds remain the in-flight stop limit.
+
 ## [v1.2.0-hardening] — 2026-10-26
 
 ### Security Hardening & Secret Isolation (Notion AI Sy06 & Sy01 Audited)

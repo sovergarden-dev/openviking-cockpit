@@ -13,7 +13,7 @@ import uuid
 
 CORE_FILES = ('secret_store.py', 'safe_write.py', 'conf_gate.py',
               'provider_security_auditor.py', 'reference_core_v31.py',
-              'reserve_table.py', 'openviking_monitor_notification.py',
+              'reserve_table.py', 'watch_keys.py', 'watch_panel.py', 'openviking_monitor_notification.py',
               'openviking.ico', 'openviking-monitor.pyw')
 
 

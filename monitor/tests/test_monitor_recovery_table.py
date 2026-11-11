@@ -9,6 +9,25 @@ from reserve_table import ReserveTable
 
 
 class RecoveryTableTests(unittest.TestCase):
+    def test_status_failure_overrides_successful_audit_level(self):
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            table = ReserveTable(root, preferences={})
+            item = {
+                "model": "fixture",
+                "api_base": "https://fixture.invalid/v1",
+                "last_probe": {"ok": False, "text": "HTTP 401", "at": 0},
+                "audit_level": 4,
+            }
+            table.render([item])
+            row = table.tree.get_children()[0]
+            tags = set(table.tree.item(row, "tags"))
+            self.assertIn("status_bad", tags)
+            self.assertNotIn("audit_4", tags)
+        finally:
+            root.destroy()
+
     def test_note_checkbox_controls_visible_column(self):
         root = tk.Tk()
         root.withdraw()

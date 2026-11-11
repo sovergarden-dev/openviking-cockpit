@@ -1,14 +1,20 @@
 """Exercise actual batch worker offline, without provider credentials."""
 import ast
 import queue
+import runpy
+import threading
 from pathlib import Path
 source=Path(__file__).resolve().parent.parent / 'openviking-monitor.pyw'
+ns=runpy.run_path(str(source), run_name='multi_probe_test')
 tree=ast.parse(source.read_text(encoding='utf-8'))
 batch=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=='do_benchmark')
 worker=next(n for n in batch.body if isinstance(n,ast.FunctionDef) and n.name=='work')
 for rounds in (1,3):
     calls=[]
-    env=dict(rounds=rounds,picked=['first','second'],base='http://127.0.0.1',key='synthetic',uiq=queue.Queue(),result_win=None,progress=None,render=None,table=None,probe_btn=None,bench_btn=None)
+    env=dict(rounds=rounds,picked=['first','second'],base='http://127.0.0.1',key='synthetic',uiq=queue.Queue(),result_win=None,progress=None,render=None,table=None,probe_btn=None,bench_btn=None,cancel_event=threading.Event(),run_benchmark_work=ns['run_benchmark_work'])
+    env.update(probe_btn=object(),bench_btn=object(),uiq=queue.Queue(),result_win=object(),progress=object(),table=object())
+    env['render']=lambda *_: None
+    env['report_progress']=lambda *_: None
     env['probe_model']=lambda model,base,key: calls.append(model) or {'ok':True,'ms':1}
     env['benchmark_summary']=lambda model,samples: {'model':model,'median_ms':1,'runs':len(samples)}
     exec(compile(ast.Module(body=[worker],type_ignores=[]),str(source),'exec'),env)

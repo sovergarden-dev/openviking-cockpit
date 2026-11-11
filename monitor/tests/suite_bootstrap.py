@@ -12,6 +12,45 @@ import time
 
 def main():
     path = Path(sys.argv[1]).resolve()
+    caller_home = os.environ.get('USERPROFILE')
+    local = Path(os.environ.get('LOCALAPPDATA') or Path.home() / 'AppData/Local')
+    scratch = Path(os.environ.get('TMPDIR') or local / 'hermes/cache/scratch')
+    if scratch.resolve() == (local / 'Temp').resolve():
+        scratch = local / 'hermes/cache/scratch'
+    scratch.mkdir(parents=True, exist_ok=True)
+    isolation = tempfile.TemporaryDirectory(prefix='ov-suite-', dir=scratch)
+    home = Path(isolation.name) / 'home'
+    ov = home / '.openviking'
+    (ov / 'monitor').mkdir(parents=True)
+    (ov / 'logs').mkdir()
+    config = {'vlm': {'model': 'fixture-model', 'api_base': 'http://127.0.0.1:9/v1',
+                      'api_key': 'fixture-key', 'thinking': True, 'max_retries': 2,
+                      'failback_timeout_seconds': 3600, 'failback_request_count': 10},
+              'embedding': {'dense': {'model': 'qwen3-embedding:0.6b'}}}
+    state = {'run_with_windows': False, 'notify_on_down': False, 'notify_on_failover': False,
+             'auto_probe_enabled': False, 'geometry': '1020x800',
+             'spare_models': [{'model': 'fixture-model', 'api_base': 'http://127.0.0.1:9/v1',
+                               'api_key': 'fixture-key', 'note': ''}]}
+    (ov / 'ov.conf').write_text(json.dumps(config), encoding='utf-8')
+    (ov / 'monitor/monitor.json').write_text(json.dumps(state), encoding='utf-8')
+    (ov / 'logs/server.log').write_text('', encoding='utf-8')
+    import shutil
+    shutil.copy2(Path(__file__).resolve().parents[1] / 'openviking.ico', ov / 'monitor/openviking.ico')
+    protected = {Path(caller_home or Path.home()).resolve() / '.openviking'}
+    if local.name.casefold() == 'local' and local.parent.name.casefold() == 'appdata':
+        protected.add(local.parent.parent.resolve() / '.openviking')
+    def protect_live(event, args):
+        paths = args[:2] if event in {'os.rename', 'os.link', 'os.symlink'} else args[:1]
+        if event not in {'open', 'os.rename', 'os.link', 'os.symlink', 'os.remove',
+                         'os.rmdir', 'os.mkdir', 'os.chmod', 'os.utime', 'os.listdir', 'os.scandir'}:
+            return
+        for value in paths:
+            if isinstance(value, (str, bytes, os.PathLike)):
+                candidate = Path(os.fsdecode(value)).resolve()
+                if any(candidate.is_relative_to(root) for root in protected):
+                    raise PermissionError('Test filesystem boundary: live OpenViking access blocked')
+    sys.addaudithook(protect_live)
+    os.environ['USERPROFILE'] = str(home)
     source = path.read_text(encoding='utf-8-sig')
     tree = ast.parse(source)
     uses_pytest = any(isinstance(node, (ast.Import, ast.ImportFrom)) and
@@ -77,6 +116,11 @@ def main():
         runpy.run_path=actual_run
         socket.socket.connect=original_connect
         socket.socket.connect_ex=original_connect_ex
+        if caller_home is None:
+            os.environ.pop('USERPROFILE', None)
+        else:
+            os.environ['USERPROFILE'] = caller_home
+        isolation.cleanup()
 
 if __name__=='__main__':
     raise SystemExit(main())

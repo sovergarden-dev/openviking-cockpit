@@ -2,6 +2,11 @@ import runpy, sys, tkinter as tk
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 ns = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'openviking-monitor.pyw'), run_name='fit_test')
+gui_globals = ns['run_gui'].__globals__
+fit_state = gui_globals['load_state']()
+fit_state['geometry'] = '1200x900'
+fit_state['geometry_autofit'] = True
+gui_globals['load_state'] = lambda: dict(fit_state)
 original = tk.Tk.mainloop
 
 
@@ -19,26 +24,31 @@ def loop(root, *args):
             return ''
 
     def go():
-        root.update_idletasks()
-        root.geometry('1200x900')
-        root.update_idletasks()
-        btn = next(w for w in walk(root) if text_of(w) == 'Cài đặt')
-        btn.invoke()
-        root.update_idletasks()
-        tops = [w for w in walk(root) if w.winfo_class() == 'Toplevel']
-        assert tops, 'cửa sổ Cài đặt không mở'
-        fit = [w for w in walk(tops[0]) if text_of(w) == 'Thu cửa sổ vừa nội dung']
-        assert fit, 'thiếu nút "Thu cửa sổ vừa nội dung"'
-        fit[0].invoke()
-        root.update_idletasks()
-        geo = root.geometry()
-        size = geo.split('+')[0]
-        w_, h_ = (int(x) for x in size.split('x'))
-        assert h_ < 900, f'chiều cao chưa thu: {geo}'
-        assert w_ <= root.winfo_reqwidth(), (geo, root.winfo_reqwidth())
-        assert h_ <= root.winfo_reqheight(), (geo, root.winfo_reqheight())
-        print('FIT_WINDOW_OK', geo, 'req', root.winfo_reqwidth(), root.winfo_reqheight())
-        root.destroy()
+        try:
+            root.update_idletasks()
+            root.update()
+            min_height = root.minsize()[1]
+            assert min_height < 900, f'auto-fit minimum was ratcheted to saved geometry: {root.minsize()}'
+            btn = next(w for w in walk(root) if text_of(w) == 'Cài đặt')
+            btn.invoke()
+            root.update_idletasks()
+            tops = [w for w in walk(root) if w.winfo_class() == 'Toplevel']
+            assert tops, 'cửa sổ Cài đặt không mở'
+            fit = [w for w in walk(tops[0]) if text_of(w) == 'Thu cửa sổ vừa nội dung']
+            assert fit, 'thiếu nút "Thu cửa sổ vừa nội dung"'
+            fit[0].invoke()
+            root.update_idletasks()
+            geo = root.geometry()
+            size = geo.split('+')[0]
+            w_, h_ = (int(x) for x in size.split('x'))
+            assert h_ < 900, f'chiều cao chưa thu: {geo}'
+            watch = next(w for w in walk(root) if w.winfo_name() == 'watch_panel')
+            assert watch.winfo_height() >= watch.winfo_reqheight(), 'fit clipped THEO DÕI'
+            assert h_ == root.minsize()[1], (geo, root.minsize())
+            assert w_ <= 1100, 'hidden reserve tab inflated dashboard width'
+            print('FIT_WINDOW_OK', geo, 'minimum', root.minsize())
+        finally:
+            root.destroy()
         sys.exit(0)
 
     root.after(2600, go)

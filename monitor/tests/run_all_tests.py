@@ -48,10 +48,14 @@ def main():
             results.append({'name':test.name,'status':'SKIP','reason':'runtime helper opt-in'})
             print('[SKIP]',test.name,flush=True)
             continue
-        env=dict(os.environ, USERPROFILE=str(real_home if helper else fake_home),MONITOR_NO_AUTOFIT='1',
+        env=dict(os.environ, USERPROFILE=str(real_home if helper else fake_home),
                  TMPDIR=str(output),TMP=str(output),TEMP=str(output),PYTHONIOENCODING='utf-8',
                  PYTHONOPTIMIZE='',PYTHONDONTWRITEBYTECODE='1',PYTHONPYCACHEPREFIX=str(output/'pycache'),
                  PYTEST_DISABLE_PLUGIN_AUTOLOAD='1',PYTHONUTF8='1')
+        if test.name == 'check_layout_runtime.py':
+            env.pop('MONITOR_NO_AUTOFIT', None)
+        else:
+            env['MONITOR_NO_AUTOFIT'] = '1'
         command=[str(app_py),str(test)] if helper else [str(app_py),str(tests_dir/'suite_bootstrap.py'),str(test)]
         start=time.monotonic()
         child=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,env=env,text=True,encoding='utf-8',errors='replace')

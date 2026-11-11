@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 
 from openviking_monitor_notification import NotificationController
 from conf_gate import AuditRequired, compute_conf_drift, validate_conf_targets as _validate_conf_targets_policy
+from watch_keys import MAX_WATCHES, validate_watch_records
 
 CREATE_NO_WINDOW = 0x08000000
 MUTEX_NAME = "Local\\OpenVikingMonitor.rurus"
@@ -66,16 +67,19 @@ OLLAMA = "http://127.0.0.1:21434/api/version"
 GATEWAY = "http://127.0.0.1:20128/v1/models"
 PORTS = (("ov", 19330), ("ollama", 21434), ("gateway", 20128))
 
-C_BG = "#12141a"
-C_SURFACE = "#1b1e27"
-C_INK = "#eceae4"
-C_MUTED = "#8d8c87"
-C_LINE = "#2a2e3a"
-C_ACCENT = "#c4a35a"
-C_OK = "#3d9a6a"
-C_WARN = "#c9a227"
-C_BAD = "#c4544a"
-C_BTN = "#2a2418"
+C_BG = "#101419"
+C_SURFACE = "#171d26"
+C_ELEVATED = "#1f2733"
+C_ACTIVE_ROW = "#242e3d"
+C_INK = "#edf2f7"
+C_MUTED = "#9aa7b8"
+C_LINE = "#2e3948"
+C_ACCENT = "#e6ba5c"
+C_OK = "#5ad09d"
+C_WARN = "#eab84b"
+C_BAD = "#f27878"
+C_BTN = "#25303e"
+C_BTN_HOVER = "#303e50"
 FONT = "Segoe UI"
 MONO = "Consolas"
 
@@ -85,7 +89,10 @@ FAILOVER_RE = re.compile(
     re.I,
 )
 ERR_RE = re.compile(r"\b(ERROR|WARNING|CRITICAL)\b")
-SECRET_RE = re.compile(r"(?i)(api[_-]?key|authorization|bearer|sk-[A-Za-z0-9]+)\s*[:=]\s*\S+")
+SECRET_RE = re.compile(
+    r"(?i)(?:\b(?:api[_-]?key|authorization|token|secret|key)\s*[\"']?\s*[:=]\s*[\"']?[^\s\"'&,}]+"
+    r"|\bbearer\s+[^\s\"'&,}]+|\b(?:sk-|gsk_|xai-|rk-|AIza)[A-Za-z0-9_-]{8,})"
+)
 NOISE_RE = re.compile(
     r"LDAP library not available|IncompleteFieldDefinitionWarning|python-ldap",
     re.I,
@@ -127,7 +134,7 @@ def dpapi_unprotect(cipher: str) -> str:
 def log_app(msg: str) -> None:
     try:
         APP_DIR.mkdir(parents=True, exist_ok=True)
-        line = f"{datetime.now():%Y-%m-%d %H:%M:%S} {msg}\n"
+        line = f"{datetime.now():%Y-%m-%d %H:%M:%S} {redact(msg)}\n"
         with APP_LOG.open("a", encoding="utf-8") as f:
             f.write(line)
         if APP_LOG.stat().st_size > 200_000:
@@ -394,14 +401,25 @@ def load_state() -> dict:
         "auto_probe_enabled": False,
         "auto_probe_minutes": 10,
         "spare_models": [],
+        "watch_keys": [],
+        "watch_auto_enabled": False,
+        "watch_auto_minutes": 10,
+        "watch_auto_migrated": True,
     }
     try:
         if STATE_PATH.exists():
             import hashlib
             raw_state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-            spares = raw_state.get("spare_models")
-            if isinstance(spares, list):
-                for s in spares:
+            if raw_state.get("watch_keys") is None:
+                raw_state["watch_keys"] = []
+            try:
+                validate_watch_records(raw_state["watch_keys"])
+            except ValueError:
+                raw_state.update(watch_keys=[], watch_auto_enabled=False,
+                                 _watch_state_error="THEO DÕI có dữ liệu hỏng; giữ nguyên monitor.json và tạm khóa lưu để tránh mất key.")
+                log_app("watch state invalid; persistent writes disabled")
+            for records in (raw_state.get("spare_models"), raw_state.get("watch_keys")):
+                for s in records if isinstance(records, list) else []:
                     if isinstance(s, dict) and "api_key" in s:
                         raw_key = (s.get("api_key") or "").strip()
                         s["_enc"] = raw_key  # Preserved exact raw ciphertext from disk
@@ -418,6 +436,8 @@ def load_state() -> dict:
                         else:
                             s["_sha"] = hashlib.sha256(raw_key.encode("utf-8")).hexdigest() if raw_key else None
                             s["_dpapi_locked"] = False
+            if not raw_state.get("watch_auto_migrated"):
+                raw_state.update(watch_auto_enabled=False, auto_probe_enabled=False, watch_auto_migrated=True)
             d.update(raw_state)
     except Exception:
         pass
@@ -426,13 +446,17 @@ def load_state() -> dict:
 
 def save_state(d: dict) -> None:
     try:
+        if d.get("_watch_state_error"):
+            raise ValueError("Không ghi đè state THEO DÕI đang hỏng")
         APP_DIR.mkdir(parents=True, exist_ok=True)
         import copy
         import hashlib
         to_save = copy.deepcopy(d)
-        spares = to_save.get("spare_models")
-        if isinstance(spares, list):
-            for s in spares:
+        watches = to_save.get("watch_keys", [])
+        validate_watch_records(watches)
+        to_save.update(watch_auto_migrated=True, auto_probe_enabled=False)
+        for records in (to_save.get("spare_models"), watches):
+            for s in records if isinstance(records, list) else []:
                 if isinstance(s, dict):
                     raw_enc = s.pop("_enc", None)
                     prev_sha = s.pop("_sha", None)
@@ -445,7 +469,7 @@ def save_state(d: dict) -> None:
                     elif k:
                         # If key unchanged, preserve exact original ciphertext byte-for-byte
                         curr_sha = hashlib.sha256(k.encode("utf-8")).hexdigest()
-                        if raw_enc and prev_sha and curr_sha == prev_sha:
+                        if raw_enc and prev_sha and curr_sha == prev_sha and (records is not watches or raw_enc.startswith("dpapi:")):
                             s["api_key"] = raw_enc
                         elif not k.startswith("dpapi:"):
                             # Newly provided or edited plaintext key -> encrypt with DPAPI
@@ -723,7 +747,7 @@ def slot_is_failing(result: dict | None) -> bool:
 
 
 def redact(text: str) -> str:
-    return SECRET_RE.sub(r"\1=[REDACTED]", text or "")
+    return SECRET_RE.sub("[REDACTED]", text or "")
 
 
 def _slot(index: int, model, api_base, api_key, cid=None) -> dict:
@@ -1824,7 +1848,7 @@ def snapshot_public(snap: dict) -> dict:
     return d
 
 
-def probe_model(model: str | None, api_base: str | None, api_key: str | None, timeout: float = 90.0) -> dict:
+def probe_model(model: str | None, api_base: str | None, api_key: str | None, timeout: float = 90.0, max_tokens: int | None = None) -> dict:
     if not model:
         return {"ok": False, "text": "Fail", "ms": None, "at": time.time()}
 
@@ -1846,11 +1870,16 @@ def probe_model(model: str | None, api_base: str | None, api_key: str | None, ti
 
     base = (api_base or "http://127.0.0.1:20128/v1").rstrip("/")
     url = base + "/chat/completions"
-    payload = json.dumps({
+    request_body = {
         "model": model,
         "messages": [{"role": "user", "content": "Reply exactly: OK"}],
         "temperature": 0,
-    }).encode("utf-8")
+    }
+    if max_tokens is not None:
+        if type(max_tokens) is not int or not 1 <= max_tokens <= 256:
+            raise ValueError("Token budget must be an integer from 1 to 256")
+        request_body["max_tokens"] = max_tokens
+    payload = json.dumps(request_body).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if effective_key:
         headers["Authorization"] = f"Bearer {effective_key}"
@@ -1871,9 +1900,9 @@ def probe_model(model: str | None, api_base: str | None, api_key: str | None, ti
             category = "upstream"
         elif not code:
             category = "timeout" if "timeout" in str(body).casefold() else "network"
-        log_app(f"probe {model} fail {category} HTTP {code} {str(body)[:120]}")
-        detail = f"{category} · HTTP {code}" if code else f"{category} · {str(body or 'Không kết nối')}"
-        return {"ok": False, "text": detail, "ms": ms, "at": time.time(), "category": category}
+        log_app(f"probe fail {category} HTTP {code}")
+        detail = f"{category} · HTTP {code}" if code else category
+        return {"ok": False, "text": detail, "ms": ms, "at": time.time(), "category": category, "http_code": code}
     choice = (body.get("choices") or [{}])[0]
     msg = choice.get("message") or {}
     content = (msg.get("content") or "").strip()
@@ -1910,6 +1939,125 @@ def filter_model_ids(ids: list[str], query: str) -> list[str]:
     if not terms:
         return list(ids)
     return [model for model in ids if all(term in model.casefold() for term in terms)]
+
+
+def bind_escape_to_close(win) -> None:
+    """Bind Escape to destroy a transient window through its normal Tk path."""
+    win.bind("<Escape>", lambda _event: win.destroy())
+
+
+def restore_benchmark_buttons(probe_button, benchmark_button) -> None:
+    """Re-enable editor actions only while their Tk widgets still exist."""
+    import tkinter as tk
+    for button in (probe_button, benchmark_button):
+        try:
+            if button.winfo_exists():
+                button.configure(state="normal")
+        except (tk.TclError, AttributeError):
+            continue
+
+
+def run_benchmark_work(picked, rounds, base, key, probe, cancel_event, on_progress=None):
+    """Run sequential benchmark probes until complete or the dialog is cancelled."""
+    results = []
+    for index, item in enumerate(picked, 1):
+        samples = []
+        for _ in range(rounds):
+            if cancel_event.is_set():
+                return [], True
+            try:
+                samples.append(probe(item, base, key))
+            except Exception:
+                samples.append({"ok": False, "text": "Fail", "ms": None})
+        summary = benchmark_summary(item, samples)
+        results.append(summary)
+        if on_progress is not None and not cancel_event.is_set():
+            on_progress(index, len(picked), summary)
+    if cancel_event.is_set():
+        return [], True
+    results.sort(key=lambda row: (
+        row.get("ok_runs", 0) < row.get("runs", 1),
+        row.get("median_ms") is None,
+        row.get("median_ms") if row.get("median_ms") is not None else 10**12,
+        row["model"].casefold(),
+    ))
+    return results, False
+
+
+def bind_benchmark_close(result_win, parent_win, cancel_event, probe_button, benchmark_button) -> None:
+    """Cancel outstanding probes and restore the parent editor when the result modal closes."""
+    import tkinter as tk
+    closed = {"value": False}
+
+    def close():
+        if closed["value"]:
+            return
+        closed["value"] = True
+        cancel_event.set()
+        restore_benchmark_buttons(probe_button, benchmark_button)
+        try:
+            result_win.destroy()
+        finally:
+            try:
+                if parent_win.winfo_exists():
+                    parent_win.grab_set()
+            except (tk.TclError, AttributeError):
+                pass
+
+    def on_result_destroy(event):
+        if event.widget is not result_win or closed["value"]:
+            return
+        closed["value"] = True
+        cancel_event.set()
+        restore_benchmark_buttons(probe_button, benchmark_button)
+        try:
+            if parent_win.winfo_exists():
+                parent_win.grab_set()
+        except (tk.TclError, AttributeError):
+            pass
+
+    def on_parent_destroy(event):
+        if event.widget is parent_win:
+            close()
+
+    result_win.protocol("WM_DELETE_WINDOW", close)
+    result_win.bind("<Escape>", lambda _event: close())
+    result_win.bind("<Destroy>", on_result_destroy, add="+")
+    parent_win.bind("<Destroy>", on_parent_destroy, add="+")
+    return close
+
+
+def process_benchmark_event(item) -> bool:
+    """Apply a benchmark event only while its result modal still exists."""
+    kind = item[0]
+    if kind == "benchmark_done":
+        _, result_win, progress, results, table, probe_button, benchmark_button = item
+        if not result_win.winfo_exists():
+            return False
+        for child in table.get_children():
+            table.delete(child)
+        for summary in results:
+            median = summary.get("median_ms")
+            table.insert("", "end", values=(
+                summary["model"],
+                f"{median} ms" if median is not None else "—",
+                f"{summary['p90_ms']} ms" if summary.get("p90_ms") is not None else "—",
+                f"{summary['best_ms']} ms" if summary.get("best_ms") is not None else "—",
+                f"{summary['worst_ms']} ms" if summary.get("worst_ms") is not None else "—",
+                f"{summary['ok_runs']}/{summary['runs']}",
+                summary.get("error") or "",
+            ))
+        progress.set("Xong · bảng đã xếp theo median tăng dần")
+        restore_benchmark_buttons(probe_button, benchmark_button)
+        return True
+    if kind == "benchmark_failed":
+        _, result_win, progress, probe_button, benchmark_button = item
+        if not result_win.winfo_exists():
+            return False
+        progress.set("Benchmark dừng vì lỗi nội bộ")
+        restore_benchmark_buttons(probe_button, benchmark_button)
+        return True
+    raise ValueError(f"Unsupported benchmark event: {kind}")
 
 
 def benchmark_summary(model: str, samples: list[dict]) -> dict:
@@ -1951,6 +2099,21 @@ def list_chat_models(api_base: str | None, api_key: str | None, timeout: float =
     return {"ok": True, "ids": ids, "text": f"{len(ids)} model"}
 
 
+def apply_dark_titlebar(win) -> None:
+    """Enable Windows 10/11 immersive dark title bar on root or Toplevel."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            win.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id()
+            value = ctypes.c_int(1)
+            for attr in (20, 19):  # DWMWA_USE_IMMERSIVE_DARK_MODE (20 on 20H1+, 19 older)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(value), ctypes.sizeof(value))
+        except Exception:
+            pass
+
+
 def apply_dark_theme(root) -> None:
     """Dark ttk styling + dark Windows title bar, for comfortable night use.
 
@@ -1974,8 +2137,8 @@ def apply_dark_theme(root) -> None:
         darkcolor=C_BG,
         troughcolor=C_BG,
         focuscolor=C_SURFACE,
-        selectbackground=C_ACCENT,
-        selectforeground="#1a1408",
+        selectbackground="#2c435c",
+        selectforeground=C_INK,
     )
     style.configure(
         "Treeview",
@@ -1986,37 +2149,49 @@ def apply_dark_theme(root) -> None:
         lightcolor=C_LINE,
         darkcolor=C_BG,
     )
-    style.configure("Treeview.Heading", background=C_BG, foreground=C_MUTED, relief="flat", bordercolor=C_LINE)
+    style.configure("Treeview.Heading", background=C_ELEVATED, foreground=C_INK, font=(FONT, 9, "bold"), relief="flat", bordercolor=C_LINE, padding=(6, 4))
     style.map("Treeview.Heading", background=[("active", C_BTN)])
-    style.map("Treeview", background=[("selected", C_ACCENT)], foreground=[("selected", "#1a1408")])
+    style.map("Treeview", background=[("selected", "#2c435c")], foreground=[("selected", C_INK)])
     style.configure(
         "TCombobox",
         background=C_BTN,
-        fieldbackground=C_SURFACE,
+        fieldbackground=C_ELEVATED,
         foreground=C_INK,
-        arrowcolor=C_MUTED,
+        arrowcolor=C_ACCENT,
         bordercolor=C_LINE,
+        padding=(4, 2),
     )
     style.map(
         "TCombobox",
-        fieldbackground=[("readonly", C_SURFACE)],
+        fieldbackground=[("readonly", C_ELEVATED)],
         foreground=[("readonly", C_INK)],
-        selectbackground=[("readonly", C_SURFACE)],
+        selectbackground=[("readonly", C_ELEVATED)],
         selectforeground=[("readonly", C_INK)],
-        background=[("active", C_SURFACE)],
+        background=[("active", C_BTN_HOVER)],
     )
-    style.configure("TEntry", fieldbackground=C_SURFACE, foreground=C_INK, insertcolor=C_INK, bordercolor=C_LINE)
+    style.configure(
+        "Ov.TCombobox",
+        fieldbackground=C_ELEVATED, background=C_BTN, foreground=C_INK,
+        arrowcolor=C_ACCENT, bordercolor=C_LINE, lightcolor=C_LINE, darkcolor=C_BG,
+        padding=(6, 4),
+    )
+    style.map(
+        "Ov.TCombobox",
+        fieldbackground=[("readonly", C_ELEVATED)],
+        foreground=[("readonly", C_INK)],
+    )
+    style.configure("TEntry", fieldbackground=C_ELEVATED, foreground=C_INK, insertcolor=C_INK, bordercolor=C_LINE, padding=(5, 3))
     style.configure("TCheckbutton", background=C_SURFACE, foreground=C_INK, focuscolor=C_SURFACE)
     style.map(
         "TCheckbutton",
         background=[("active", C_SURFACE)],
         indicatorcolor=[("selected", C_ACCENT), ("!selected", C_BTN)],
     )
-    style.configure("TButton", background=C_BTN, foreground=C_INK, bordercolor=C_LINE, focuscolor=C_SURFACE)
+    style.configure("TButton", background=C_BTN, foreground=C_INK, bordercolor=C_LINE, focuscolor=C_SURFACE, padding=(8, 3))
     style.map(
         "TButton",
-        background=[("active", C_SURFACE), ("pressed", C_ACCENT)],
-        foreground=[("disabled", C_MUTED)],
+        background=[("active", C_BTN_HOVER), ("pressed", C_ACCENT)],
+        foreground=[("pressed", "#161208"), ("disabled", C_MUTED)],
     )
     for orient in ("Vertical", "Horizontal"):
         style.configure(
@@ -2028,20 +2203,42 @@ def apply_dark_theme(root) -> None:
             lightcolor=C_BTN,
             darkcolor=C_BTN,
         )
-        style.map(f"{orient}.TScrollbar", background=[("active", C_ACCENT)])
+        style.map(f"{orient}.TScrollbar", background=[("active", C_BTN_HOVER)])
+    style.configure("TNotebook", background=C_BG, bordercolor=C_LINE, tabmargins=(2, 2, 2, 0))
+    style.configure("TNotebook.Tab", background=C_SURFACE, foreground=C_MUTED, padding=(12, 6), bordercolor=C_LINE)
+    style.map("TNotebook.Tab", background=[("selected", C_ELEVATED)], foreground=[("selected", C_ACCENT)])
     style.configure("TLabelframe", background=C_SURFACE, foreground=C_MUTED, bordercolor=C_LINE)
     style.configure("TSeparator", background=C_LINE)
-    if sys.platform == "win32":
-        try:
-            import ctypes
+    try:
+        root.option_add("*TCombobox*Listbox.background", C_ELEVATED)
+        root.option_add("*TCombobox*Listbox.foreground", C_INK)
+        root.option_add("*TCombobox*Listbox.selectBackground", "#2c435c")
+        root.option_add("*TCombobox*Listbox.selectForeground", C_INK)
+    except Exception:
+        pass
+    apply_dark_titlebar(root)
 
-            root.update_idletasks()
-            hwnd = ctypes.windll.user32.GetParent(root.winfo_id()) or root.winfo_id()
-            value = ctypes.c_int(1)
-            for attr in (20, 19):  # DWMWA_USE_IMMERSIVE_DARK_MODE (20 on 20H1+, 19 older)
-                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(value), ctypes.sizeof(value))
-        except Exception:
-            pass
+
+def fit_window_dimension(current: int, required: int, screen_limit: int, shrink_slack: int = 140, allow_shrink: bool = True) -> int:
+    """Fit one window dimension while preserving deliberate user-added slack."""
+    current = max(1, int(current))
+    required = max(1, int(required))
+    limit = max(1, int(screen_limit))
+    if not allow_shrink:
+        return min(max(current, required), limit)
+    target = required if current > required + max(0, int(shrink_slack)) else max(current, required)
+    return min(target, limit)
+
+
+def dashboard_content_height(chrome: int, upper_required: int, lower_minimum: int, sash: int, screen_limit: int) -> int:
+    """Minimum screen-bounded height derived only from dashboard content."""
+    chrome = max(0, int(chrome))
+    upper_required = max(1, int(upper_required))
+    lower_minimum = max(1, int(lower_minimum))
+    sash = max(1, int(sash))
+    limit = max(1, int(screen_limit))
+    return min(chrome + upper_required + lower_minimum + sash + 8, limit)
+
 
 
 # --- GUI ---
@@ -2063,7 +2260,6 @@ def run_gui(start_hidden: bool) -> None:
     root.geometry(state.get("geometry") or "1020x640")
     if state.get("always_on_top"):
         root.attributes("-topmost", True)
-    root.update_idletasks()
     apply_window_icon(root)
     apply_dark_theme(root)
 
@@ -2096,6 +2292,8 @@ def run_gui(start_hidden: bool) -> None:
             pass
 
     def quit_app():
+        watch_panel.close()
+        spare_batch["stop"].set()
         try:
             state["geometry"] = root.geometry()
             save_state(state)
@@ -2122,106 +2320,112 @@ def run_gui(start_hidden: bool) -> None:
     btn_fr = tk.Frame(top, bg=C_BG)
     btn_fr.pack(side="right")
     restart_btn = tk.Button(
-        btn_fr, text="Khởi động lại", font=(FONT, 11, "bold"),
-        bg=C_ACCENT, fg="#1a1408", activebackground="#d4b56a",
-        relief="flat", padx=16, pady=8, cursor="hand2",
+        btn_fr, text="Khởi động lại", font=(FONT, 10, "bold"),
+        bg=C_ACCENT, fg="#161208", activebackground="#f0ca75", activeforeground="#161208",
+        relief="flat", padx=15, pady=7, cursor="hand2",
     )
     restart_btn.pack(side="left", padx=(0, 8))
     start_btn = tk.Button(
         btn_fr, text="Chạy OpenViking", font=(FONT, 10),
-        bg=C_SURFACE, fg=C_INK, relief="flat", padx=12, pady=8, cursor="hand2",
+        bg=C_BTN, fg=C_INK, activebackground=C_BTN_HOVER, activeforeground=C_INK,
+        relief="flat", padx=12, pady=7, cursor="hand2",
     )
     start_btn.pack(side="left", padx=(0, 8))
     more_btn = tk.Button(
         btn_fr, text="Cài đặt", font=(FONT, 10),
-        bg=C_SURFACE, fg=C_INK, relief="flat", padx=12, pady=8, cursor="hand2",
+        bg=C_BTN, fg=C_INK, activebackground=C_BTN_HOVER, activeforeground=C_INK,
+        relief="flat", padx=12, pady=7, cursor="hand2",
     )
     more_btn.pack(side="left")
     sentence_lbl = tk.Label(
         top, textvariable=sentence_var, bg=C_BG, fg=C_INK,
-        font=(FONT, 16, "bold"), anchor="w", justify="left", wraplength=500,
+        font=(FONT, 15, "bold"), anchor="w", justify="left", wraplength=500,
     )
     sentence_lbl.pack(side="left", fill="x", expand=True, padx=(0, 12))
 
     # Banner cảnh báo sự cố chuyên biệt (Incident Banner)
-    incident_fr = tk.Frame(root, bg="#331414")
+    incident_fr = tk.Frame(root, bg="#331414", highlightbackground="#5c2626", highlightthickness=1)
     incident_var = tk.StringVar(value="")
     incident_lbl = tk.Label(
-        incident_fr, textvariable=incident_var, bg="#331414", fg="#ff8888",
+        incident_fr, textvariable=incident_var, bg="#331414", fg="#ff9494",
         font=(FONT, 10, "bold"), anchor="w", justify="left", wraplength=640, padx=12, pady=6,
     )
     incident_lbl.pack(fill="x")
 
-    pending_fr = tk.Frame(root, bg=C_BG)
+    pending_fr = tk.Frame(root, bg=C_ELEVATED, highlightbackground=C_WARN, highlightthickness=1)
     pending_var = tk.StringVar(value="")
     tk.Label(
-        pending_fr, textvariable=pending_var, bg=C_BG, fg=C_WARN,
-        font=(FONT, 10), anchor="w", justify="left", wraplength=620,
+        pending_fr, textvariable=pending_var, bg=C_ELEVATED, fg=C_WARN,
+        font=(FONT, 9, "bold"), anchor="w", justify="left", wraplength=620, padx=10, pady=4,
     ).pack(fill="x")
 
     dots = tk.Frame(root, bg=C_BG)
-    dots.pack(fill="x", padx=18)
+    dots.pack(fill="x", padx=18, pady=(0, 4))
     dot_vars = {}
     for key, label in (("ov", "OpenViking"), ("ollama", "Ollama"), ("watchdog", "Watchdog"), ("gateway", "Cổng 20128")):
-        f = tk.Frame(dots, bg=C_BG)
-        f.pack(side="left", padx=(0, 22))
-        c = tk.Canvas(f, width=10, height=10, bg=C_BG, highlightthickness=0)
+        f = tk.Frame(dots, bg=C_SURFACE, highlightbackground=C_LINE, highlightthickness=1, padx=8, pady=3)
+        f.pack(side="left", padx=(0, 10))
+        c = tk.Canvas(f, width=10, height=10, bg=C_SURFACE, highlightthickness=0)
         oval = c.create_oval(1, 1, 9, 9, fill=C_MUTED, outline="")
         c.pack(side="left", padx=(0, 6))
-        tk.Label(f, text=label, bg=C_BG, fg=C_MUTED, font=(FONT, 9)).pack(side="left")
+        tk.Label(f, text=label, bg=C_SURFACE, fg=C_INK, font=(FONT, 9)).pack(side="left")
         dot_vars[key] = (c, oval)
 
-    # Info line, status line and the two links all live in the ops panel now,
-    # so there is no separate footer row.
+    foot_var = tk.StringVar(value=state.get("_watch_state_error") or "")
+    foot_label = tk.Label(root, name="shared_status", textvariable=foot_var, bg=C_BG,
+                          fg=C_WARN, font=(FONT, 8), anchor="w", justify="left",
+                          wraplength=1000)
+    foot_label.pack(side="bottom", fill="x", padx=18, pady=(0, 6))
     body = tk.Frame(root, bg=C_BG)
     body.pack(fill="both", expand=True, padx=18, pady=6)
 
     def card(parent, title, note: str = ""):
         fr = tk.Frame(parent, bg=C_SURFACE, highlightbackground=C_LINE, highlightthickness=1)
         head = tk.Frame(fr, bg=C_SURFACE)
-        head.pack(fill="x", padx=14, pady=(8, 0))
-        tk.Label(head, text=title, bg=C_SURFACE, fg=C_MUTED, font=(FONT, 8), anchor="w").pack(side="left")
+        head.pack(fill="x", padx=14, pady=(8, 4))
+        tk.Label(head, text=title, bg=C_SURFACE, fg=C_ACCENT, font=(FONT, 8, "bold"), anchor="w").pack(side="left")
         if note:
             tk.Label(head, text=note, bg=C_SURFACE, fg=C_MUTED, font=(FONT, 8), anchor="e").pack(side="right")
+        tk.Frame(fr, bg=C_LINE, height=1).pack(fill="x", padx=14, pady=(0, 2))
         return fr
 
-    panes = tk.PanedWindow(body, orient="vertical", bg=C_BG, sashwidth=7, sashrelief="flat")
-    panes.pack(fill="both", expand=True)
-    upper = tk.Frame(panes, bg=C_BG)
-    panes.add(upper, minsize=170, stretch="never")
+    notebook = ttk.Notebook(body, name="main_tabs", width=1, height=1)
+    notebook.pack(fill="both", expand=True)
+    overview_tab = tk.Frame(notebook, bg=C_BG, name="overview")
+    reserve_tab = tk.Frame(notebook, bg=C_BG, name="reserve")
+    notebook.add(overview_tab, text="Tổng quan")
+    notebook.add(reserve_tab, text="Dự trữ")
+    upper = tk.Frame(overview_tab, bg=C_BG)
+    upper.pack(fill="x")
     left = tk.Frame(upper, bg=C_BG)
-    left.pack(side="left", fill="x", expand=True, padx=(0, 10))
+    left.pack(side="left", fill="x", expand=True)
 
     model_card = card(left, "MODEL")
-    model_card.pack(fill="x", pady=(0, 10))
-    # Ops panel: uses the empty right side of the MODEL card instead of its own row.
+    model_card.pack(fill="x", pady=(0, 8))
+    # Ops panel: structured cockpit sub-panel on the right side of the MODEL card.
     ops_text = tk.StringVar(value="")
     extra_var = tk.StringVar(value="")
     info_var = tk.StringVar(value="")
-    foot_var = tk.StringVar(value="")
-    ops_panel = tk.Frame(model_card, bg=C_SURFACE, name="ops_panel")
-    ops_panel.pack(side="right", fill="y", padx=(6, 12), pady=(8, 10))
-    tk.Label(ops_panel, text="VẬN HÀNH", bg=C_SURFACE, fg=C_MUTED, font=(FONT, 8), anchor="w").pack(fill="x")
-    tk.Label(ops_panel, textvariable=ops_text, bg=C_SURFACE, fg=C_MUTED, font=(FONT, 8),
-             anchor="w", justify="left", wraplength=244).pack(fill="x", pady=(2, 0))
-    tk.Label(ops_panel, textvariable=info_var, bg=C_SURFACE, fg=C_MUTED, font=(FONT, 8),
-             anchor="w", justify="left", wraplength=244).pack(side="bottom", fill="x")
-    link_fr = tk.Frame(ops_panel, bg=C_SURFACE, name="ops_links")
-    link_fr.pack(side="bottom", fill="x")
-    foot_label = tk.Label(ops_panel, textvariable=foot_var, bg=C_SURFACE, fg=C_MUTED, font=(FONT, 8),
-                          anchor="w", justify="left", wraplength=244)
+    ops_panel = tk.Frame(
+        model_card, bg=C_ELEVATED, highlightbackground=C_LINE, highlightthickness=1,
+        name="ops_panel",
+    )
+    ops_panel.pack(side="right", fill="y", padx=(8, 12), pady=(6, 10))
+    ops_wrap = max(248, min(320, int(root.winfo_screenwidth() * 0.10)))
+    ops_head = tk.Frame(ops_panel, bg=C_ELEVATED)
+    ops_head.pack(fill="x", padx=10, pady=(4, 0))
+    tk.Label(ops_head, text="VẬN HÀNH", bg=C_ELEVATED, fg=C_ACCENT, font=(FONT, 8, "bold"), anchor="w").pack(side="left")
 
-    def _foot_sync(*_):
-        """Status messages share the ops panel; keep the row only while it has text."""
-        if foot_var.get().strip():
-            if not foot_label.winfo_manager():
-                foot_label.pack(side="bottom", fill="x")
-        elif foot_label.winfo_manager():
-            foot_label.pack_forget()
+    tk.Label(ops_panel, textvariable=ops_text, bg=C_ELEVATED, fg=C_INK, font=(FONT, 8),
+             anchor="w", justify="left", wraplength=ops_wrap, padx=10).pack(fill="x", pady=(2, 0))
+    tk.Label(ops_panel, textvariable=info_var, bg=C_ELEVATED, fg=C_MUTED, font=(FONT, 8),
+             anchor="w", justify="left", wraplength=ops_wrap, padx=10).pack(side="bottom", fill="x", pady=(2, 6))
+    link_fr = tk.Frame(ops_panel, bg=C_ELEVATED, name="ops_links")
+    link_fr.pack(side="bottom", fill="x", padx=10, pady=(1, 0))
 
-    foot_var.trace_add("write", _foot_sync)
     tk.Button(ops_panel, text="Chính sách", command=lambda: open_failback(), bg=C_BTN, fg=C_INK,
-              relief="flat", cursor="hand2", activebackground=C_SURFACE, activeforeground=C_INK).pack(side="bottom", fill="x", pady=(4, 0))
+              font=(FONT, 8, "bold"), pady=2, relief="flat", cursor="hand2",
+              activebackground=C_BTN_HOVER, activeforeground=C_INK).pack(side="bottom", fill="x", padx=10, pady=(3, 0))
 
     def refresh_ops(*_):
         parts = [
@@ -2232,20 +2436,7 @@ def run_gui(start_hidden: bool) -> None:
             extra_var.get(),
         ]
         ops_text.set("\n".join(p for p in parts if p and p.strip()))
-    auto_probe_enabled = tk.BooleanVar(value=bool(state.get("auto_probe_enabled")))
-    auto_probe_minutes = tk.IntVar(value=1 if int(state.get("auto_probe_minutes") or 10) == 1 else 10)
-    auto_busy = {"value": False, "last": 0.0}
-    auto_bar = tk.Frame(ops_panel, bg=C_SURFACE)
-    auto_bar.pack(side="bottom", fill="x", pady=(6, 0))
-    auto_check = tk.Checkbutton(
-        auto_bar, text="Auto thử", variable=auto_probe_enabled,
-        bg=C_SURFACE, fg=C_MUTED, selectcolor=C_BTN,
-        activebackground=C_SURFACE, activeforeground=C_INK, font=(FONT, 9),
-    )
-    auto_check.pack(side="left")
-    auto_menu = ttk.Combobox(auto_bar, textvariable=auto_probe_minutes, values=(1, 10), state="readonly", width=3, font=(FONT, 9))
-    auto_menu.pack(side="left", padx=(4, 2))
-    tk.Label(auto_bar, text="phút", bg=C_SURFACE, fg=C_MUTED, font=(FONT, 9)).pack(side="left")
+
     using_var = tk.StringVar(value="Đang dùng  —")
     fo_var = tk.StringVar(value="Failover     không")
     _init_conf = read_ov_conf()
@@ -2256,8 +2447,8 @@ def run_gui(start_hidden: bool) -> None:
     meta_var = tk.StringVar(value=f"{_init_think}  ·  retry {_init_retries}  ·  về chính sau {_init_fbt}s  ·  request {_init_fbn}")
     usage_var = tk.StringVar(value="chưa có lần gọi")
     tk.Label(model_card, textvariable=using_var, bg=C_SURFACE, fg=C_INK, font=(FONT, 13, "bold"), anchor="w", justify="left", wraplength=520).pack(fill="x", padx=14, pady=(6, 0))
-    fo_lbl = tk.Label(model_card, textvariable=fo_var, bg=C_SURFACE, fg=C_MUTED, font=(FONT, 11), anchor="w")
-    fo_lbl.pack(fill="x", padx=14, pady=(2, 0))
+    fo_lbl = tk.Label(model_card, textvariable=fo_var, bg=C_SURFACE, fg=C_MUTED, font=(FONT, 10), anchor="w")
+    fo_lbl.pack(fill="x", padx=14, pady=(1, 4))
 
     probe_vars: dict = {}
     probe_lbls: dict = {}
@@ -2284,8 +2475,10 @@ def run_gui(start_hidden: bool) -> None:
         return model + " @ " + model_cache_key(slot.get("api_base") or "", slot.get("api_key") or "")
 
     def model_row(parent, key: str, role: str, index: int = 0, n: int = 1):
-        row = tk.Frame(parent, bg=C_SURFACE)
-        row.pack(fill="x", padx=14, pady=3)
+        row = tk.Frame(parent, bg=C_SURFACE, highlightbackground=C_SURFACE, highlightthickness=1)
+        row.pack(fill="x", padx=12, pady=1)
+        bar = tk.Frame(row, bg=C_SURFACE, width=3)
+        bar.pack(side="left", fill="y", padx=(0, 6))
         if key not in name_vars:
             name_vars[key] = tk.StringVar(value="—")
         if key not in probe_vars:
@@ -2294,48 +2487,55 @@ def run_gui(start_hidden: bool) -> None:
         # không bao giờ bị tên model dài chèn ép làm cắt chữ:
         btn = tk.Button(
             row, text="Thử", font=(FONT, 9), bg=C_BTN, fg=C_ACCENT, relief="flat",
-            padx=10, pady=2, cursor="hand2", activebackground=C_SURFACE, activeforeground=C_INK,
+            padx=10, pady=0, cursor="hand2", activebackground=C_BTN_HOVER, activeforeground=C_INK,
         )
-        btn.pack(side="right")
+        btn.pack(side="right", padx=(0, 4))
         st = tk.Label(
             row, textvariable=probe_vars[key], bg=C_SURFACE, fg=C_MUTED,
-            font=(FONT, 10), anchor="e", padx=4,
+            font=(MONO, 9), anchor="e", padx=4,
         )
-        st.pack(side="right", padx=(0, 8))
+        st.pack(side="right", padx=(0, 6))
         probe_lbls[key] = st
         probe_btns[key] = btn
 
         # Đóng gói phía TRÁI: số thứ tự, vai trò, số lỗi
         rank_btn = tk.Button(
-            row, text=str(index + 1), font=(FONT, 11, "bold"), bg=C_BTN, fg=C_ACCENT,
+            row, text=str(index + 1), font=(FONT, 9, "bold"), bg=C_BTN, fg=C_ACCENT,
             relief="flat", width=3, cursor="hand2",
-            activebackground=C_SURFACE, activeforeground=C_INK, padx=0, pady=0,
+            activebackground=C_BTN_HOVER, activeforeground=C_INK, padx=0, pady=0,
             command=lambda k=key: pick_rank(k),
         )
         rank_btn.pack(side="left", padx=(0, 6))
         move_btns[key] = (rank_btn,)
         role_btn = tk.Button(
-            row, text=role, font=(FONT, 11), bg=C_SURFACE, fg=C_MUTED,
-            relief="flat", width=12, anchor="w", cursor="hand2", bd=0,
-            activebackground=C_BTN, activeforeground=C_INK, padx=0, pady=0,
+            row, text=role, font=(FONT, 9), bg=C_SURFACE, fg=C_MUTED,
+            relief="flat", anchor="w", cursor="hand2", bd=0,
+            activebackground=C_BTN_HOVER, activeforeground=C_INK, padx=0, pady=0,
         )
         role_btn.pack(side="left")
         role_btns[key] = role_btn
         if key not in fail_vars:
             fail_vars[key] = tk.StringVar(value="")
-        tk.Label(
+        fail_lbl = tk.Label(
             row, textvariable=fail_vars[key], bg=C_SURFACE, fg=C_BAD,
-            font=(FONT, 11, "bold"), anchor="e", padx=4,
-        ).pack(side="left")
+            font=(FONT, 10, "bold"), anchor="e", padx=2,
+        )
+        fail_lbl.pack(side="left")
 
         # Nút tên model đóng gói CUỐI CÙNG với expand=True để co giãn linh hoạt ở giữa,
-        # đặt width=16 (reqwidth ~140px) để ở màn hình hẹp 880px vẫn đủ chỗ co giãn không bị cắt
+        # đặt width=14 (reqwidth ~125px) để ở màn hình hẹp 880px vẫn đủ chỗ co giãn không bị cắt
         name_btn = tk.Button(
-            row, textvariable=name_vars[key], font=(FONT, 11), bg=C_SURFACE, fg=C_INK,
-            relief="flat", anchor="w", cursor="hand2", bd=0, padx=4, pady=0, width=16,
-            activebackground=C_BTN, activeforeground=C_ACCENT,
+            row, textvariable=name_vars[key], font=(FONT, 9), bg=C_SURFACE, fg=C_INK,
+            relief="flat", anchor="w", cursor="hand2", bd=0, padx=4, pady=0, width=14,
+            activebackground=C_BTN_HOVER, activeforeground=C_ACCENT,
         )
         name_btn.pack(side="left", fill="x", expand=True)
+        def wrap_name(event):
+            width = max(40, event.width - 8)
+            if name_btn.winfo_pixels(name_btn.cget("wraplength")) != width:
+                name_btn.configure(wraplength=width)
+        name_btn.bind("<Configure>", wrap_name)
+        role_btn._row_parts = (row, bar, role_btn, fail_lbl, name_btn, st)
         role_btn.configure(command=lambda k=key: do_switch(k))
         name_btn.configure(command=lambda k=key: do_edit(k))
         btn.configure(command=lambda k=key: do_probe(k))
@@ -2374,41 +2574,16 @@ def run_gui(start_hidden: bool) -> None:
         add_btn.configure(state="normal" if len(slots) < MAX_SLOTS else "disabled")
 
     from reserve_table import ReserveTable
-    spare_card = card(panes, "DỰ TRỮ", note="Double-click để sửa · Delete để xóa · Ctrl/Shift để chọn nhiều · Chỉ ghi cấu hình khi Đưa vào slot")
-    panes.add(spare_card, minsize=270, stretch="always")
-    manual_split = {"locked": bool(state.get("manual_split"))}
-
-    def save_split(_event=None):
-        manual_split["locked"] = True
-        state["manual_split"] = True
-        state["reserve_split"] = panes.sash_coord(0)[1]
-        try:
-            save_state(state)
-        except Exception:
-            pass
-    panes.bind("<ButtonRelease-1>", save_split)
-
-    def fit_split(*_):
-        """Keep the sash just under the MODEL card so no empty band is left,
-        until the user drags the split themselves."""
-        if manual_split["locked"]:
-            return
-        want = upper.winfo_reqheight()
-        limit = max(170, panes.winfo_height() - 280)
-        y = int(min(max(want, 170), limit))
-        if abs(panes.sash_coord(0)[1] - y) > 1:
-            panes.sash_place(0, 0, y)
-
-    upper.bind("<Configure>", fit_split)
-    if manual_split["locked"] and state.get("reserve_split"):
-        root.after(250, lambda: panes.sash_place(0, 0, int(state["reserve_split"])))
-    else:
-        root.after(250, fit_split)
-    root.after(1500, fit_split)
+    spare_card = card(reserve_tab, "DỰ TRỮ", note="Double-click để sửa · Delete để xóa · Ctrl/Shift để chọn nhiều · Chỉ ghi cấu hình khi Đưa vào slot")
+    spare_card.pack(fill="both", expand=True, pady=(6, 0))
     spare_list = ReserveTable(spare_card, preferences=state.setdefault("reserve_layout", {}), bg=C_SURFACE)
     spare_list.pack(fill="both", expand=True, padx=8, pady=(6, 4))
     spare_btns = tk.Frame(spare_card, bg=C_SURFACE)
     spare_btns.pack(fill="x", padx=8, pady=(0, 4))
+    spare_manage = tk.Frame(spare_btns, bg=C_SURFACE)
+    spare_manage.pack(fill="x", pady=(0, 5))
+    spare_actions = tk.Frame(spare_btns, bg=C_SURFACE)
+    spare_actions.pack(fill="x")
     spare_fail_bar = tk.Frame(spare_card, bg=C_SURFACE)
     spare_fail_bar.pack(fill="x", padx=8, pady=(0, 8))
 
@@ -2429,9 +2604,10 @@ def run_gui(start_hidden: bool) -> None:
     refresh_ops()
 
     def link(text, cmd):
-        b = tk.Button(link_fr, text=text, command=cmd, bg=C_SURFACE, fg=C_ACCENT, relief="flat",
-                      font=(FONT, 8), cursor="hand2", activebackground=C_SURFACE, activeforeground=C_INK)
-        b.pack(side="left", padx=(0, 10))
+        b = tk.Button(link_fr, text=text, command=cmd, bg=C_ELEVATED, fg=C_ACCENT, relief="flat",
+                      font=(FONT, 8, "underline"), bd=0, padx=0, pady=1, cursor="hand2",
+                      activebackground=C_ELEVATED, activeforeground=C_INK)
+        b.pack(side="left", padx=(0, 12))
         return b
 
     def apply_probe(key: str, result: dict | None, pending: bool = False):
@@ -2624,6 +2800,8 @@ def run_gui(start_hidden: bool) -> None:
         win.resizable(False, False)
         win.transient(root)
         win.grab_set()
+        apply_dark_titlebar(win)
+        win.bind("<Escape>", lambda _e: win.destroy())
         tk.Label(
             win,
             text=f"Gắn {item.get('model')} vào",
@@ -2673,6 +2851,8 @@ def run_gui(start_hidden: bool) -> None:
         win.resizable(False, False)
         win.transient(root)
         win.grab_set()
+        apply_dark_titlebar(win)
+        win.bind("<Escape>", lambda _e: win.destroy())
         tk.Label(
             win,
             text="Chọn Chính hoặc Dự phòng để cất vào DỰ TRỮ.\nKhông ghi ov.conf.",
@@ -2796,14 +2976,15 @@ def run_gui(start_hidden: bool) -> None:
 
     spare_list.bind("<Double-Button-1>", edit_selected_spare)
     spare_list.bind("<Delete>", delete_selected_spare)
-    tk.Button(spare_btns, text="Dừng", command=spare_batch["stop"].set, bg=C_BTN, fg=C_INK, relief="flat", font=(FONT, 8), padx=8, pady=3).pack(side="right")
+    tk.Button(spare_manage, text="Xóa", command=delete_selected_spare, bg=C_BTN, fg=C_BAD, activebackground=C_BTN_HOVER, activeforeground=C_BAD, relief="flat", font=(FONT, 9), padx=10, pady=3, cursor="hand2").pack(side="right")
+    tk.Button(spare_manage, text="Dừng", command=spare_batch["stop"].set, bg=C_BTN, fg=C_INK, activebackground=C_BTN_HOVER, activeforeground=C_INK, relief="flat", font=(FONT, 9), padx=10, pady=3, cursor="hand2").pack(side="right", padx=(0, 6))
     def copy_spare_field(field):
         _, item = selected_spare()
         if item:
             root.clipboard_clear()
             root.clipboard_append(item.get(field, ""))
             foot_var.set("Đã sao chép " + field)
-    spare_menu = tk.Menu(root, tearoff=False)
+    spare_menu = tk.Menu(root, tearoff=False, bg=C_ELEVATED, fg=C_INK, activebackground="#2c435c", activeforeground=C_INK, bd=1, relief="solid")
     for label, command in (("Sửa", edit_selected_spare), ("Thử đã chọn", probe_selected_spare), ("Sao chép model", lambda: copy_spare_field("model")), ("Sao chép endpoint", lambda: copy_spare_field("api_base")), ("Đưa vào slot", apply_selected_spare), ("Kiểm định an toàn", audit_selected_spare), ("Xóa", delete_selected_spare)):
         spare_menu.add_command(label=label, command=command)
     def show_spare_menu(event):
@@ -2818,14 +2999,18 @@ def run_gui(start_hidden: bool) -> None:
             spare_menu.grab_release()
     spare_list.bind("<Button-3>", show_spare_menu)
 
-    tk.Button(spare_btns, text="+ Lưu", command=add_spare_dialog, bg=C_BTN, fg=C_ACCENT, relief="flat", font=(FONT, 8), padx=8, pady=3, cursor="hand2").pack(side="left")
-    tk.Button(spare_btns, text="Thử", command=probe_selected_spare, bg=C_BTN, fg=C_INK, relief="flat", font=(FONT, 8), padx=8, pady=3, cursor="hand2").pack(side="left", padx=(4, 0))
-    tk.Button(spare_btns, text="Chép key", command=copy_selected_spare_key, bg=C_BTN, fg=C_INK, relief="flat", font=(FONT, 8), padx=8, pady=3, cursor="hand2").pack(side="left", padx=(4, 0))
-    tk.Button(spare_btns, text="Đưa vào slot", command=apply_selected_spare, bg=C_ACCENT, fg="#1a1408", relief="flat", font=(FONT, 8), padx=8, pady=3, cursor="hand2").pack(side="left", padx=(8, 0))
-    tk.Button(spare_btns, text="Thay slot lỗi", command=replace_failing_slot, bg=C_BTN, fg=C_WARN, relief="flat", font=(FONT, 8), padx=8, pady=3, cursor="hand2").pack(side="left", padx=(4, 0))
-    tk.Button(spare_btns, text="Từ slot", command=copy_slot_to_spare, bg=C_BTN, fg=C_ACCENT, relief="flat", font=(FONT, 8), padx=8, pady=3, cursor="hand2").pack(side="left", padx=(4, 0))
-    tk.Button(spare_btns, text="Kiểm định an toàn", command=audit_selected_spare, bg=C_BTN, fg=C_ACCENT, relief="flat", font=(FONT, 8), padx=8, pady=3, cursor="hand2").pack(side="left", padx=(8, 0))
-    tk.Button(spare_btns, text="Xóa", command=delete_selected_spare, bg=C_BTN, fg=C_BAD, relief="flat", font=(FONT, 8), padx=8, pady=3, cursor="hand2").pack(side="right")
+    def _bar_sep():
+        tk.Frame(spare_actions, bg=C_LINE, width=1).pack(side="left", fill="y", padx=8, pady=3)
+
+    tk.Button(spare_manage, text="+ Lưu", command=add_spare_dialog, bg=C_BTN, fg=C_ACCENT, activebackground=C_BTN_HOVER, activeforeground=C_ACCENT, relief="flat", font=(FONT, 9, "bold"), padx=10, pady=3, cursor="hand2").pack(side="left")
+    tk.Button(spare_manage, text="Từ slot", command=copy_slot_to_spare, bg=C_BTN, fg=C_INK, activebackground=C_BTN_HOVER, activeforeground=C_INK, relief="flat", font=(FONT, 9), padx=9, pady=3, cursor="hand2").pack(side="left", padx=(5, 0))
+    tk.Button(spare_manage, text="Chép key", command=copy_selected_spare_key, bg=C_BTN, fg=C_INK, activebackground=C_BTN_HOVER, activeforeground=C_INK, relief="flat", font=(FONT, 9), padx=9, pady=3, cursor="hand2").pack(side="left", padx=(5, 0))
+    _bar_sep()
+    tk.Button(spare_actions, text="Thử", command=probe_selected_spare, bg=C_BTN, fg=C_INK, activebackground=C_BTN_HOVER, activeforeground=C_INK, relief="flat", font=(FONT, 9), padx=10, pady=3, cursor="hand2").pack(side="left")
+    tk.Button(spare_actions, text="Kiểm định an toàn", command=audit_selected_spare, bg=C_BTN, fg=C_ACCENT, activebackground=C_BTN_HOVER, activeforeground=C_ACCENT, relief="flat", font=(FONT, 9), padx=10, pady=3, cursor="hand2").pack(side="left", padx=(5, 0))
+    _bar_sep()
+    tk.Button(spare_actions, text="Đưa vào slot", command=apply_selected_spare, bg=C_ACCENT, fg="#161208", activebackground="#f0ca75", activeforeground="#161208", relief="flat", font=(FONT, 9, "bold"), padx=11, pady=3, cursor="hand2").pack(side="left")
+    tk.Button(spare_actions, text="Thay slot lỗi", command=replace_failing_slot, bg=C_BTN, fg=C_WARN, activebackground=C_BTN_HOVER, activeforeground=C_WARN, relief="flat", font=(FONT, 9), padx=10, pady=3, cursor="hand2").pack(side="left", padx=(5, 0))
     spare_fail_bar.pack_forget()
     refresh_spares()
 
@@ -2849,44 +3034,21 @@ def run_gui(start_hidden: bool) -> None:
 
         threading.Thread(target=work, daemon=True).start()
 
-    def save_auto_probe(*_):
-        state["auto_probe_enabled"] = bool(auto_probe_enabled.get())
-        state["auto_probe_minutes"] = int(auto_probe_minutes.get())
-        if state["auto_probe_enabled"]:
-            auto_busy["last"] = 0.0
-        save_state(state)
+    from watch_panel import WatchPanel
+    watch_panel = WatchPanel(
+        overview_tab, state=state, save=save_state, probe=probe_model, emit=uiq.put,
+        status=foot_var.set,
+        sources=lambda: [(f"Slot {i + 1}", item) for i, item in enumerate(live_slots())] +
+                        [("Dự trữ", item) for item in spare_items()],
+        colors=dict(surface=C_SURFACE, line=C_LINE, accent=C_ACCENT, muted=C_MUTED,
+                    ink=C_INK, btn=C_BTN, hover=C_BTN_HOVER, ok=C_OK, bad=C_BAD, warn=C_WARN), font=FONT,
+    )
+    watch_panel.pack(fill="both", expand=True, pady=(0, 2))
 
-    auto_check.configure(command=save_auto_probe)
-    auto_menu.bind("<<ComboboxSelected>>", save_auto_probe)
-
-    def auto_probe_tick():
-        if stop.is_set():
-            return
-        now = time.time()
-        due = max(60, int(auto_probe_minutes.get()) * 60)
-        if auto_probe_enabled.get() and not auto_busy["value"] and now - auto_busy["last"] >= due:
-            auto_busy["value"] = True
-            auto_busy["last"] = now
-
-            def work():
-                try:
-                    conf = read_ov_conf()
-                    for slot in conf.get("slots") or []:
-                        key = probe_key(slot)
-                        try:
-                            result = probe_model(
-                                slot.get("model"),
-                                slot.get("api_base") or conf.get("api_base"),
-                                slot.get("api_key") or conf.get("api_key"),
-                            )
-                        except Exception:
-                            result = {"ok": False, "text": "Fail", "ms": None, "at": time.time()}
-                        uiq.put(("probe", key, result))
-                finally:
-                    auto_busy["value"] = False
-
-            threading.Thread(target=work, daemon=True, name="ov-auto-probe").start()
-        root.after(5000, auto_probe_tick)
+    def watch_tick():
+        if not stop.is_set():
+            watch_panel.tick()
+            root.after(1000, watch_tick)
 
     def open_log():
         if LOG_PATH.exists():
@@ -2963,8 +3125,18 @@ def run_gui(start_hidden: bool) -> None:
                 fv.set(str(nfail) if nfail else "")
             on = int(s.get("index") or 0) == idx
             rb = role_btns.get(key)
-            if rb:
-                rb.configure(fg=C_ACCENT if on else C_MUTED, font=(FONT, 11, "bold" if on else "normal"))
+            rw = getattr(rb, "_row_parts", None) if rb is not None else None
+            if isinstance(rw, tuple) and len(rw) == 6:
+                r_frame, r_bar, r_role, r_fail, r_name, r_st = rw
+                row_bg = C_ACTIVE_ROW if on else C_SURFACE
+                r_frame.configure(bg=row_bg, highlightbackground=C_ACCENT if on else C_SURFACE)
+                r_bar.configure(bg=C_ACCENT if on else C_SURFACE)
+                r_role.configure(bg=row_bg, fg=C_ACCENT if on else C_MUTED, font=(FONT, 9, "bold" if on else "normal"))
+                r_fail.configure(bg=row_bg)
+                r_name.configure(bg=row_bg, font=(FONT, 9, "bold" if on else "normal"))
+                r_st.configure(bg=row_bg)
+            elif rb:
+                rb.configure(fg=C_ACCENT if on else C_MUTED, font=(FONT, 10, "bold" if on else "normal"))
         if snap.get("failover"):
             fo_var.set("Đang dùng Dự phòng")
             fo_lbl.configure(fg=C_WARN)
@@ -2992,13 +3164,13 @@ def run_gui(start_hidden: bool) -> None:
         usage_var.set(usage_s)
         q = snap.get("queue") or {}
         q_var.set(
-            f"chờ {q.get('pending') if q.get('pending') is not None else '—'}\n"
-            f"lỗi {q.get('errors') if q.get('errors') is not None else '—'}\n"
+            f"chờ {q.get('pending') if q.get('pending') is not None else '—'}  ·  "
+            f"lỗi {q.get('errors') if q.get('errors') is not None else '—'}  ·  "
             f"đang chạy {q.get('in_progress') if q.get('in_progress') is not None else '—'}"
         )
         vec = snap.get("vectors") or {}
         v_var.set(
-            f"{vec.get('vectors') if vec.get('vectors') is not None else '—'} vector\n"
+            f"{vec.get('vectors') if vec.get('vectors') is not None else '—'} vector  ·  "
             f"{vec.get('indexes') if vec.get('indexes') is not None else '—'} index"
         )
         retr = snap.get("retrieval") or {}
@@ -3115,6 +3287,8 @@ def run_gui(start_hidden: bool) -> None:
                     foot_var.set(item[1][:120])
                 elif kind == "toast_line":
                     foot_var.set(item[1])
+                elif kind in {"watch_result", "watch_done"}:
+                    watch_panel.event(item)
                 elif kind == "spare_probe":
                     _, fp, result = item
                     items = copy.deepcopy(spare_items())
@@ -3148,31 +3322,8 @@ def run_gui(start_hidden: bool) -> None:
                     if result_win.winfo_exists():
                         render(summary)
                         progress.set(f"Đã xong {index}/{total}: {summary['model']}")
-                elif kind == "benchmark_done":
-                    _, result_win, progress, results, table, probe, bench = item
-                    if result_win.winfo_exists():
-                        for child in table.get_children():
-                            table.delete(child)
-                        for summary in results:
-                            median = summary.get("median_ms")
-                            table.insert("", "end", values=(
-                                summary["model"],
-                                f"{median} ms" if median is not None else "—",
-                                f"{summary['p90_ms']} ms" if summary.get("p90_ms") is not None else "—",
-                                f"{summary['best_ms']} ms" if summary.get("best_ms") is not None else "—",
-                                f"{summary['worst_ms']} ms" if summary.get("worst_ms") is not None else "—",
-                                f"{summary['ok_runs']}/{summary['runs']}",
-                                summary.get("error") or "",
-                            ))
-                        progress.set("Xong · bảng đã xếp theo median tăng dần")
-                    probe.configure(state="normal")
-                    bench.configure(state="normal")
-                elif kind == "benchmark_failed":
-                    _, result_win, progress, probe, bench = item
-                    if result_win.winfo_exists():
-                        progress.set("Benchmark dừng vì lỗi nội bộ")
-                    probe.configure(state="normal")
-                    bench.configure(state="normal")
+                elif kind in {"benchmark_done", "benchmark_failed"}:
+                    process_benchmark_event(item)
                 elif kind == "restart_done":
                     current["restarting"] = False
                     current["pending"] = None
@@ -3380,6 +3531,8 @@ def run_gui(start_hidden: bool) -> None:
         win.resizable(False, False)
         win.transient(parent or root)
         win.grab_set()
+        apply_dark_titlebar(win)
+        win.bind("<Escape>", lambda _e: win.destroy())
         choice = {"v": None}
         tk.Label(
             win, text=body, bg=C_BG, fg=C_INK, font=(FONT, 10),
@@ -3599,6 +3752,8 @@ def run_gui(start_hidden: bool) -> None:
         win.resizable(False, False)
         win.transient(root)
         win.grab_set()
+        apply_dark_titlebar(win)
+        win.bind("<Escape>", lambda _e: win.destroy())
         place_over_root(win)
         tk.Label(
             win,
@@ -3641,9 +3796,20 @@ def run_gui(start_hidden: bool) -> None:
         win.resizable(False, False)
         win.transient(root)
         win.grab_set()
+        apply_dark_titlebar(win)
+        win.bind("<Escape>", lambda _e: win.destroy())
         body = tk.Frame(win, bg=C_BG)
-        body.pack(fill="both", padx=18, pady=14)
-        tk.Label(body, text="Base URL", bg=C_BG, fg=C_MUTED, font=(FONT, 9), anchor="w").pack(fill="x", pady=(8, 2))
+        body.pack(fill="both", padx=20, pady=16)
+
+        def _entry_kwargs(**extra):
+            base_kw = dict(
+                bg=C_ELEVATED, fg=C_INK, insertbackground=C_INK, relief="flat",
+                highlightbackground=C_LINE, highlightcolor=C_ACCENT, highlightthickness=1,
+            )
+            base_kw.update(extra)
+            return base_kw
+
+        tk.Label(body, text="Base URL", bg=C_BG, fg=C_MUTED, font=(FONT, 9, "bold"), anchor="w").pack(fill="x", pady=(0, 3))
         vars_ = {
             "base": tk.StringVar(value=src.get("api_base") or conf.get("api_base") or "http://localhost:20128/v1"),
             "key": tk.StringVar(value=src.get("api_key") or inherit_key(src.get("api_base") or conf.get("api_base"), spare_items(), slots, "")),
@@ -3651,18 +3817,16 @@ def run_gui(start_hidden: bool) -> None:
             "note": tk.StringVar(value=(src.get("note") or "") if mode == "spare" else ""),
         }
         base_entry = tk.Entry(
-            body, textvariable=vars_["base"], bg=C_SURFACE, fg=C_INK, insertbackground=C_INK,
-            relief="flat", font=(MONO, 10), width=52,
+            body, textvariable=vars_["base"], **_entry_kwargs(font=(MONO, 10), width=58),
         )
-        base_entry.pack(fill="x", ipady=6)
-        tk.Label(body, text="API key", bg=C_BG, fg=C_MUTED, font=(FONT, 9), anchor="w").pack(fill="x", pady=(8, 2))
+        base_entry.pack(fill="x", ipady=5)
+        tk.Label(body, text="API key", bg=C_BG, fg=C_MUTED, font=(FONT, 9, "bold"), anchor="w").pack(fill="x", pady=(10, 3))
         key_row = tk.Frame(body, bg=C_BG)
         key_row.pack(fill="x")
         key_entry = tk.Entry(
-            key_row, textvariable=vars_["key"], bg=C_SURFACE, fg=C_INK, insertbackground=C_INK,
-            relief="flat", font=(MONO, 10), width=40, show="•",
+            key_row, textvariable=vars_["key"], **_entry_kwargs(font=(MONO, 10), width=44, show="•"),
         )
-        key_entry.pack(side="left", fill="x", expand=True, ipady=6)
+        key_entry.pack(side="left", fill="x", expand=True, ipady=5)
         key_shown = {"v": False}
 
         def toggle_key():
@@ -3675,45 +3839,31 @@ def run_gui(start_hidden: bool) -> None:
 
         key_toggle = tk.Button(
             key_row, text="Hiện", command=toggle_key, bg=C_BTN, fg=C_INK,
-            relief="flat", font=(FONT, 9), padx=8, pady=4, cursor="hand2",
+            activebackground=C_BTN_HOVER, activeforeground=C_INK,
+            relief="flat", font=(FONT, 9), padx=10, pady=4, cursor="hand2",
         )
         key_toggle.pack(side="left", padx=(6, 0))
         tk.Button(
             key_row, text="Chép", command=copy_key, bg=C_BTN, fg=C_INK,
-            relief="flat", font=(FONT, 9), padx=8, pady=4, cursor="hand2",
+            activebackground=C_BTN_HOVER, activeforeground=C_INK,
+            relief="flat", font=(FONT, 9), padx=10, pady=4, cursor="hand2",
         ).pack(side="left", padx=(6, 0))
-        tk.Label(body, text="Model", bg=C_BG, fg=C_MUTED, font=(FONT, 9), anchor="w").pack(fill="x", pady=(8, 2))
-        style = ttk.Style(win)
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass
-        style.configure(
-            "Ov.TCombobox",
-            fieldbackground=C_SURFACE, background=C_SURFACE, foreground=C_INK,
-            arrowcolor=C_ACCENT, bordercolor=C_LINE, lightcolor=C_SURFACE, darkcolor=C_SURFACE,
-        )
-        style.map(
-            "Ov.TCombobox",
-            fieldbackground=[("readonly", C_SURFACE)],
-            foreground=[("readonly", C_INK)],
-        )
+        tk.Label(body, text="Model", bg=C_BG, fg=C_MUTED, font=(FONT, 9, "bold"), anchor="w").pack(fill="x", pady=(10, 3))
         model_box = ttk.Combobox(
             body, textvariable=vars_["model"], font=(MONO, 10),
             style="Ov.TCombobox", state="normal",
         )
-        model_box.pack(fill="x", ipady=4)
+        model_box.pack(fill="x", ipady=2)
         current_model = vars_["model"].get().strip()
         if current_model:
             model_box["values"] = (current_model,)
         model_box.configure(height=7)
         model_box.focus_set()
         if mode == "spare":
-            tk.Label(body, text="Ghi chú", bg=C_BG, fg=C_MUTED, font=(FONT, 9), anchor="w").pack(fill="x", pady=(8, 2))
+            tk.Label(body, text="Ghi chú", bg=C_BG, fg=C_MUTED, font=(FONT, 9, "bold"), anchor="w").pack(fill="x", pady=(10, 3))
             tk.Entry(
-                body, name="note_entry", textvariable=vars_["note"], bg=C_SURFACE, fg=C_INK,
-                insertbackground=C_INK, relief="flat", font=(FONT, 10), width=52,
-            ).pack(fill="x", ipady=6)
+                body, name="note_entry", textvariable=vars_["note"], **_entry_kwargs(font=(FONT, 10), width=58),
+            ).pack(fill="x", ipady=5)
         status = tk.StringVar(value="")
         search_var = tk.StringVar(value="")
         listed_ids: list[str] = []
@@ -3728,22 +3878,21 @@ def run_gui(start_hidden: bool) -> None:
                     model_id = str(saved.get("model") or "").strip()
                     if model_id and model_id not in listed_ids:
                         listed_ids.append(model_id)
-        tk.Label(body, text="Tìm model", bg=C_BG, fg=C_MUTED, font=(FONT, 9), anchor="w").pack(fill="x", pady=(8, 2))
+        tk.Label(body, text="Tìm model", bg=C_BG, fg=C_MUTED, font=(FONT, 9, "bold"), anchor="w").pack(fill="x", pady=(10, 3))
         search_entry = tk.Entry(
-            body, textvariable=search_var, bg=C_SURFACE, fg=C_INK, insertbackground=C_INK,
-            relief="flat", font=(MONO, 10), width=52,
+            body, textvariable=search_var, **_entry_kwargs(font=(MONO, 10), width=58),
         )
-        search_entry.pack(fill="x", ipady=5)
-        list_frame = tk.Frame(body, bg=C_BG)
-        list_frame.pack(fill="x", pady=(5, 0))
+        search_entry.pack(fill="x", ipady=4)
+        list_frame = tk.Frame(body, bg=C_SURFACE, highlightbackground=C_LINE, highlightthickness=1)
+        list_frame.pack(fill="x", pady=(6, 0))
         model_list = tk.Listbox(
             list_frame, selectmode="extended", exportselection=False, height=8,
-            bg=C_SURFACE, fg=C_INK, selectbackground=C_ACCENT, selectforeground="#1a1408",
-            highlightbackground=C_LINE, highlightcolor=C_ACCENT, relief="flat", font=(MONO, 9),
+            bg=C_SURFACE, fg=C_INK, selectbackground="#2c435c", selectforeground=C_INK,
+            highlightthickness=0, bd=0, relief="flat", font=(MONO, 9), activestyle="none",
         )
-        list_scroll = tk.Scrollbar(list_frame, orient="vertical", command=model_list.yview)
+        list_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=model_list.yview)
         model_list.configure(yscrollcommand=list_scroll.set)
-        model_list.pack(side="left", fill="x", expand=True)
+        model_list.pack(side="left", fill="x", expand=True, padx=(6, 0), pady=4)
         list_scroll.pack(side="right", fill="y")
         visible_ids: list[str] = []
 
@@ -3775,14 +3924,16 @@ def run_gui(start_hidden: bool) -> None:
             status.set(f"{len(listed_ids)} model đã lưu · Bấm Thử để cập nhật")
         tk.Label(
             body,
-            text="Bấm Thử để tải list. Lọc tức thời; Ctrl/Shift chọn nhiều model để benchmark. Benchmark tuần tự 3 lượt/model, xếp theo median; không lưu hay đổi cấu hình.",
-            bg=C_BG, fg=C_MUTED, font=(FONT, 8), anchor="w", wraplength=420, justify="left",
+            text="Bấm Thử để tải list (hoặc đo nhanh nếu chọn nhiều). Ctrl/Shift chọn ≤ 12 model rồi bấm Benchmark 3 lượt để xếp theo median; không lưu hay đổi cấu hình.",
+            bg=C_BG, fg=C_MUTED, font=(FONT, 8), anchor="w", wraplength=500, justify="left",
         ).pack(fill="x", pady=(6, 0))
         st_lbl = tk.Label(body, textvariable=status, bg=C_BG, fg=C_MUTED, font=(FONT, 9), anchor="w")
-        st_lbl.pack(fill="x", pady=(6, 0))
+        st_lbl.pack(fill="x", pady=(4, 0))
+        diag_bar = tk.Frame(body, bg=C_BG)
+        diag_bar.pack(fill="x", pady=(10, 0))
+        tk.Frame(body, bg=C_LINE, height=1).pack(fill="x", pady=(10, 10))
         btns = tk.Frame(body, bg=C_BG)
-        btns.pack(fill="x", pady=(12, 0))
-        place_over_root(win)
+        btns.pack(fill="x")
 
         def values():
             return (
@@ -3993,6 +4144,7 @@ def run_gui(start_hidden: bool) -> None:
             result_win.configure(bg=C_BG)
             result_win.transient(win)
             result_win.grab_set()
+            apply_dark_titlebar(result_win)
             result_win.minsize(680, 360)
             result_win.geometry("760x460")
             body2 = tk.Frame(result_win, bg=C_BG)
@@ -4012,7 +4164,9 @@ def run_gui(start_hidden: bool) -> None:
             scroll.pack(side="right", fill="y")
             note = tk.StringVar(value="Đo tổng thời gian request non-streaming; không phải TTFT/token/s. Kết quả không được lưu.")
             tk.Label(result_win, textvariable=note, bg=C_BG, fg=C_MUTED, font=(FONT, 8), anchor="w").pack(fill="x", padx=16, pady=(0, 10))
-            close_btn = tk.Button(result_win, text="Đóng", command=result_win.destroy, bg=C_BTN, fg=C_INK, relief="flat", font=(FONT, 10), padx=14, pady=6, cursor="hand2")
+            cancel_event = threading.Event()
+            close_benchmark = bind_benchmark_close(result_win, win, cancel_event, probe_btn, bench_btn)
+            close_btn = tk.Button(result_win, text="Đóng", command=close_benchmark, bg=C_BTN, fg=C_INK, relief="flat", font=(FONT, 10), padx=14, pady=6, cursor="hand2")
             close_btn.pack(anchor="e", padx=16, pady=(0, 14))
             place_over_root(result_win, 760)
             probe_btn.configure(state="disabled")
@@ -4031,22 +4185,19 @@ def run_gui(start_hidden: bool) -> None:
                 )
                 table.insert("", "end", values=values_row)
 
+            def report_progress(index, total, summary):
+                if not cancel_event.is_set():
+                    uiq.put(("benchmark_progress", result_win, progress, index, total, summary, render))
+
             def work():
-                results = []
                 try:
-                    for index, item in enumerate(picked, 1):
-                        samples = []
-                        for _ in range(rounds):
-                            try:
-                                samples.append(probe_model(item, base, key))
-                            except Exception:
-                                samples.append({"ok": False, "text": "Fail", "ms": None})
-                        results.append(benchmark_summary(item, samples))
-                        uiq.put(("benchmark_progress", result_win, progress, index, len(picked), results[-1], render))
-                    results.sort(key=lambda row: (row.get("median_ms") is None, row.get("median_ms") or 10**12, row["model"].casefold()))
+                    results, cancelled = run_benchmark_work(picked, rounds, base, key, probe_model, cancel_event, report_progress)
+                    if cancelled or cancel_event.is_set():
+                        return
                     uiq.put(("benchmark_done", result_win, progress, results, table, probe_btn, bench_btn))
                 except Exception:
-                    uiq.put(("benchmark_failed", result_win, progress, probe_btn, bench_btn))
+                    if not cancel_event.is_set():
+                        uiq.put(("benchmark_failed", result_win, progress, probe_btn, bench_btn))
 
             threading.Thread(target=work, daemon=True).start()
 
@@ -4122,20 +4273,29 @@ def run_gui(start_hidden: bool) -> None:
                 st_lbl.configure(fg=C_BAD)
 
         verify_btn = tk.Button(
-            btns, text="Xác minh", command=do_quick_verify, bg=C_BTN, fg=C_ACCENT,
-            relief="flat", font=(FONT, 10), padx=14, pady=6, cursor="hand2",
+            diag_bar, text="Xác minh", command=do_quick_verify, bg=C_BTN, fg=C_INK,
+            activebackground=C_BTN_HOVER, activeforeground=C_INK,
+            relief="flat", font=(FONT, 9), padx=12, pady=5, cursor="hand2",
         )
         verify_btn.pack(side="left")
         probe_btn = tk.Button(
-            btns, text="Thử", command=do_form_probe, bg=C_BTN, fg=C_ACCENT,
-            relief="flat", font=(FONT, 10), padx=14, pady=6, cursor="hand2",
+            diag_bar, text="Thử", command=do_form_probe, bg=C_BTN, fg=C_ACCENT,
+            activebackground=C_BTN_HOVER, activeforeground=C_ACCENT,
+            relief="flat", font=(FONT, 9, "bold"), padx=14, pady=5, cursor="hand2",
         )
-        probe_btn.pack(side="left")
+        probe_btn.pack(side="left", padx=(6, 0))
         bench_btn = tk.Button(
-            btns, text="Kiểm định an toàn", command=do_security_audit, bg=C_BTN, fg=C_ACCENT,
-            relief="flat", font=(FONT, 10), padx=14, pady=6, cursor="hand2",
+            diag_bar, text="Benchmark 3 lượt", command=lambda: do_benchmark(3), bg=C_BTN, fg=C_INK,
+            activebackground=C_BTN_HOVER, activeforeground=C_INK,
+            relief="flat", font=(FONT, 9), padx=12, pady=5, cursor="hand2",
         )
-        bench_btn.pack(side="left", padx=(8, 0))
+        bench_btn.pack(side="left", padx=(6, 0))
+        audit_btn = tk.Button(
+            diag_bar, text="Kiểm định an toàn", command=do_security_audit, bg=C_BTN, fg=C_ACCENT,
+            activebackground=C_BTN_HOVER, activeforeground=C_ACCENT,
+            relief="flat", font=(FONT, 9), padx=12, pady=5, cursor="hand2",
+        )
+        audit_btn.pack(side="right")
         if mode != "spare":
             def save_current_as_spare():
                 model, base, key = values()
@@ -4152,16 +4312,20 @@ def run_gui(start_hidden: bool) -> None:
                     st_lbl.configure(fg=C_OK)
             tk.Button(
                 btns, text="Lưu dự trữ", command=save_current_as_spare,
-                bg=C_BTN, fg=C_ACCENT, relief="flat", font=(FONT, 10), padx=12, pady=6, cursor="hand2",
-            ).pack(side="left", padx=(8, 0))
+                bg=C_BTN, fg=C_ACCENT, activebackground=C_BTN_HOVER, activeforeground=C_ACCENT,
+                relief="flat", font=(FONT, 10), padx=12, pady=6, cursor="hand2",
+            ).pack(side="left")
         tk.Button(
-            btns, text="Hủy", command=win.destroy, bg=C_SURFACE, fg=C_INK,
-            relief="flat", font=(FONT, 10), padx=14, pady=6, cursor="hand2",
+            btns, text="Hủy", command=win.destroy, bg=C_BTN, fg=C_INK,
+            activebackground=C_BTN_HOVER, activeforeground=C_INK,
+            relief="flat", font=(FONT, 10), padx=16, pady=6, cursor="hand2",
         ).pack(side="right")
         tk.Button(
-            btns, text="Lưu dự trữ" if mode == "spare" else "Lưu", command=do_save, bg=C_ACCENT, fg="#1a1408",
-            relief="flat", font=(FONT, 10, "bold"), padx=16, pady=6, cursor="hand2",
+            btns, text="Lưu dự trữ" if mode == "spare" else "Lưu", command=do_save, bg=C_ACCENT, fg="#161208",
+            activebackground="#f0ca75", activeforeground="#161208",
+            relief="flat", font=(FONT, 10, "bold"), padx=18, pady=6, cursor="hand2",
         ).pack(side="right", padx=(0, 8))
+        place_over_root(win)
 
     def do_add():
         slot_editor("add")
@@ -4176,9 +4340,10 @@ def run_gui(start_hidden: bool) -> None:
         win.resizable(False, False)
         win.transient(root)
         win.grab_set()
-        place_over_root(win)
+        apply_dark_titlebar(win)
+        win.bind("<Escape>", lambda _e: win.destroy())
         body = tk.Frame(win, bg=C_BG)
-        body.pack(fill="both", padx=18, pady=14)
+        body.pack(fill="both", padx=20, pady=16)
         fields = [
             ("retries", "Retry khi Chính lỗi", str(conf.get("max_retries") if conf.get("max_retries") is not None else 3)),
             ("timeout", "Thời gian về Chính (giây)", str(conf.get("failback_timeout_seconds") if conf.get("failback_timeout_seconds") is not None else 3600)),
@@ -4186,17 +4351,18 @@ def run_gui(start_hidden: bool) -> None:
         ]
         vars_ = {}
         for key, label, value in fields:
-            tk.Label(body, text=label, bg=C_BG, fg=C_MUTED, font=(FONT, 9), anchor="w").pack(fill="x", pady=(8, 2))
+            tk.Label(body, text=label, bg=C_BG, fg=C_MUTED, font=(FONT, 9, "bold"), anchor="w").pack(fill="x", pady=(8, 3))
             var = tk.StringVar(value=value)
             vars_[key] = var
             tk.Entry(
-                body, textvariable=var, bg=C_SURFACE, fg=C_INK, insertbackground=C_INK,
-                relief="flat", font=(MONO, 10), width=28,
-            ).pack(fill="x", ipady=6)
+                body, textvariable=var, bg=C_ELEVATED, fg=C_INK, insertbackground=C_INK,
+                highlightbackground=C_LINE, highlightcolor=C_ACCENT, highlightthickness=1,
+                relief="flat", font=(MONO, 10), width=32,
+            ).pack(fill="x", ipady=5)
         tk.Label(
             body,
-            text="OpenViking 0.4.16: 0 = về Chính ngay request kế. Số lớn (2147483647) ≈ chỉ theo thời gian.",
-            bg=C_BG, fg=C_MUTED, font=(FONT, 8), anchor="w", wraplength=360, justify="left",
+            text="OpenViking 0.4.16+: 0 = về Chính ngay request kế. Số lớn (2147483647) ≈ chỉ theo thời gian.",
+            bg=C_BG, fg=C_MUTED, font=(FONT, 8), anchor="w", wraplength=380, justify="left",
         ).pack(fill="x", pady=(10, 0))
         status = tk.StringVar(value="")
         st_lbl = tk.Label(body, textvariable=status, bg=C_BG, fg=C_BAD, font=(FONT, 9), anchor="w")
@@ -4224,13 +4390,16 @@ def run_gui(start_hidden: bool) -> None:
             )
 
         tk.Button(
-            btns, text="Hủy", command=win.destroy, bg=C_SURFACE, fg=C_INK,
+            btns, text="Hủy", command=win.destroy, bg=C_BTN, fg=C_INK,
+            activebackground=C_BTN_HOVER, activeforeground=C_INK,
             relief="flat", font=(FONT, 10), padx=14, pady=6, cursor="hand2",
         ).pack(side="right")
         tk.Button(
-            btns, text="Lưu", command=do_save, bg=C_ACCENT, fg="#1a1408",
+            btns, text="Lưu", command=do_save, bg=C_ACCENT, fg="#161208",
+            activebackground="#f0ca75", activeforeground="#161208",
             relief="flat", font=(FONT, 10, "bold"), padx=16, pady=6, cursor="hand2",
         ).pack(side="right", padx=(0, 8))
+        place_over_root(win)
 
     def do_edit(key: str):
         conf = read_ov_conf()
@@ -4246,7 +4415,8 @@ def run_gui(start_hidden: bool) -> None:
         win.configure(bg=C_BG)
         win.resizable(False, False)
         win.transient(root)
-        place_over_root(win)
+        apply_dark_titlebar(win)
+        win.bind("<Escape>", lambda _e: win.destroy())
         vars_ = {
             "run_with_windows": tk.BooleanVar(value=bool(state.get("run_with_windows"))),
             "notify_on_down": tk.BooleanVar(value=bool(state.get("notify_on_down"))),
@@ -4311,16 +4481,19 @@ def run_gui(start_hidden: bool) -> None:
 
         def fit_window():
             root.update_idletasks()
-            w = min(root.winfo_reqwidth(), root.winfo_screenwidth() - 60)
-            h = min(root.winfo_reqheight(), root.winfo_screenheight() - 120)
-            root.geometry(f"{w}x{h}")
-            foot_var.set(f"Đã thu cửa sổ vừa nội dung ({w}×{h}) · kéo lại nếu muốn to hơn")
+            width, min_height = dashboard_size()
+            height = min_height
+            root.minsize(880, min_height)
+            root.geometry(f"{width}x{height}")
+            foot_var.set(f"Đã thu cửa sổ vừa nội dung ({width}×{height})")
 
         btns = tk.Frame(win, bg=C_BG)
-        btns.pack(pady=16)
-        tk.Button(btns, text="Lưu", command=save, bg=C_ACCENT, fg="#1a1408", relief="flat", font=(FONT, 10, "bold"), padx=16, pady=6).pack(side="left", padx=(0, 8))
-        tk.Button(btns, text="Thử thông báo", command=test_notify, bg=C_SURFACE, fg=C_INK, relief="flat", font=(FONT, 10), padx=14, pady=6).pack(side="left", padx=(0, 8))
-        tk.Button(btns, text="Thu cửa sổ vừa nội dung", command=fit_window, bg=C_SURFACE, fg=C_INK, relief="flat", font=(FONT, 10), padx=14, pady=6).pack(side="left")
+        btns.pack(fill="x", padx=16, pady=16)
+        tk.Button(btns, text="Thử thông báo", command=test_notify, bg=C_BTN, fg=C_INK, activebackground=C_BTN_HOVER, activeforeground=C_INK, relief="flat", font=(FONT, 9), padx=12, pady=6, cursor="hand2").pack(side="left", padx=(0, 6))
+        tk.Button(btns, text="Thu cửa sổ vừa nội dung", command=fit_window, bg=C_BTN, fg=C_INK, activebackground=C_BTN_HOVER, activeforeground=C_INK, relief="flat", font=(FONT, 9), padx=12, pady=6, cursor="hand2").pack(side="left")
+        tk.Button(btns, text="Hủy", command=win.destroy, bg=C_BTN, fg=C_INK, activebackground=C_BTN_HOVER, activeforeground=C_INK, relief="flat", font=(FONT, 10), padx=14, pady=6, cursor="hand2").pack(side="right")
+        tk.Button(btns, text="Lưu", command=save, bg=C_ACCENT, fg="#161208", activebackground="#f0ca75", activeforeground="#161208", relief="flat", font=(FONT, 10, "bold"), padx=16, pady=6, cursor="hand2").pack(side="right", padx=(0, 8))
+        place_over_root(win)
 
     more_btn.configure(command=open_settings)
 
@@ -4339,19 +4512,31 @@ def run_gui(start_hidden: bool) -> None:
     threading.Thread(target=poller, daemon=True, name="ov-poll").start()
     root.after(200, drain)
 
+    def dashboard_size():
+        selected = root.nametowidget(notebook.select())
+        tab_chrome = max(28, notebook.winfo_height() - selected.winfo_height())
+        chrome_height = max(0, root.winfo_height() - notebook.winfo_height()) + tab_chrome
+        height = max(560, dashboard_content_height(
+            chrome_height, upper.winfo_reqheight(), watch_panel.winfo_reqheight(), 1,
+            max(560, root.winfo_screenheight() - 120),
+        ))
+        width = min(max(880, top.winfo_reqwidth() + 36, dots.winfo_reqwidth() + 36,
+                        overview_tab.winfo_reqwidth() + 40), root.winfo_screenwidth() - 60)
+        return width, height
+
     def auto_fit_once(final: bool = False):
-        """One-time tidy: if the remembered window is much taller than the
-        content, shrink it. Runs again once the first snapshot has filled the
-        ops panel and the table; only the last pass locks the setting in."""
-        if os.environ.get("MONITOR_NO_AUTOFIT") or state.get("geometry_autofit"):
+        """Fit only the overview; hidden reserve tables do not set window bounds."""
+        if os.environ.get("MONITOR_NO_AUTOFIT"):
             return
         root.update_idletasks()
-        need_h = root.winfo_reqheight()
-        if root.winfo_height() > need_h + 140:
-            w = min(max(root.winfo_reqwidth(), 760), root.winfo_screenwidth() - 60)
-            h = min(need_h, root.winfo_screenheight() - 120)
-            root.geometry(f"{w}x{h}")
-            foot_var.set(f"Đã thu cửa sổ vừa nội dung ({w}×{h}) · kéo lại nếu muốn to hơn")
+        required_width, min_height = dashboard_size()
+        height = min(max(root.winfo_height(), min_height), root.winfo_screenheight() - 120)
+        width = fit_window_dimension(
+            root.winfo_width(), required_width, root.winfo_screenwidth() - 60, allow_shrink=False,
+        )
+        root.minsize(880, min_height)
+        if (width, height) != (root.winfo_width(), root.winfo_height()):
+            root.geometry(f"{width}x{height}")
         if final:
             state["geometry_autofit"] = True
             try:
@@ -4361,7 +4546,7 @@ def run_gui(start_hidden: bool) -> None:
 
     root.after(1500, auto_fit_once)
     root.after(4500, lambda: auto_fit_once(True))
-    root.after(5000, auto_probe_tick)
+    root.after(1000, watch_tick)
     root.mainloop()
 
 

@@ -92,16 +92,40 @@ class ReserveTable(tk.Frame):
         xs.grid(row=1, column=0, sticky='ew')
         self.tree.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
         defaults = {'model': 220, 'endpoint': 175, 'status': 150, 'ms': 85, 'at': 110, 'note': 120}
-        caps = {'model': 230, 'endpoint': 235, 'status': 200, 'ms': 88, 'at': 116, 'note': 140}
-        floors = {'model': 150, 'endpoint': 130, 'status': 120, 'ms': 66, 'at': 88, 'note': 70}
+        floors = {'model': 150, 'endpoint': 130, 'status': 120, 'ms': 76, 'at': 82, 'note': 70}
+        self._dpi_scale = max(1.0, float(self.tk.call('tk', 'scaling')) / (4.0 / 3.0))
+        dpi_scale = self._dpi_scale
+        self._widths = {col: round(value * dpi_scale) for col, value in {
+            'model': 720, 'endpoint': 560, 'status': 460, 'ms': 88, 'at': 104, 'note': 140,
+        }.items()}
+        self._floors = {col: round(value * dpi_scale) for col, value in floors.items()}
+        self._defaults = {col: round(value * dpi_scale) for col, value in defaults.items()}
+        caps = self._widths
+        floors = self._floors
+        defaults = self._defaults
         self.caps = caps
         self.floors = floors
         self._auto_widths = {}
         saved = self.preferences.get('widths', {})
+        saved_note = int(saved.get('note', self._defaults['note']))
+        if saved_note <= 0:
+            saved_note = self._defaults['note']
+        self._note_width = max(self._floors['note'], min(saved_note, self.caps['note']))
         for col, title, width in zip(self.columns, self.titles, (defaults[c] for c in self.columns)):
             self.tree.heading(col, text=title, command=lambda c=col: self.sort_by(c))
             want = max(min(int(saved.get(col, width)), caps[col]), floors[col])
             self.tree.column(col, width=want, minwidth=floors[col], stretch=col in self.stretch_columns, anchor='e' if col == 'ms' else 'w')
+        # Semantic row tags + subtle zebra striping (high-contrast night cockpit)
+        self.tree.tag_configure('zebra_odd', background='#1c232d')
+        self.tree.tag_configure('zebra_even', background='#171d26')
+        self.tree.tag_configure('status_ok', foreground='#79d8b0')
+        self.tree.tag_configure('status_bad', foreground='#ff9494')
+        self.tree.tag_configure('status_untested', foreground='#9aa7b8')
+        self.tree.tag_configure('audit_1', foreground='#ff8080')
+        self.tree.tag_configure('audit_2', foreground='#eab84b')
+        self.tree.tag_configure('audit_3', foreground='#efaa72')
+        self.tree.tag_configure('audit_4', foreground='#79d8b0')
+        self.tree.tag_configure('audit_5', foreground='#58d9c1')
         self.toggle_columns()
         self.details = tk.StringVar()
         ttk.Label(self, textvariable=self.details, anchor='w', wraplength=950).pack(fill='x', pady=2)
@@ -121,8 +145,17 @@ class ReserveTable(tk.Frame):
         wanted = bool(self.optional.get())
         self.tree.configure(displaycolumns=self.columns if wanted else self.columns[:-1])
         # A hidden column must not keep demanding width in the layout request.
-        saved_note = max(min(int(self.preferences.get('widths', {}).get('note', 120)), 130), 70)
-        self.tree.column('note', width=saved_note if wanted else 0)
+        saved_note = self._note_width
+        if saved_note <= 0:
+            saved_note = self._defaults['note']
+        saved_note = max(self._floors['note'], min(saved_note, self.caps['note']))
+        if wanted:
+            self.tree.column('note', width=saved_note)
+        else:
+            current_note = int(self.tree.column('note', 'width'))
+            if current_note > 0:
+                self._note_width = current_note
+            self.tree.column('note', width=0)
         self.preferences['show_note'] = self.optional.get()
 
     def identity(self, item):
@@ -148,22 +181,27 @@ class ReserveTable(tk.Frame):
                 continue
             at = probe.get('at', '')
             if isinstance(at, (float, int)):
-                at = datetime.fromtimestamp(at).strftime('%d/%m %H:%M:%S')
+                at = datetime.fromtimestamp(at).strftime('%d/%m %H:%M')
             # Tách trạng thái khỏi độ trễ: cột status chỉ giữ lý do lỗi/kết quả,
             # cột ms mang con số thuần nên hai cột không lặp nội dung nhau.
             if not probe:
                 status_cell = 'Chưa thử'
+                tone_tag = 'status_untested'
             elif probe.get('ok'):
                 status_cell = 'OK'
+                tone_tag = 'status_ok'
             else:
                 status_cell = probe.get('text') or status
+                tone_tag = 'status_bad'
 
-            # Hiển thị huy hiệu kiểm định Mức 1 đến Mức 5 nếu đã có kết quả
+            audit_tag = None
             audit_lvl = item.get('audit_level')
-            if audit_lvl:
+            if type(audit_lvl) is int and 1 <= audit_lvl <= 5:
                 status_cell = f"[M{audit_lvl}] {status_cell}"
+                if tone_tag == 'status_ok':
+                    audit_tag = f'audit_{audit_lvl}'
             values = (item.get('model', ''), item.get('api_base', ''), status_cell, probe.get('ms', ''), at, item.get('note', ''))
-            rows.append((iid, values))
+            rows.append((iid, values, tone_tag, audit_tag))
         col = self.columns.index(self.sort_column)
         def sort_key(row):
             value = row[1][col]
@@ -177,8 +215,10 @@ class ReserveTable(tk.Frame):
         children = self.tree.get_children()
         if children:
             self.tree.delete(*children)
-        for iid, values in rows:
-            self.tree.insert('', 'end', iid=iid, values=values)
+        for row_idx, (iid, values, tone_tag, audit_tag) in enumerate(rows):
+            zebra = 'zebra_odd' if (row_idx % 2) else 'zebra_even'
+            semantic_tag = audit_tag or tone_tag
+            self.tree.insert('', 'end', iid=iid, values=values, tags=(zebra, tone_tag, semantic_tag))
         self.tree.selection_set([iid for iid in selected if self.tree.exists(iid)])
         if scroll:
             self.tree.yview_moveto(scroll[0])
@@ -209,9 +249,10 @@ class ReserveTable(tk.Frame):
                 self.preferences['auto_width_off'] = f"{col}:{recorded}->{cur}"
                 return
         fnt = tkfont.Font(self, font=ttk.Style(self).lookup('Treeview', 'font') or 'TkDefaultFont')
+        hfnt = tkfont.Font(self, font=ttk.Style(self).lookup('Treeview.Heading', 'font') or 'TkDefaultFont')
         for col in shown:
             idx = self.columns.index(col)
-            need = fnt.measure(self.titles[idx])
+            need = max(fnt.measure(self.titles[idx]), hfnt.measure(self.titles[idx]))
             for iid in self.tree.get_children():
                 vals = self.tree.item(iid, 'values')
                 if idx < len(vals):
@@ -219,12 +260,19 @@ class ReserveTable(tk.Frame):
             want = max(self.floors[col], min(self.caps[col], need + 18))
             # Cột giãn được phép nới rộng nhưng KHÔNG được co lại dưới cỡ nội dung,
             # nếu không Tk sẽ bóp nó khi cửa sổ hẹp và chữ bị cắt.
-            floor = want if col in self.stretch_columns else self.floors[col]
+            floor = want if col in self.stretch_columns else max(self.floors[col], min(self.caps[col], hfnt.measure(self.titles[idx]) + 14))
             self.tree.column(col, width=want, minwidth=floor)
             self._auto_widths[col] = want
+            if col == 'note':
+                self._note_width = want
 
     def remember(self, event=None):
-        self.preferences.update(sort_column=self.sort_column, reverse=self.reverse, query=self.query.get(), status=self.status.get(), endpoint=self.endpoint.get(), widths={c: self.tree.column(c, 'width') for c in self.columns})
+        widths = {c: int(self.tree.column(c, 'width')) for c in self.columns}
+        if widths['note'] > 0:
+            self._note_width = widths['note']
+        else:
+            widths['note'] = self._note_width
+        self.preferences.update(sort_column=self.sort_column, reverse=self.reverse, query=self.query.get(), status=self.status.get(), endpoint=self.endpoint.get(), widths=widths)
 
     def show_detail(self, event=None):
         picked = self.tree.selection()
@@ -272,8 +320,12 @@ class ReserveTable(tk.Frame):
         self.sort_column = 'model'
         self.reverse = False
         self.optional.set(False)
-        self.toggle_columns()
-        for col, width in zip(self.columns, (290, 210, 180, 110, 140, 150)):
-            self.tree.column(col, width=width)
+        self.preferences['auto_width'] = True
+        self.preferences.pop('auto_width_off', None)
+        for col, default in self._defaults.items():
+            self.tree.column(col, width=default, minwidth=self._floors[col])
+            self._auto_widths[col] = default
+        self._apply_columns(False)
         self.clear_filters()
+        self.autofit_columns()
         self.remember()

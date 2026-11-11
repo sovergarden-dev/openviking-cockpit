@@ -42,6 +42,7 @@ assert vals[-1] == 'có ghi chú', f'cột Ghi chú không hiện nội dung: {v
 t.optional.set(False)
 t.toggle_columns()
 assert 'note' not in t.tree.cget('displaycolumns')
+r.update_idletasks()
 r.destroy()
 
 # 4. End-to-end: mở trình sửa dự trữ thật (double-click) và gõ được vào ô Ghi chú
@@ -73,6 +74,8 @@ def loop(groot, *args):
     def go():
         try:
             groot.update_idletasks()
+            next(w for w in walk(groot) if w.winfo_class() == 'TNotebook').select(1)
+            groot.update()
             rt = next((w for w in walk(groot) if 'reservetable' in w.winfo_name()), None)
             assert rt is not None, 'không thấy bảng DỰ TRỮ'
             tree = next(w for w in walk(rt) if w.winfo_class() == 'Treeview')

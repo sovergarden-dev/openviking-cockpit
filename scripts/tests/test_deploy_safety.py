@@ -20,6 +20,11 @@ class DeploymentSafetyTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(list(destination.iterdir()), [], 'Default deployment must only show a plan, not write live files')
 
+    def test_watch_modules_are_required_deploy_artifacts(self):
+        module = self.load_sync()
+        self.assertTrue({'watch_keys.py', 'watch_panel.py'} <= set(module.CORE_FILES),
+                        'New watch UI dependencies are missing from deployment')
+
     def load_sync(self):
         path = ROOT / 'scripts/monitor_sync.py'
         self.assertTrue(path.is_file(), 'Transactional synchronization helper is missing')
