@@ -74,7 +74,21 @@ Phản biện là cổng thiết kế, không phải bằng chứng code đã đ
 - `ov.conf` không đổi sau toàn thao tác THEO DÕI; test profiles không ghi dữ liệu live.
 - Phản biện độc lập trước triển khai; sync qua `scripts/monitor_sync.py` với backup/rollback sau khi đủ cổng.
 
-## Kết quả nghiệm thu
+## Đợt hoàn thiện thao tác và độ tin cậy
+
+- Dự trữ có **Đưa sang Theo dõi** ở menu chuột phải và hàng nút. Chọn đúng một dòng, mở editor điền sẵn; chỉ Lưu mới thêm bản ghi độc lập. Giữ nguồn, không sao chép trạng thái thử/Auto, không kế thừa key ngầm. Dòng thiếu key/khóa DPAPI hoặc đủ bảy dòng bị chặn.
+- Cài đặt lưu candidate trước, chỉ cập nhật shared state và tích hợp Windows sau khi ghi thành công; lỗi hiện trong hộp thoại và không làm thay đổi tùy chọn đang dùng.
+- Ô Auto nhấp đúp không mở Sửa và không đảo hai lần. Auto dòng bật nhưng tổng tắt hiện **Chờ tổng**; lỗi xác thực thủ công không tạo thông báo tự tắt Auto giả.
+- Kết quả quá `max(600, chu_kỳ_phút × 120)` giây được đánh dấu **Cũ**, không sửa bằng chứng đã lưu hoặc gửi thử thêm.
+- Hộp lấy nguồn có grab; validation lỗi ở chính hộp thoại; thanh tiêu đề theo dark helper hiện có.
+- Test recovery chỉ dùng bảy key giả: đóng/mở state, DPAPI, failed atomic replace, malformed-state lock, phục hồi bản backup và bảo toàn ciphertext; mạng/timeout/429/DPAPI locked không chạm provider thật.
+- Tk scaling 2.666667 kiểm tra hệ số chữ tương đương Windows 200%, không thay cấu hình hiển thị Windows. Dashboard trên 150% có cuộn ngoài để tới Theo dõi; chiều rộng tối thiểu tăng theo DPI trong giới hạn màn hình. Slot editor giảm chiều cao danh sách model khi cần, không giấu nút. Cột ms/Lần thử/Auto đo theo giá trị thực và giữ minwidth đủ chữ.
+- Kiểm chứng bản vá: runner cô lập đủ 64 suite PASS, không FAIL/SKIP/TIMEOUT; dashboard + slot editor tại bốn mức Tk 1.333333/1.666667/2.0/2.666667 đạt 8/8; self-check trả `SELF_CHECK_OK`. Ảnh fixture Tổng quan/Dự trữ dùng dữ liệu giả, không phải kết quả thử key thật.
+- Hai lượt phản biện độc lập không có lỗi logic/bảo mật chặn triển khai. Các gợi ý căn hộp thoại, đo request width của nội dung Canvas và giảm repaint không thuộc cổng chặn; chưa tuyên bố đã sửa.
+- Triển khai qua `monitor_sync.py`: receipt `applied`, 10 tệp nguồn/test, backup xác minh tại `monitor-sync-20261111T134101Z-f2944174`; đối chiếu lại không còn source drift. Cả `ov.conf` và `monitor.json` giữ nguyên SHA-256/size/mtime trong khoảng baseline triển khai, đồng bộ và mở bản live.
+- GUI live PID 27504 hiển thị nút **Đưa sang Theo dõi** trong tab Dự trữ; Tổng quan vẫn 0/7 và Auto tắt. Không thử key thật hoặc thêm watch thật trong QA. Listener 19330/21434 giữ nguyên PID 7884/26176; `/health` và `/ready` cùng HTTP 200.
+
+## Kết quả nghiệm thu bản hai tab ban đầu
 
 - Phản biện xác nhận ba lỗi race/DPAPI/state: `passed=true`, không có lỗi logic hoặc bảo mật chặn. Gợi ý UX không được xem là bằng chứng lỗi đã sửa.
 - Đối chiếu runner: đủ 59 suite, 59 PASS, không FAIL/SKIP/TIMEOUT. Chạy lại dashboard và slot editor tại cả ba mức Tk scaling nêu trên: 6/6 PASS; self-check đạt `SELF_CHECK_OK`.

@@ -22,14 +22,15 @@ Hệ thống được thiết kế theo triết lý **Disaster Recovery Engineer
 ### 2. Bảng Danh Sách Mô Hình Dự Trữ (Reserve Pool Manager)
 - Tab **Dự trữ** riêng, dùng toàn vùng nội dung. Không có Auto thử; request chỉ chạy khi người dùng chọn thao tác thử/kiểm định.
 - Quản lý hàng chục endpoint LLM dự phòng với tính năng tìm kiếm nhanh, lọc theo trạng thái và endpoint.
-- Bảng co giãn tự nhiên (`autofit`), tự động ẩn/hiện cột ghi chú, hỗ trợ chuột phải thao tác nhanh (Đưa vào slot, Thử độ trễ, Chép key, Kiểm định an toàn).
+- Bảng co giãn tự nhiên (`autofit`), tự động ẩn/hiện cột ghi chú, hỗ trợ chuột phải thao tác nhanh (Đưa sang Theo dõi, Đưa vào slot, Thử độ trễ, Kiểm định an toàn).
 - **Huy Hiệu Phân Cấp An Toàn [M1] → [M5]:** Tự động hiển thị mức đánh giá an toàn ngay trên cột Trạng thái nếu model đã được kiểm định.
 - **Cache Đo Lường 24 Giờ:** Tự động ghi nhớ báo cáo kiểm định gần nhất trong 24h; cho phép mở xem lại tức thì mà không cần chạy lại mạng.
 
 ### Theo Dõi Key Độc Lập
 - Khung **THEO DÕI** trong tab **Tổng quan**, tối đa **7 key**, không tìm kiếm. Hai key cùng endpoint/model vẫn là hai bản ghi riêng.
 - Tên gợi nhớ, model thử, kết quả, độ trễ, lần thử và Auto từng dòng; công tắc Auto tổng mặc định **tắt**, chu kỳ 1 hoặc 10 phút.
-- Key lưu bằng **Windows DPAPI**. Lấy từ Dự trữ/slot là sao chép chủ động, độc lập; không tự kế thừa key theo endpoint.
+- Key lưu bằng **Windows DPAPI**. Lấy từ Dự trữ/slot là sao chép chủ động, độc lập; không tự kế thừa key theo endpoint. Trong Dự trữ, chọn một dòng rồi **Đưa sang Theo dõi** ở menu chuột phải hoặc hàng nút; editor điền sẵn, chỉ **Lưu** mới thêm, giữ nguồn và Auto tắt.
+- Auto dòng chờ công tắc tổng hiện **Chờ tổng**. Kết quả cũ hơn 10 phút hoặc hai chu kỳ (lấy ngưỡng lớn hơn) được đánh dấu **Cũ**, không tự suy diễn key hỏng.
 - Worker tuần tự, timeout 20 giây, tối đa 64 output token/request. Thử có thể tiêu token; kết quả chỉ xác nhận key + endpoint + model tại thời điểm đó, không chứng minh quota còn lại hay mức an toàn provider.
 - Lỗi dùng backoff tối đa 60 phút; hai lỗi 401/403 liên tiếp tự tắt Auto dòng đó. Dừng/tắt Auto không thu hồi request đã gửi; kết quả trễ sau sửa/xóa/hủy bị bỏ.
 - Lưu/thử THEO DÕI không sửa `ov.conf`, không chuyển slot, không khởi động lại server. Vòng Auto thử slot cũ bị loại bỏ; migration không tự bật Auto mới.

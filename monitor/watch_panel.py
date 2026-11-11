@@ -8,14 +8,17 @@ from watch_keys import MAX_WATCHES, WatchBatch, apply_watch_result, upsert_watch
 
 
 class WatchPanel(tk.Frame):
-    def __init__(self, parent, *, state, save, probe, emit, status, sources, colors, font):
+    def __init__(self, parent, *, state, save, probe, emit, status, sources, colors, font, style_dialog=None):
         self.colors, self.font = colors, font
         super().__init__(parent, name='watch_panel', bg=colors['surface'],
                          highlightbackground=colors['line'], highlightthickness=1)
         self.state, self.save, self.probe = state, save, probe
         self.emit, self.status, self.sources = emit, status, sources
+        self.style_dialog = style_dialog
+        self.last_error = ''
         self.batch = WatchBatch()
         self.closed = False
+        self._skip_auto_release = False
         self.deadlines = {}
         self.count = tk.StringVar()
         self.detail = tk.StringVar()
@@ -47,6 +50,7 @@ class WatchPanel(tk.Frame):
         from tkinter import font as tkfont
         style = ttk.Style(self)
         row_font = (font, 9)
+        self.row_font = tkfont.Font(self, font=row_font)
         style.configure('Watch.Treeview', font=row_font,
                         rowheight=tkfont.Font(self, font=row_font).metrics('linespace') + 6)
         style.configure('Watch.Treeview.Heading', font=(font, 8, 'bold'), padding=(4, 2))
@@ -54,8 +58,10 @@ class WatchPanel(tk.Frame):
         self.tree = ttk.Treeview(table, name='watch_tree', columns=columns, show='headings',
                                 selectmode='browse', height=7, style='Watch.Treeview')
         for col, title, width in zip(columns, ('Tên gợi nhớ', 'Model thử', 'Kết quả', 'ms', 'Lần thử', 'Auto'),
-                                     (142, 180, 184, 62, 106, 66)):
+                                     (142, 180, 184, 62, 106, 88)):
             self.tree.heading(col, text=title)
+            if col == 'auto':
+                width = max(width, tkfont.Font(self, font=row_font).measure('Chờ tổng') + 14)
             self.tree.column(col, width=width, minwidth=width if col in ('ms', 'last', 'auto') else 80,
                              stretch=col in ('alias', 'model', 'status'))
         vertical = ttk.Scrollbar(table, orient='vertical', command=self.tree.yview)
@@ -66,10 +72,10 @@ class WatchPanel(tk.Frame):
         self.tree.grid(row=0, column=0, sticky='nsew')
         vertical.grid(row=0, column=1, sticky='ns')
         horizontal.grid(row=1, column=0, sticky='ew')
-        for tag, color in (('ok', 'ok'), ('bad', 'bad'), ('locked', 'warn')):
+        for tag, color in (('ok', 'ok'), ('bad', 'bad'), ('locked', 'warn'), ('stale', 'warn')):
             self.tree.tag_configure(tag, foreground=colors[color])
         self.tree.bind('<<TreeviewSelect>>', lambda _: self.show_detail())
-        self.tree.bind('<Double-Button-1>', lambda _: self.edit())
+        self.tree.bind('<Double-Button-1>', self.double_click)
         self.tree.bind('<Delete>', self.delete)
         self.tree.bind('<space>', self.toggle_auto)
         self.tree.bind('<ButtonRelease-1>', self.click_auto)
@@ -117,7 +123,8 @@ class WatchPanel(tk.Frame):
         except (RuntimeError, OSError, ValueError):
             self.batch.cancel()
             self.auto.set(False)
-            self.status('Không lưu được THEO DÕI; dữ liệu cũ được giữ nguyên. Auto đã tạm dừng.')
+            self.last_error = 'Không lưu được THEO DÕI; dữ liệu cũ được giữ nguyên. Auto đã tạm dừng.'
+            self.status(self.last_error)
             return False
         self.state.update(watch_keys=records, **settings)
         self.batch.sync(records)
@@ -125,11 +132,13 @@ class WatchPanel(tk.Frame):
         return True
 
     def store(self, incoming):
+        self.last_error = ''
         previous = next((item for item in self.items() if item['id'] == incoming.get('id')), None)
         try:
             records = upsert_watch(self.items(), incoming)
         except ValueError as exc:
-            self.status(str(exc))
+            self.last_error = str(exc)
+            self.status(self.last_error)
             return False
         if not self.persist(records):
             return False
@@ -153,9 +162,17 @@ class WatchPanel(tk.Frame):
             last = time.strftime('%H:%M %d/%m', time.localtime(at)) if at else 'Chưa thử'
             text = 'Khóa DPAPI' if locked else probe.get('text') or 'Chưa thử'
             tag = 'locked' if locked else ('ok' if probe.get('ok') else 'bad') if probe else ''
+            if not locked and at and time.time() - at > max(600, int(self.minutes.get()) * 120):
+                text = 'Cũ · ' + text
+                if probe.get('ok'):
+                    tag = 'stale'
             values = (item.get('alias') or 'Không đặt tên', item.get('model'), text,
                       probe.get('ms') if probe.get('ms') is not None else '—', last,
-                      'Bật' if item.get('auto_enabled') else 'Tắt')
+                      ('Bật' if self.auto.get() else 'Chờ tổng') if item.get('auto_enabled') else 'Tắt')
+            for index, column in ((3, 'ms'), (4, 'last'), (5, 'auto')):
+                needed = self.row_font.measure(str(values[index])) + 14
+                if needed > int(self.tree.column(column, 'minwidth')):
+                    self.tree.column(column, width=needed, minwidth=needed)
             if item['id'] in existing:
                 self.tree.item(item['id'], values=values, tags=(tag,))
             else:
@@ -175,6 +192,8 @@ class WatchPanel(tk.Frame):
         reason = record.get('auto_disabled_reason') or ''
         remaining = max(0, self.deadlines.get(record['id'], 0) - time.monotonic())
         schedule = (f' · thử sau {int(remaining) + 1}s' if remaining else ' · đến lịch') if record.get('auto_enabled') and self.auto.get() else ''
+        if record.get('auto_enabled') and not self.auto.get():
+            schedule = ' · Chờ Auto tổng'
         self.detail.set(f"{record.get('api_base')}" + (f' · {reason}' if reason else schedule))
 
     def toggle_auto(self, _event=None):
@@ -188,7 +207,17 @@ class WatchPanel(tk.Frame):
         self.store(dict(record, auto_enabled=not record.get('auto_enabled')))
         return 'break'
 
+    def double_click(self, event):
+        if self.tree.identify_region(event.x, event.y) == 'cell' and self.tree.identify_column(event.x) == '#6':
+            self._skip_auto_release = True
+        else:
+            self.edit()
+        return 'break'
+
     def click_auto(self, event):
+        if self._skip_auto_release:
+            self._skip_auto_release = False
+            return 'break'
         if self.tree.identify_region(event.x, event.y) == 'cell' and self.tree.identify_column(event.x) == '#6':
             self.toggle_auto()
 
@@ -202,7 +231,10 @@ class WatchPanel(tk.Frame):
             self.minutes.set(str(self.state.get('watch_auto_minutes') or 10))
 
     def tick(self):
-        if self.closed or not self.auto.get() or self.batch.busy:
+        if self.closed:
+            return
+        self.render()
+        if not self.auto.get() or self.batch.busy:
             return
         now = time.monotonic()
         due = [item for item in self.items() if item.get('auto_enabled') and
@@ -295,7 +327,7 @@ class WatchPanel(tk.Frame):
             if self.store(incoming):
                 win.destroy()
             else:
-                error.set('Không lưu được. Kiểm tra key, model, URL và dòng trạng thái chung.')
+                error.set(self.last_error)
         self.button(buttons, 'Lưu', save, accent=True)
         self.button(buttons, 'Hủy', win.destroy, right=True)
         win.update_idletasks()
@@ -303,6 +335,8 @@ class WatchPanel(tk.Frame):
         x = max(0, min(root.winfo_rootx() + 30, root.winfo_screenwidth() - win.winfo_reqwidth() - 30))
         y = max(0, min(root.winfo_rooty() + 60, root.winfo_screenheight() - win.winfo_reqheight() - 70))
         win.geometry(f'+{x}+{y}')
+        if self.style_dialog:
+            self.style_dialog(win)
 
     def pick_source(self):
         if len(self.items()) >= MAX_WATCHES:
@@ -313,6 +347,7 @@ class WatchPanel(tk.Frame):
         win.title('Sao chép vào THEO DÕI')
         win.configure(bg=self.colors['surface'])
         win.transient(self.winfo_toplevel())
+        win.grab_set()
         win.bind('<Escape>', lambda _: win.destroy())
         tk.Label(win, text='Chọn bản gốc. Key được sao chép độc lập; không đổi slot hoặc Dự trữ.',
                  bg=self.colors['surface'], fg=self.colors['muted'], font=(self.font, 9)).pack(padx=12, pady=10)
@@ -323,13 +358,17 @@ class WatchPanel(tk.Frame):
         tree.pack(fill='both', expand=True, padx=12)
         for index, (label, item) in enumerate(sources):
             tree.insert('', 'end', iid=str(index), values=(label, item.get('model'), item.get('api_base')))
+        error = tk.StringVar()
+        tk.Label(win, textvariable=error, bg=self.colors['surface'], fg=self.colors['warn'],
+                 font=(self.font, 9), wraplength=560, justify='left').pack(fill='x', padx=12, pady=(6, 0))
         def choose():
             selection = tree.selection()
             if not selection:
                 return
             _, item = sources[int(selection[0])]
             if item.get('_dpapi_locked') or not item.get('api_key'):
-                self.status('Bản gốc không có key đọc được. Không kế thừa key ngầm.')
+                error.set('Bản gốc không có key đọc được. Không kế thừa key ngầm.')
+                self.status(error.get())
                 return
             source = {name: item.get(name) or '' for name in ('model', 'api_base', 'api_key')}
             win.destroy()
@@ -338,6 +377,8 @@ class WatchPanel(tk.Frame):
         buttons.pack(fill='x', padx=12, pady=10)
         self.button(buttons, 'Sao chép và sửa', choose, accent=True)
         self.button(buttons, 'Hủy', win.destroy, right=True)
+        if self.style_dialog:
+            self.style_dialog(win)
 
     def on_destroy(self, event):
         if event.widget is self:

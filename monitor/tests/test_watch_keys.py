@@ -73,4 +73,9 @@ for envelope in ('dpapi:synthetic-envelope', ' dpapi:synthetic-envelope '):
     rejected(lambda: upsert_watch([], dict(fixture(), api_key=envelope)), 'dpapi:')
     rejected(lambda: upsert_watch(items, {'id': items[0]['id'], 'api_key': envelope}), 'dpapi:')
 assert upsert_watch([], dict(fixture(), api_key='${WATCH_TEST_KEY}'))[0]['api_key'] == '${WATCH_TEST_KEY}'
+manual = upsert_watch([], fixture())[0]
+for code in (401, 403):
+    manual = apply_watch_result(manual, {'ok': False, 'http_code': code, 'category': 'auth-or-quota'}, now=2000)
+assert manual['auth_fail_streak'] == 2 and not manual['auto_enabled']
+assert not manual.get('auto_disabled_reason'), 'manual failures falsely claim Auto was disabled'
 print('WATCH_KEYS_OK')

@@ -2256,8 +2256,11 @@ def run_gui(start_hidden: bool) -> None:
     root = tk.Tk()
     root.title(WINDOW_TITLE)
     root.configure(bg=C_BG)
-    root.minsize(880, 560)
+    dpi_scale = max(1.0, float(root.tk.call("tk", "scaling")) / (4.0 / 3.0))
+    min_width = min(round(880 * dpi_scale), root.winfo_screenwidth() - 60)
+    root.minsize(min_width, 560)
     root.geometry(state.get("geometry") or "1020x640")
+
     if state.get("always_on_top"):
         root.attributes("-topmost", True)
     apply_window_icon(root)
@@ -2395,7 +2398,29 @@ def run_gui(start_hidden: bool) -> None:
     reserve_tab = tk.Frame(notebook, bg=C_BG, name="reserve")
     notebook.add(overview_tab, text="Tổng quan")
     notebook.add(reserve_tab, text="Dự trữ")
-    upper = tk.Frame(overview_tab, bg=C_BG)
+    overview_content = overview_tab
+    if dpi_scale > 1.5:
+        overview_view = tk.Canvas(overview_tab, name="overview_scroll", bg=C_BG,
+                                  highlightthickness=0, width=1, height=1)
+        overview_scroll = ttk.Scrollbar(overview_tab, orient="vertical", command=overview_view.yview)
+        overview_scroll.pack(side="right", fill="y")
+        overview_view.pack(side="left", fill="both", expand=True)
+        overview_view.configure(yscrollcommand=overview_scroll.set)
+        overview_content = tk.Frame(overview_view, bg=C_BG)
+        content_id = overview_view.create_window(0, 0, window=overview_content, anchor="nw")
+        overview_content.bind("<Configure>", lambda _: overview_view.configure(scrollregion=overview_view.bbox("all")))
+        overview_view.bind("<Configure>", lambda event: overview_view.itemconfigure(content_id, width=event.width))
+        def scroll_overview(event):
+            widget = event.widget
+            if widget.winfo_class() in ("Treeview", "TCombobox", "Listbox"):
+                return
+            while widget is not None and widget is not overview_content:
+                widget = getattr(widget, "master", None)
+            if widget is overview_content:
+                overview_view.yview_scroll(-1 if event.delta > 0 else 1, "units")
+                return "break"
+        root.bind("<MouseWheel>", scroll_overview, add="+")
+    upper = tk.Frame(overview_content, bg=C_BG)
     upper.pack(fill="x")
     left = tk.Frame(upper, bg=C_BG)
     left.pack(side="left", fill="x", expand=True)
@@ -2974,6 +2999,25 @@ def run_gui(start_hidden: bool) -> None:
             return
         slot_editor("spare", item)
 
+    def watch_selected_spare():
+        if len(spare_list.curselection()) != 1:
+            foot_var.set("Chọn đúng một dòng Dự trữ để đưa sang Theo dõi.")
+            return
+        _, item = selected_spare()
+        if not item:
+            foot_var.set("Chọn model dự trữ.")
+            return
+        if item.get("_dpapi_locked") or not item.get("api_key"):
+            foot_var.set("Dự trữ không có key đọc được; nhập lại key trước khi sao chép.")
+            return
+        from watch_keys import MAX_WATCHES
+        if len(watch_panel.items()) >= MAX_WATCHES:
+            foot_var.set("Tối đa 7 key theo dõi; xóa một dòng trước khi thêm.")
+            return
+        source = {name: item.get(name) or "" for name in ("model", "api_base", "api_key")}
+        notebook.select(overview_tab)
+        watch_panel.edit(new=True, source=source)
+
     spare_list.bind("<Double-Button-1>", edit_selected_spare)
     spare_list.bind("<Delete>", delete_selected_spare)
     tk.Button(spare_manage, text="Xóa", command=delete_selected_spare, bg=C_BTN, fg=C_BAD, activebackground=C_BTN_HOVER, activeforeground=C_BAD, relief="flat", font=(FONT, 9), padx=10, pady=3, cursor="hand2").pack(side="right")
@@ -2985,7 +3029,7 @@ def run_gui(start_hidden: bool) -> None:
             root.clipboard_append(item.get(field, ""))
             foot_var.set("Đã sao chép " + field)
     spare_menu = tk.Menu(root, tearoff=False, bg=C_ELEVATED, fg=C_INK, activebackground="#2c435c", activeforeground=C_INK, bd=1, relief="solid")
-    for label, command in (("Sửa", edit_selected_spare), ("Thử đã chọn", probe_selected_spare), ("Sao chép model", lambda: copy_spare_field("model")), ("Sao chép endpoint", lambda: copy_spare_field("api_base")), ("Đưa vào slot", apply_selected_spare), ("Kiểm định an toàn", audit_selected_spare), ("Xóa", delete_selected_spare)):
+    for label, command in (("Sửa", edit_selected_spare), ("Thử đã chọn", probe_selected_spare), ("Sao chép model", lambda: copy_spare_field("model")), ("Sao chép endpoint", lambda: copy_spare_field("api_base")), ("Đưa sang Theo dõi", watch_selected_spare), ("Đưa vào slot", apply_selected_spare), ("Kiểm định an toàn", audit_selected_spare), ("Xóa", delete_selected_spare)):
         spare_menu.add_command(label=label, command=command)
     def show_spare_menu(event):
         iid = spare_list.tree.identify_row(event.y)
@@ -3005,6 +3049,7 @@ def run_gui(start_hidden: bool) -> None:
     tk.Button(spare_manage, text="+ Lưu", command=add_spare_dialog, bg=C_BTN, fg=C_ACCENT, activebackground=C_BTN_HOVER, activeforeground=C_ACCENT, relief="flat", font=(FONT, 9, "bold"), padx=10, pady=3, cursor="hand2").pack(side="left")
     tk.Button(spare_manage, text="Từ slot", command=copy_slot_to_spare, bg=C_BTN, fg=C_INK, activebackground=C_BTN_HOVER, activeforeground=C_INK, relief="flat", font=(FONT, 9), padx=9, pady=3, cursor="hand2").pack(side="left", padx=(5, 0))
     tk.Button(spare_manage, text="Chép key", command=copy_selected_spare_key, bg=C_BTN, fg=C_INK, activebackground=C_BTN_HOVER, activeforeground=C_INK, relief="flat", font=(FONT, 9), padx=9, pady=3, cursor="hand2").pack(side="left", padx=(5, 0))
+    tk.Button(spare_manage, text="Đưa sang Theo dõi", command=watch_selected_spare, bg=C_BTN, fg=C_ACCENT, activebackground=C_BTN_HOVER, activeforeground=C_ACCENT, relief="flat", font=(FONT, 9), padx=9, pady=3, cursor="hand2").pack(side="left", padx=(5, 0))
     _bar_sep()
     tk.Button(spare_actions, text="Thử", command=probe_selected_spare, bg=C_BTN, fg=C_INK, activebackground=C_BTN_HOVER, activeforeground=C_INK, relief="flat", font=(FONT, 9), padx=10, pady=3, cursor="hand2").pack(side="left")
     tk.Button(spare_actions, text="Kiểm định an toàn", command=audit_selected_spare, bg=C_BTN, fg=C_ACCENT, activebackground=C_BTN_HOVER, activeforeground=C_ACCENT, relief="flat", font=(FONT, 9), padx=10, pady=3, cursor="hand2").pack(side="left", padx=(5, 0))
@@ -3036,12 +3081,13 @@ def run_gui(start_hidden: bool) -> None:
 
     from watch_panel import WatchPanel
     watch_panel = WatchPanel(
-        overview_tab, state=state, save=save_state, probe=probe_model, emit=uiq.put,
+        overview_content, state=state, save=save_state, probe=probe_model, emit=uiq.put,
         status=foot_var.set,
         sources=lambda: [(f"Slot {i + 1}", item) for i, item in enumerate(live_slots())] +
                         [("Dự trữ", item) for item in spare_items()],
         colors=dict(surface=C_SURFACE, line=C_LINE, accent=C_ACCENT, muted=C_MUTED,
                     ink=C_INK, btn=C_BTN, hover=C_BTN_HOVER, ok=C_OK, bad=C_BAD, warn=C_WARN), font=FONT,
+        style_dialog=apply_dark_titlebar,
     )
     watch_panel.pack(fill="both", expand=True, pady=(0, 2))
 
@@ -4325,6 +4371,12 @@ def run_gui(start_hidden: bool) -> None:
             activebackground="#f0ca75", activeforeground="#161208",
             relief="flat", font=(FONT, 10, "bold"), padx=18, pady=6, cursor="hand2",
         ).pack(side="right", padx=(0, 8))
+        win.update_idletasks()
+        overflow = win.winfo_reqheight() - (win.winfo_screenheight() - 80)
+        if overflow > 0:
+            from tkinter import font as tkfont
+            line = tkfont.Font(win, font=model_list.cget("font")).metrics("linespace")
+            model_list.configure(height=max(3, int(model_list.cget("height")) - (overflow + line - 1) // line))
         place_over_root(win)
 
     def do_add():
@@ -4441,12 +4493,20 @@ def run_gui(start_hidden: bool) -> None:
                 font=(FONT, 10), anchor="w",
             ).pack(fill="x", padx=16, pady=2)
 
+        settings_error = tk.StringVar()
+        tk.Label(win, textvariable=settings_error, bg=C_BG, fg=C_WARN, font=(FONT, 9),
+                 wraplength=420, justify="left").pack(fill="x", padx=16, pady=(8, 0))
+
         def save():
-            state["run_with_windows"] = bool(vars_["run_with_windows"].get())
-            state["notify_on_down"] = bool(vars_["notify_on_down"].get())
-            state["notify_on_failover"] = bool(vars_["notify_on_failover"].get())
-            state["always_on_top"] = bool(vars_["always_on_top"].get())
-            save_state(state)
+            changes = {key: bool(value.get()) for key, value in vars_.items()}
+            candidate = dict(state, **changes)
+            try:
+                save_state(candidate)
+            except (RuntimeError, OSError, ValueError):
+                settings_error.set("Không lưu được Cài đặt; tùy chọn cũ được giữ nguyên. Kiểm tra quyền ghi hoặc cảnh báo dữ liệu THEO DÕI.")
+                foot_var.set(settings_error.get())
+                return
+            state.update(changes)
             set_run_with_windows(state["run_with_windows"])
             root.attributes("-topmost", bool(state["always_on_top"]))
             if NotificationController.should_have_tray(state):
@@ -4483,7 +4543,7 @@ def run_gui(start_hidden: bool) -> None:
             root.update_idletasks()
             width, min_height = dashboard_size()
             height = min_height
-            root.minsize(880, min_height)
+            root.minsize(min_width, min_height)
             root.geometry(f"{width}x{height}")
             foot_var.set(f"Đã thu cửa sổ vừa nội dung ({width}×{height})")
 
@@ -4520,7 +4580,7 @@ def run_gui(start_hidden: bool) -> None:
             chrome_height, upper.winfo_reqheight(), watch_panel.winfo_reqheight(), 1,
             max(560, root.winfo_screenheight() - 120),
         ))
-        width = min(max(880, top.winfo_reqwidth() + 36, dots.winfo_reqwidth() + 36,
+        width = min(max(min_width, top.winfo_reqwidth() + 36, dots.winfo_reqwidth() + 36,
                         overview_tab.winfo_reqwidth() + 40), root.winfo_screenwidth() - 60)
         return width, height
 
@@ -4534,7 +4594,7 @@ def run_gui(start_hidden: bool) -> None:
         width = fit_window_dimension(
             root.winfo_width(), required_width, root.winfo_screenwidth() - 60, allow_shrink=False,
         )
-        root.minsize(880, min_height)
+        root.minsize(min_width, min_height)
         if (width, height) != (root.winfo_width(), root.winfo_height()):
             root.geometry(f"{width}x{height}")
         if final:

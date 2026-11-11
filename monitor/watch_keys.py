@@ -198,7 +198,7 @@ def apply_watch_result(record, result, *, now=None, interval=600):
     updated.update(fail_streak=streak, auth_fail_streak=auth_streak,
                    cooldown_until=now + cooldown if cooldown else 0,
                    next_probe_at=now + max(60, interval, cooldown))
-    if auth_streak >= 2:
+    if auth_streak >= 2 and updated.get('auto_enabled'):
         updated.update(auto_enabled=False, auto_disabled_reason='Tự tắt Auto: HTTP 401/403 liên tiếp')
     if ok:
         updated['auto_disabled_reason'] = ''

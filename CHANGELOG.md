@@ -15,6 +15,15 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 - Fixed the edit-modal race that could re-enable Auto after background auth failures; editor saves merge only current user fields against the latest record.
 - Rejected user-entered `dpapi:` envelopes. Null watch lists normalize to empty; malformed nonempty watch data disables Auto and state writes, shows a warning, and preserves original bytes instead of silently discarding credentials.
 
+### Watch Transfer and Reliability
+- Added **Đưa sang Theo dõi** to the Reserve context menu and action row. It opens a prefilled, masked editor; Save makes an independent DPAPI watch with Auto off and keeps the reserve unchanged. Missing/locked keys, ambiguous selections and capacity overflow do not copy or probe.
+- Made settings saves transactional: persistence succeeds before shared state and Windows startup/tray/window effects change. Failures remain inline without Tk tracebacks.
+- Double-clicking the Auto cell toggles once and does not open Edit. Row Auto waiting on the master switch reads **Chờ tổng**; manual-only auth failures no longer claim an Auto shutdown.
+- Watch modal validation is inline, the source picker owns a modal grab and both dialogs use the existing dark-titlebar helper.
+- Old results display **Cũ** after the greater of 10 minutes or two configured intervals. This is a presentation warning, not a credential/provider verdict.
+- Added seven-record DPAPI save/reopen/restore tests, failed atomic-save preservation and synthetic network/timeout/429/locked-key tests.
+- Extended layout validation to Tk scaling 2.666667 (Windows 200% font factor). At high DPI, the overview scrolls vertically and minimum width scales within screen bounds; the slot editor reduces its scrollable model-list height to keep actions reachable.
+
 ### Test Isolation
 - Made `suite_bootstrap.py` create its own per-suite scratch profile before executing test code, including standalone invocations outside the full runner.
 - Added a subprocess sentinel regression that proves writes stay in the isolated profile and leave the caller's Monitor state untouched.
@@ -36,7 +45,7 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 ### Scaling Limits
 
 - Startup sizing cannot exceed the usable screen height (screen height minus 120 px); when the measured content is taller, vertical controls require scrolling or a taller display.
-- The 200% case is outside the currently verified envelope.
+- High-DPI content uses an outer overview scrollbar above 150%; it is not forced into one 960px-tall view. A low-resolution display can still require a smaller desktop scale.
 - Benchmark cancellation stops queued probes but does not interrupt a currently executing HTTP request; timeout bounds remain the in-flight stop limit.
 
 ## [v1.2.0-hardening] — 2026-10-26

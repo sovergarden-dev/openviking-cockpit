@@ -32,7 +32,8 @@ GUI['load_state'] = lambda: {
     ], 'model_lists': {},
     'reserve_layout': {}, 'probe': {}, 'auto_probe_enabled': False,
     'watch_keys': [dict(id=f'layout-watch-{i}', rev=1, alias=f'Key {i + 1}', model=f'fixture/watch-{i}',
-                        api_base='https://fixture.invalid/v1', api_key='synthetic-key', auto_enabled=False)
+                        api_base='https://fixture.invalid/v1', api_key='synthetic-key', auto_enabled=i == 0,
+                        last_probe=dict(ok=False, text='timeout', ms=20000, at=1760000000))
                    for i in range(7)],
 }
 GUI['save_state'] = lambda _state: None
@@ -182,6 +183,23 @@ def loop(root, *args):
                 watch_tree = watch.tree
                 watch_rows = watch_tree.get_children()
                 assert len(watch_rows) == 7
+                auto_font = font.Font(root, font=ttk.Style(root).lookup('Watch.Treeview', 'font'))
+                assert int(watch_tree.column('auto', 'width')) >= auto_font.measure('Chờ tổng') + 14, 'Auto pending label clipped'
+                for column in ('ms', 'last', 'auto'):
+                    for row in watch_rows:
+                        assert int(watch_tree.column(column, 'width')) >= auto_font.measure(watch_tree.set(row, column)) + 14, f'watch {column} value clipped'
+                canvases = [w for w in walk(root) if w.winfo_name() == 'overview_scroll']
+                if TEST_SCALE > 2.01:
+                    assert canvases, 'high DPI overview has no scroll escape'
+                    canvas = canvases[0]
+                    canvas.yview_moveto(1)
+                    root.update_idletasks()
+                    assert canvas.yview()[1] >= .999
+                    for control in [w for w in walk(watch) if w.winfo_class() == 'Button']:
+                        assert canvas.winfo_rooty() <= control.winfo_rooty()
+                        assert control.winfo_rooty() + control.winfo_height() <= canvas.winfo_rooty() + canvas.winfo_height(), 'watch action unreachable by outer scroll'
+                    canvas.yview_moveto(0)
+                    root.update_idletasks()
                 visible = [row for row in watch_rows if watch_tree.bbox(row)
                            and sum(watch_tree.bbox(row)[1::2]) <= watch_tree.winfo_height() - 2]
                 assert len(visible) >= 3, (f'THEO DÕI chỉ hiện {len(visible)} hàng: {watch_tree.winfo_geometry()} '
