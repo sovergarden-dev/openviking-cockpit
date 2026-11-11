@@ -31,6 +31,12 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 - Double-clicking watch headings or empty space no longer opens the selected record. Data-cell editing and the one-toggle Auto gesture remain intact.
 - Centered the watch source picker relative to Monitor and clamped it within primary-screen bounds. High-DPI Fit measures the Overview content plus its scrollbar instead of the Canvas request width.
 
+### Unreadable State Preservation
+- Existing `monitor.json` files that fail UTF-8 decoding, JSON parsing, object-root validation or reading no longer become writable empty defaults. Missing files retain normal first-run creation; unverified absence fails closed.
+- A damaged/unreadable state disables Auto and blocks all state saves, including startup auto-fit, Settings, Watch edits and exit geometry. Original bytes remain untouched; restoring a valid file and reopening Monitor is required to resume saving.
+- Added a persistent, wrapping recovery warning independent of transient status messages, with the same instructions in Settings. Logs record only a fixed diagnostic, not raw file contents or exception messages.
+- Added isolated regression tests for damaged documents, read/stat failures, save-gate ordering, explicit restore/reopen and the actual startup/Settings/Watch/exit callbacks.
+
 ### Test Isolation
 - Made `suite_bootstrap.py` create its own per-suite scratch profile before executing test code, including standalone invocations outside the full runner.
 - Added a subprocess sentinel regression that proves writes stay in the isolated profile and leave the caller's Monitor state untouched.

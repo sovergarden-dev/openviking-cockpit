@@ -407,45 +407,58 @@ def load_state() -> dict:
         "watch_auto_migrated": True,
     }
     try:
-        if STATE_PATH.exists():
-            import hashlib
-            raw_state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-            if raw_state.get("watch_keys") is None:
-                raw_state["watch_keys"] = []
+        import hashlib
+        try:
+            raw_text = STATE_PATH.read_text(encoding="utf-8")
+        except FileNotFoundError:
             try:
-                validate_watch_records(raw_state["watch_keys"])
-            except ValueError:
-                raw_state.update(watch_keys=[], watch_auto_enabled=False,
-                                 _watch_state_error="THEO DÕI có dữ liệu hỏng; giữ nguyên monitor.json và tạm khóa lưu để tránh mất key.")
-                log_app("watch state invalid; persistent writes disabled")
-            for records in (raw_state.get("spare_models"), raw_state.get("watch_keys")):
-                for s in records if isinstance(records, list) else []:
-                    if isinstance(s, dict) and "api_key" in s:
-                        raw_key = (s.get("api_key") or "").strip()
-                        s["_enc"] = raw_key  # Preserved exact raw ciphertext from disk
-                        if raw_key.startswith("dpapi:"):
-                            res = dpapi_unprotect_strict(raw_key)
-                            if res.status == SecretStatus.SECRET_READY:
-                                s["api_key"] = res.value
-                                s["_sha"] = hashlib.sha256(res.value.encode("utf-8")).hexdigest()
-                                s["_dpapi_locked"] = False
-                            else:
-                                s["api_key"] = ""
-                                s["_sha"] = None
-                                s["_dpapi_locked"] = True
-                        else:
-                            s["_sha"] = hashlib.sha256(raw_key.encode("utf-8")).hexdigest() if raw_key else None
+                STATE_PATH.lstat()
+            except FileNotFoundError:
+                return d
+            raise
+        raw_state = json.loads(raw_text)
+        if not isinstance(raw_state, dict):
+            raise ValueError("Monitor state phải là JSON object")
+        if raw_state.get("watch_keys") is None:
+            raw_state["watch_keys"] = []
+        try:
+            validate_watch_records(raw_state["watch_keys"])
+        except ValueError:
+            raw_state.update(watch_keys=[], watch_auto_enabled=False,
+                             _watch_state_error="THEO DÕI có dữ liệu hỏng; giữ nguyên monitor.json và tạm khóa lưu để tránh mất key.")
+            log_app("watch state invalid; persistent writes disabled")
+        for records in (raw_state.get("spare_models"), raw_state.get("watch_keys")):
+            for s in records if isinstance(records, list) else []:
+                if isinstance(s, dict) and "api_key" in s:
+                    raw_key = (s.get("api_key") or "").strip()
+                    s["_enc"] = raw_key  # Preserved exact raw ciphertext from disk
+                    if raw_key.startswith("dpapi:"):
+                        res = dpapi_unprotect_strict(raw_key)
+                        if res.status == SecretStatus.SECRET_READY:
+                            s["api_key"] = res.value
+                            s["_sha"] = hashlib.sha256(res.value.encode("utf-8")).hexdigest()
                             s["_dpapi_locked"] = False
-            if not raw_state.get("watch_auto_migrated"):
-                raw_state.update(watch_auto_enabled=False, auto_probe_enabled=False, watch_auto_migrated=True)
-            d.update(raw_state)
+                        else:
+                            s["api_key"] = ""
+                            s["_sha"] = None
+                            s["_dpapi_locked"] = True
+                    else:
+                        s["_sha"] = hashlib.sha256(raw_key.encode("utf-8")).hexdigest() if raw_key else None
+                        s["_dpapi_locked"] = False
+        if not raw_state.get("watch_auto_migrated"):
+            raw_state.update(watch_auto_enabled=False, auto_probe_enabled=False, watch_auto_migrated=True)
+        d.update(raw_state)
     except Exception:
-        pass
+        d.update(_state_load_error="Không đọc được monitor.json. Auto đã tắt và lưu đã khóa để giữ dữ liệu gốc. Khôi phục file từ bản sao lưu rồi mở lại Monitor.",
+                 watch_auto_enabled=False, auto_probe_enabled=False)
+        log_app("monitor state unreadable; persistent writes disabled")
     return d
 
 
 def save_state(d: dict) -> None:
     try:
+        if d.get("_state_load_error"):
+            raise ValueError("Không ghi đè monitor state không đọc được")
         if d.get("_watch_state_error"):
             raise ValueError("Không ghi đè state THEO DÕI đang hỏng")
         APP_DIR.mkdir(parents=True, exist_ok=True)
@@ -2377,7 +2390,14 @@ def run_gui(start_hidden: bool) -> None:
         tk.Label(f, text=label, bg=C_SURFACE, fg=C_INK, font=(FONT, 9)).pack(side="left")
         dot_vars[key] = (c, oval)
 
-    foot_var = tk.StringVar(value=state.get("_watch_state_error") or "")
+    state_error = state.get("_state_load_error") or state.get("_watch_state_error") or ""
+    if state_error:
+        warning = tk.Label(root, name="state_warning", text=state_error, bg=C_ELEVATED,
+                           fg=C_WARN, font=(FONT, 9, "bold"), anchor="w", justify="left",
+                           wraplength=840, padx=10, pady=6)
+        warning.pack(fill="x", padx=18, pady=(0, 4))
+        warning.bind("<Configure>", lambda event: warning.configure(wraplength=max(1, event.width - 20)))
+    foot_var = tk.StringVar(value=state_error)
     foot_label = tk.Label(root, name="shared_status", textvariable=foot_var, bg=C_BG,
                           fg=C_WARN, font=(FONT, 8), anchor="w", justify="left",
                           wraplength=1000)
@@ -4505,7 +4525,7 @@ def run_gui(start_hidden: bool) -> None:
                 font=(FONT, 10), anchor="w",
             ).pack(fill="x", padx=16, pady=2)
 
-        settings_error = tk.StringVar()
+        settings_error = tk.StringVar(value=state_error)
         tk.Label(win, textvariable=settings_error, bg=C_BG, fg=C_WARN, font=(FONT, 9),
                  wraplength=420, justify="left").pack(fill="x", padx=16, pady=(8, 0))
 
@@ -4515,7 +4535,7 @@ def run_gui(start_hidden: bool) -> None:
             try:
                 save_state(candidate)
             except (RuntimeError, OSError, ValueError):
-                settings_error.set("Không lưu được Cài đặt; tùy chọn cũ được giữ nguyên. Kiểm tra quyền ghi hoặc cảnh báo dữ liệu THEO DÕI.")
+                settings_error.set(state_error or "Không lưu được Cài đặt; tùy chọn cũ được giữ nguyên. Kiểm tra quyền ghi hoặc cảnh báo dữ liệu THEO DÕI.")
                 foot_var.set(settings_error.get())
                 return
             state.update(changes)

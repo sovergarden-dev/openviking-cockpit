@@ -100,6 +100,14 @@ Phản biện là cổng thiết kế, không phải bằng chứng code đã đ
 - Phản biện độc lập `deleg_a48e8fd8`: không lỗi bảo mật/logic chặn, 66 PASS + 2 helper SKIP vì không bật opt-in; riêng ma trận DPI 20/20 PASS. Không gộp SKIP của reviewer thành PASS.
 - Ảnh hộp Cài đặt khi lỗi áp dụng và source picker tại Tk 2.666667 đã kiểm tra trực quan bằng dữ liệu giả: nút, checkbox và cảnh báo đủ chữ, không cắt khung.
 
+## Khóa ghi khi không đọc được toàn file state
+
+- `monitor.json` chưa tồn tại được phép tạo ở lần chạy đầu. File tồn tại nhưng lỗi đọc, UTF-8, JSON hoặc root không phải object phải khóa lưu; không dùng mặc định rỗng để ghi đè.
+- Lỗi toàn file trả state an toàn với Auto tắt, cờ `_state_load_error` và thông báo cố định. `save_state` chặn cờ này trước khi tạo thư mục, mã hóa hoặc gọi writer; startup auto-fit, Settings, Watch và thoát không được ghi file gốc.
+- Banner cảnh báo riêng luôn hiện và xuống dòng theo cửa sổ; thay đổi trạng thái thao tác không xóa cảnh báo. Cài đặt hiển thị cùng hướng dẫn và không áp dụng Windows/RAM khi lưu thất bại.
+- Khôi phục: đóng Monitor, giữ lại file hỏng, khôi phục `monitor.json` hợp lệ từ bản sao lưu riêng rồi mở lại. Backup `monitor-sync-*` chỉ chứa nguồn, không chứa state; không tự đặt lại mặc định hay suy đoán credential.
+- Kiểm thử chỉ dùng dữ liệu giả và guard filesystem/network. Không thử sửa, đọc nội dung hoặc khôi phục state live để tái hiện lỗi này.
+
 ## Kết quả nghiệm thu bản hai tab ban đầu
 
 - Phản biện xác nhận ba lỗi race/DPAPI/state: `passed=true`, không có lỗi logic hoặc bảo mật chặn. Gợi ý UX không được xem là bằng chứng lỗi đã sửa.
