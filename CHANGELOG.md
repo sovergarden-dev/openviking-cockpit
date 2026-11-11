@@ -44,6 +44,11 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 - A detected conflict stops Watch Auto, cancels queued work and keeps a wrapping recovery banner plus Settings instructions until Monitor is reopened. Failed saves do not apply candidate settings or Windows startup changes.
 - Added synthetic revision/GUI regressions for first-run conflicts, raw newline changes, read/stat failures, stale candidates, lock ordering, failed publication/retry and sequential own saves. The lock coordinates participating writers; arbitrary writers that ignore it are not a filesystem compare-and-swap transaction.
 
+### Windows Taskbar Identity and Icon
+- Monitor shortcuts now persist `System.AppUserModel.ID` matching the process identity, which is set before Tk creates any windows.
+- Bundled the existing blue sailboat artwork at 16–256 pixels and made shortcuts, windows and tray prefer it over the legacy Helper resource.
+- Added isolated real COM shortcut identity readback, failure handling, icon resolution and pre-Tk process identity regressions.
+
 ### Test Isolation
 - Made `suite_bootstrap.py` create its own per-suite scratch profile before executing test code, including standalone invocations outside the full runner.
 - Added a subprocess sentinel regression that proves writes stay in the isolated profile and leave the caller's Monitor state untouched.

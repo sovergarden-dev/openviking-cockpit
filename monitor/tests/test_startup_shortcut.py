@@ -19,6 +19,8 @@ assert 'ov-suite-' in str(path), 'Startup tests require suite_bootstrap isolatio
 glob['startup_shortcut_path'] = lambda: path
 logs = []
 glob['log_app'] = logs.append
+real_identity_writer = glob['set_shortcut_app_id']
+glob['set_shortcut_app_id'] = lambda target: None
 
 
 def create_shell_file(*args, **kwargs):
@@ -46,6 +48,7 @@ assert glob['set_run_with_windows'](False) is True
 shell_node = next(n for n in ast.parse(source.read_text(encoding='utf-8-sig')).body
                   if isinstance(n, ast.FunctionDef) and n.name == 'run_hidden')
 exec(compile(ast.Module(body=[shell_node], type_ignores=[]), str(source), 'exec'), glob)
+glob['set_shortcut_app_id'] = real_identity_writer
 assert glob['set_run_with_windows'](True) is True, 'real scratch shortcut creation failed'
 assert path.is_file() and path.stat().st_size > 0
 quoted = str(path).replace("'", "''")

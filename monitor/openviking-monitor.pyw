@@ -1582,10 +1582,10 @@ def desktop_shortcut_path() -> Path:
 
 
 def shortcut_icon() -> str:
-    if HELPER_EXE.exists():
-        return str(HELPER_EXE)
     if ICON_FILE.exists():
         return str(ICON_FILE)
+    if HELPER_EXE.exists():
+        return str(HELPER_EXE)
     return str(sys.executable)
 
 
@@ -1601,7 +1601,7 @@ def load_helper_icon(size: int) -> int:
     ]
     user32.PrivateExtractIconsW.restype = ctypes.c_uint
     hicon = wintypes.HICON()
-    src = str(HELPER_EXE) if HELPER_EXE.exists() else (str(ICON_FILE) if ICON_FILE.exists() else "")
+    src = str(ICON_FILE) if ICON_FILE.exists() else (str(HELPER_EXE) if HELPER_EXE.exists() else "")
     if not src:
         return 0
     n = user32.PrivateExtractIconsW(src, 0, size, size, ctypes.byref(hicon), None, 1, 0)
@@ -1611,12 +1611,23 @@ def load_helper_icon(size: int) -> int:
     return 0
 
 
+def set_process_app_id() -> None:
+    shell32 = ctypes.windll.shell32
+    shell32.SetCurrentProcessExplicitAppUserModelID.argtypes = [wintypes.LPCWSTR]
+    shell32.SetCurrentProcessExplicitAppUserModelID.restype = ctypes.c_long
+    result = shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    if result < 0:
+        raise OSError(f"Process identity HRESULT 0x{result & 0xffffffff:08X}")
+
+
 def apply_window_icon(root) -> None:
-    try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
-    except Exception:
-        pass
+    if ICON_FILE.exists():
+        root.iconbitmap(default=str(ICON_FILE))
     user32 = ctypes.windll.user32
+    user32.GetParent.argtypes = [wintypes.HWND]
+    user32.GetParent.restype = wintypes.HWND
+    user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.SendMessageW.restype = ctypes.c_ssize_t
     hwnd = user32.GetParent(root.winfo_id()) or root.winfo_id()
     hbig = load_helper_icon(256) or load_helper_icon(48)
     hsmall = load_helper_icon(32) or hbig
@@ -1624,14 +1635,62 @@ def apply_window_icon(root) -> None:
         user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hbig)
     if hsmall:
         user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hsmall)
-    if ICON_FILE.exists():
-        try:
-            root.iconbitmap(default=str(ICON_FILE))
-        except Exception:
-            try:
-                root.iconbitmap(str(ICON_FILE))
-            except Exception:
-                pass
+
+
+def set_shortcut_app_id(path: Path) -> None:
+    """Match a shell shortcut to the hosted process without a COM dependency."""
+    import uuid
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("raw", ctypes.c_ubyte * 16)]
+
+    class PROPERTYKEY(ctypes.Structure):
+        _fields_ = [("fmtid", GUID), ("pid", wintypes.DWORD)]
+
+    class VALUE(ctypes.Union):
+        _fields_ = [("text", wintypes.LPWSTR),
+                    ("storage", ctypes.c_ubyte * (2 * ctypes.sizeof(ctypes.c_void_p)))]
+
+    class PROPVARIANT(ctypes.Structure):
+        _fields_ = [("vt", wintypes.WORD), ("reserved", wintypes.WORD * 3), ("value", VALUE)]
+
+    def checked(result):
+        if result < 0:
+            raise OSError(f"Shortcut identity HRESULT 0x{result & 0xffffffff:08X}")
+
+    ole32, shell32, propsys = ctypes.windll.ole32, ctypes.windll.shell32, ctypes.windll.propsys
+    ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    ole32.CoInitializeEx.restype = ctypes.c_long
+    initialized = ole32.CoInitializeEx(None, 2)
+    if initialized not in (0, 1, -2147417850):
+        checked(initialized)
+    store = ctypes.c_void_p()
+    try:
+        iid = GUID.from_buffer_copy(uuid.UUID("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99").bytes_le)
+        key = PROPERTYKEY()
+        propsys.PSGetPropertyKeyFromName.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(PROPERTYKEY)]
+        propsys.PSGetPropertyKeyFromName.restype = ctypes.c_long
+        checked(propsys.PSGetPropertyKeyFromName("System.AppUserModel.ID", ctypes.byref(key)))
+        shell32.SHGetPropertyStoreFromParsingName.argtypes = [
+            wintypes.LPCWSTR, ctypes.c_void_p, wintypes.DWORD,
+            ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p),
+        ]
+        shell32.SHGetPropertyStoreFromParsingName.restype = ctypes.c_long
+        checked(shell32.SHGetPropertyStoreFromParsingName(str(path), None, 2, ctypes.byref(iid), ctypes.byref(store)))
+        table = ctypes.cast(store, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        value = PROPVARIANT()
+        value.vt = 31
+        value.value.text = APP_USER_MODEL_ID
+        set_value = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p,
+                                      ctypes.POINTER(PROPERTYKEY), ctypes.POINTER(PROPVARIANT))(table[6])
+        checked(set_value(store, ctypes.byref(key), ctypes.byref(value)))
+        checked(ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(table[7])(store))
+    finally:
+        if store.value:
+            table = ctypes.cast(store, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+            ctypes.WINFUNCTYPE(wintypes.ULONG, ctypes.c_void_p)(table[2])(store)
+        if initialized in (0, 1):
+            ole32.CoUninitialize()
 
 
 def make_shortcut(path: Path, args: str, window_style: int = 1) -> bool:
@@ -1658,7 +1717,14 @@ $s.Description = 'OpenViking Monitor'
 $s.Save()
 """
     code, _ = run_hidden(["powershell", "-NoProfile", "-Command", ps], timeout=15)
-    return code == 0 and path.is_file()
+    if code != 0 or not path.is_file():
+        return False
+    try:
+        set_shortcut_app_id(path)
+    except OSError:
+        log_app("shortcut taskbar identity failed")
+        return False
+    return True
 
 
 def set_run_with_windows(enabled: bool) -> bool:
@@ -2300,6 +2366,7 @@ def run_gui(start_hidden: bool) -> None:
     snap_lock = threading.Lock()
     current = {"snap": None, "restarting": False, "pending": None}
 
+    set_process_app_id()
     root = tk.Tk()
     root.title(WINDOW_TITLE)
     root.configure(bg=C_BG)
