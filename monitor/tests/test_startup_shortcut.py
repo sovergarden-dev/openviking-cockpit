@@ -1,0 +1,58 @@
+"""Startup integration acknowledges shell status and verifies scratch files."""
+import ast
+import os
+from pathlib import Path
+import runpy
+import sys
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+source = ROOT / 'openviking-monitor.pyw'
+namespace = runpy.run_path(str(source), run_name='startup_shortcut_test')
+glob = namespace['run_gui'].__globals__
+node = next(n for n in ast.parse(source.read_text(encoding='utf-8-sig')).body
+            if isinstance(n, ast.FunctionDef) and n.name == 'set_run_with_windows')
+exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), 'exec'), glob)
+path = Path(os.environ['USERPROFILE']) / '.openviking/monitor/synthetic-startup.lnk'
+assert 'ov-suite-' in str(path), 'Startup tests require suite_bootstrap isolation'
+glob['startup_shortcut_path'] = lambda: path
+logs = []
+glob['log_app'] = logs.append
+
+
+def create_shell_file(*args, **kwargs):
+    path.write_bytes(b'synthetic-shortcut')
+    return 0, ''
+
+
+glob['run_hidden'] = lambda *args, **kwargs: (1, 'synthetic-sensitive-shell-output')
+assert glob['set_run_with_windows'](True) is False, 'failed shell command was not acknowledged'
+assert not path.exists()
+glob['run_hidden'] = lambda *args, **kwargs: (0, '')
+assert glob['set_run_with_windows'](True) is False, 'exit zero without a shortcut was accepted'
+glob['run_hidden'] = create_shell_file
+assert glob['set_run_with_windows'](True) is True, 'verified shortcut was not acknowledged'
+assert path.is_file()
+assert glob['set_run_with_windows'](False) is True
+assert not path.exists()
+assert glob['set_run_with_windows'](False) is True, 'already-disabled startup should succeed'
+path.write_bytes(b'synthetic-shortcut')
+with patch.object(Path, 'unlink', side_effect=PermissionError('synthetic-sensitive-unlink-output')):
+    assert glob['set_run_with_windows'](False) is False, 'failed unlink was not acknowledged'
+assert path.exists()
+assert not any('synthetic-sensitive' in line for line in logs), 'raw error reached app log'
+assert glob['set_run_with_windows'](False) is True
+shell_node = next(n for n in ast.parse(source.read_text(encoding='utf-8-sig')).body
+                  if isinstance(n, ast.FunctionDef) and n.name == 'run_hidden')
+exec(compile(ast.Module(body=[shell_node], type_ignores=[]), str(source), 'exec'), glob)
+assert glob['set_run_with_windows'](True) is True, 'real scratch shortcut creation failed'
+assert path.is_file() and path.stat().st_size > 0
+quoted = str(path).replace("'", "''")
+code, text = glob['run_hidden'](['powershell', '-NoProfile', '-Command',
+                               f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{quoted}'); "
+                               "$s.Arguments"], timeout=15)
+assert code == 0 and '--tray' in text, 'scratch startup shortcut has wrong arguments'
+assert glob['set_run_with_windows'](False) is True
+assert not path.exists()
+print('STARTUP_SHORTCUT_OK')

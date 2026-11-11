@@ -208,7 +208,13 @@ class WatchPanel(tk.Frame):
         return 'break'
 
     def double_click(self, event):
-        if self.tree.identify_region(event.x, event.y) == 'cell' and self.tree.identify_column(event.x) == '#6':
+        if self.tree.identify_region(event.x, event.y) != 'cell':
+            return 'break'
+        identifier = self.tree.identify_row(event.y)
+        if not identifier:
+            return 'break'
+        self.tree.selection_set(identifier)
+        if self.tree.identify_column(event.x) == '#6':
             self._skip_auto_release = True
         else:
             self.edit()
@@ -377,6 +383,13 @@ class WatchPanel(tk.Frame):
         buttons.pack(fill='x', padx=12, pady=10)
         self.button(buttons, 'Sao chép và sửa', choose, accent=True)
         self.button(buttons, 'Hủy', win.destroy, right=True)
+        win.update_idletasks()
+        root = self.winfo_toplevel()
+        x = root.winfo_rootx() + max(0, (root.winfo_width() - win.winfo_reqwidth()) // 2)
+        y = root.winfo_rooty() + max(0, (root.winfo_height() - win.winfo_reqheight()) // 2)
+        x = max(0, min(x, root.winfo_screenwidth() - win.winfo_reqwidth() - 30))
+        y = max(0, min(y, root.winfo_screenheight() - win.winfo_reqheight() - 70))
+        win.geometry(f'+{x}+{y}')
         if self.style_dialog:
             self.style_dialog(win)
 

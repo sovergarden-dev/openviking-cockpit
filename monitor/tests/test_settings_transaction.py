@@ -17,7 +17,7 @@ path = Path(os.environ['USERPROFILE']) / '.openviking/monitor/monitor.json'
 before_bytes = path.read_bytes()
 original_save = glob['save_state']
 calls, errors = [], []
-glob['set_run_with_windows'] = lambda enabled: calls.append(enabled)
+glob['set_run_with_windows'] = lambda enabled: calls.append(enabled) or True
 
 
 def walk(widget):

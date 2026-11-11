@@ -24,6 +24,13 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 - Added seven-record DPAPI save/reopen/restore tests, failed atomic-save preservation and synthetic network/timeout/429/locked-key tests.
 - Extended layout validation to Tk scaling 2.666667 (Windows 200% font factor). At high DPI, the overview scrolls vertically and minimum width scales within screen bounds; the slot editor reduces its scrollable model-list height to keep actions reachable.
 
+### Settings Application and Interaction Guards
+- Reopening Cài đặt reuses and raises its current window, preserving unsaved edits instead of allowing stale parallel forms to overwrite newer settings.
+- Windows startup integration now checks PowerShell exit status and shortcut creation/removal. A saved preference is not reported as applied when integration fails; the inline error keeps Settings open and Lưu retries the operation.
+- Startup integration failures exclude raw shell/exception output from app logs. Regression tests cover shell failure, missing output, deletion denied, retry, and real COM shortcut creation/readback/removal under a guarded scratch profile.
+- Double-clicking watch headings or empty space no longer opens the selected record. Data-cell editing and the one-toggle Auto gesture remain intact.
+- Centered the watch source picker relative to Monitor and clamped it within primary-screen bounds. High-DPI Fit measures the Overview content plus its scrollbar instead of the Canvas request width.
+
 ### Test Isolation
 - Made `suite_bootstrap.py` create its own per-suite scratch profile before executing test code, including standalone invocations outside the full runner.
 - Added a subprocess sentinel regression that proves writes stay in the isolated profile and leave the caller's Monitor state untouched.

@@ -1590,7 +1590,7 @@ def apply_window_icon(root) -> None:
                 pass
 
 
-def make_shortcut(path: Path, args: str, window_style: int = 1) -> None:
+def make_shortcut(path: Path, args: str, window_style: int = 1) -> bool:
     pythonw = PYTHONW if PYTHONW.exists() else Path(sys.executable)
     if pythonw.name.lower() == "python.exe":
         cand = pythonw.with_name("pythonw.exe")
@@ -1602,6 +1602,7 @@ def make_shortcut(path: Path, args: str, window_style: int = 1) -> None:
     work = str(script.parent)
     icon = shortcut_icon().replace("'", "''")
     ps = f"""
+$ErrorActionPreference = 'Stop'
 $ws = New-Object -ComObject WScript.Shell
 $s = $ws.CreateShortcut('{str(path).replace("'", "''")}')
 $s.TargetPath = '{target.replace("'", "''")}'
@@ -1612,18 +1613,20 @@ $s.IconLocation = '{icon},0'
 $s.Description = 'OpenViking Monitor'
 $s.Save()
 """
-    run_hidden(["powershell", "-NoProfile", "-Command", ps], timeout=15)
+    code, _ = run_hidden(["powershell", "-NoProfile", "-Command", ps], timeout=15)
+    return code == 0 and path.is_file()
 
 
-def set_run_with_windows(enabled: bool) -> None:
+def set_run_with_windows(enabled: bool) -> bool:
     p = startup_shortcut_path()
-    if enabled:
-        make_shortcut(p, "--tray", window_style=7)
-    elif p.exists():
-        try:
-            p.unlink()
-        except Exception as e:
-            log_app(f"unlink startup {e}")
+    try:
+        if enabled:
+            return make_shortcut(p, "--tray", window_style=7)
+        p.unlink(missing_ok=True)
+        return not p.exists()
+    except OSError:
+        log_app("startup integration failed")
+        return False
 
 
 # --- Win32 tray (own hidden window; do not subclass Tk) ---
@@ -4461,8 +4464,17 @@ def run_gui(start_hidden: bool) -> None:
             return
         slot_editor("edit", slot)
 
+    settings_window = None
+
     def open_settings():
+        nonlocal settings_window
+        if settings_window is not None and settings_window.winfo_exists():
+            settings_window.deiconify()
+            settings_window.lift()
+            settings_window.focus_set()
+            return
         win = tk.Toplevel(root)
+        settings_window = win
         win.title("Cài đặt")
         win.configure(bg=C_BG)
         win.resizable(False, False)
@@ -4507,7 +4519,7 @@ def run_gui(start_hidden: bool) -> None:
                 foot_var.set(settings_error.get())
                 return
             state.update(changes)
-            set_run_with_windows(state["run_with_windows"])
+            startup_applied = set_run_with_windows(state["run_with_windows"])
             root.attributes("-topmost", bool(state["always_on_top"]))
             if NotificationController.should_have_tray(state):
                 ensure_tray()
@@ -4526,6 +4538,11 @@ def run_gui(start_hidden: bool) -> None:
                             acc = tray.balloon(title, body)
                         notification_ctrl.acknowledge_delivery(kind, acc)
                         log_app(f"notify catchup {kind}: {'accepted' if acc else 'failed'}")
+            if startup_applied is not True:
+                settings_error.set("Đã lưu Cài đặt nhưng chưa áp dụng được Khởi động cùng Windows. Kiểm tra quyền tạo/xóa shortcut rồi bấm Lưu để thử lại.")
+                foot_var.set(settings_error.get())
+                return
+            foot_var.set("Đã lưu Cài đặt và xác minh Khởi động cùng Windows.")
             win.destroy()
 
         def test_notify():
@@ -4580,8 +4597,11 @@ def run_gui(start_hidden: bool) -> None:
             chrome_height, upper.winfo_reqheight(), watch_panel.winfo_reqheight(), 1,
             max(560, root.winfo_screenheight() - 120),
         ))
+        content_width = overview_content.winfo_reqwidth()
+        if dpi_scale > 1.5:
+            content_width += overview_scroll.winfo_reqwidth()
         width = min(max(min_width, top.winfo_reqwidth() + 36, dots.winfo_reqwidth() + 36,
-                        overview_tab.winfo_reqwidth() + 40), root.winfo_screenwidth() - 60)
+                        content_width + 40), root.winfo_screenwidth() - 60)
         return width, height
 
     def auto_fit_once(final: bool = False):

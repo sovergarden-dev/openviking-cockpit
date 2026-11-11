@@ -88,6 +88,18 @@ Phản biện là cổng thiết kế, không phải bằng chứng code đã đ
 - Triển khai qua `monitor_sync.py`: receipt `applied`, 10 tệp nguồn/test, backup xác minh tại `monitor-sync-20261111T134101Z-f2944174`; đối chiếu lại không còn source drift. Cả `ov.conf` và `monitor.json` giữ nguyên SHA-256/size/mtime trong khoảng baseline triển khai, đồng bộ và mở bản live.
 - GUI live PID 27504 hiển thị nút **Đưa sang Theo dõi** trong tab Dự trữ; Tổng quan vẫn 0/7 và Auto tắt. Không thử key thật hoặc thêm watch thật trong QA. Listener 19330/21434 giữ nguyên PID 7884/26176; `/health` và `/ready` cùng HTTP 200.
 
+## Đợt khóa Cài đặt và tương tác sau `1d9cbc9`
+
+- Cài đặt chỉ giữ một cửa sổ. Mở lại đưa form đang có lên trước và giữ nhập dở; sau đóng, form mới đọc shared state mới nhất.
+- Lưu file thành công vẫn đi trước cập nhật RAM và tác dụng phụ Windows. `run_with_windows` là tùy chọn đã lưu; chỉ báo áp dụng khi lệnh PowerShell thành công và shortcut tồn tại, hoặc đã xác minh xóa. Nếu áp dụng lỗi, giữ form và cảnh báo **Đã lưu Cài đặt nhưng chưa áp dụng được Khởi động cùng Windows**; Lưu cho phép thử lại. Không giả định tùy chọn đã lưu đồng nghĩa Windows đã thực thi thành công.
+- Shortcut tests dùng đường scratch dưới profile cô lập: mã lỗi shell, exit-zero không có file, unlink bị từ chối, retry và một vòng COM tạo/đọc lại tham số `--tray`/xóa thật. Không đổi Startup thật trong QA; không ghi raw shell output/exception vào app log.
+- Nhấp đúp chỉ mở Sửa khi đúng vùng cell và có row ID; vùng heading/trống bỏ qua. Ô Auto vẫn đảo đúng một lần.
+- Hộp Lấy từ căn giữa theo Monitor và kẹp trong primary-screen bounds. Virtual-screen/màn hình phụ chưa thuộc phạm vi kiểm chứng.
+- Fit đo `overview_content` cộng scrollbar ở DPI cao, không đo request width của Canvas.
+- Parent runner có `--runtime-helpers`: 68/68 PASS, không SKIP/FAIL/TIMEOUT. Ma trận dashboard, slot editor, Settings singleton, Settings apply/retry và source picker tại bốn mức Tk scaling 1.333333/1.666667/2.0/2.666667: 20/20 PASS. `SELF_CHECK_OK`; dữ liệu live giữ nguyên hash/size/mtime trong toàn khoảng kiểm thử.
+- Phản biện độc lập `deleg_a48e8fd8`: không lỗi bảo mật/logic chặn, 66 PASS + 2 helper SKIP vì không bật opt-in; riêng ma trận DPI 20/20 PASS. Không gộp SKIP của reviewer thành PASS.
+- Ảnh hộp Cài đặt khi lỗi áp dụng và source picker tại Tk 2.666667 đã kiểm tra trực quan bằng dữ liệu giả: nút, checkbox và cảnh báo đủ chữ, không cắt khung.
+
 ## Kết quả nghiệm thu bản hai tab ban đầu
 
 - Phản biện xác nhận ba lỗi race/DPAPI/state: `passed=true`, không có lỗi logic hoặc bảo mật chặn. Gợi ý UX không được xem là bằng chứng lỗi đã sửa.

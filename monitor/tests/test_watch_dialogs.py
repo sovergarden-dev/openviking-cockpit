@@ -1,5 +1,6 @@
 """Watch modals retain focus and show validation errors where the user typed."""
 from pathlib import Path
+import os
 import sys
 import tkinter as tk
 
@@ -7,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from watch_panel import WatchPanel
 
 root = tk.Tk()
+root.tk.call('tk', 'scaling', float(os.environ.get('MONITOR_TEST_SCALE', '1.333333')))
 root.geometry('1020x600')
 state = dict(watch_keys=[], watch_auto_enabled=False)
 logs = []
@@ -34,10 +36,24 @@ try:
     root.update()
     picker = next(w for w in walk(root) if w.winfo_class() == 'Toplevel')
     assert root.grab_current() == picker, 'source picker is not modal'
+    expected_x = max(0, min(root.winfo_rootx() + max(0, (root.winfo_width() - picker.winfo_reqwidth()) // 2),
+                            root.winfo_screenwidth() - picker.winfo_reqwidth() - 30))
+    expected_y = max(0, min(root.winfo_rooty() + max(0, (root.winfo_height() - picker.winfo_reqheight()) // 2),
+                            root.winfo_screenheight() - picker.winfo_reqheight() - 70))
+    assert abs(picker.winfo_x() - expected_x) <= 8, 'source picker is not centered/clamped horizontally'
+    assert abs(picker.winfo_y() - expected_y) <= 8, 'source picker is not centered/clamped vertically'
     tree = next(w for w in walk(picker) if w.winfo_class() == 'Treeview')
     tree.selection_set('0')
     next(w for w in walk(picker) if w.winfo_class() == 'Button' and w.cget('text') == 'Sao chép và sửa').invoke()
     assert any('không có key đọc được' in text for text in label_texts(picker)), 'picker error hidden behind modal'
+    picker.destroy()
+    root.geometry(f'1020x600+{max(0, root.winfo_screenwidth() - 200)}+{max(0, root.winfo_screenheight() - 200)}')
+    root.update()
+    panel.pick_source()
+    root.update()
+    picker = next(w for w in walk(root) if w.winfo_class() == 'Toplevel')
+    assert picker.winfo_x() + picker.winfo_width() <= root.winfo_screenwidth() - 20, 'picker escaped right screen edge'
+    assert picker.winfo_y() + picker.winfo_height() <= root.winfo_screenheight() - 60, 'picker escaped bottom screen edge'
     picker.destroy()
     panel.edit(new=True, source=dict(source, api_key='synthetic', _dpapi_locked=False))
     root.update()

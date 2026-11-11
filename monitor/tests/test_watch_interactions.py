@@ -47,6 +47,21 @@ try:
     assert 'stale' in panel.tree.item(row, 'tags')
     assert state['watch_keys'][0]['last_probe']['ok'] is True, 'freshness rewrote probe evidence'
     assert not requests
+    from types import SimpleNamespace
+    for region, identifier in (('heading', row), ('nothing', row), ('cell', '')):
+        original_region = panel.tree.identify_region
+        original_row = panel.tree.identify_row
+        panel.tree.identify_region = lambda *_: region
+        panel.tree.identify_row = lambda *_: identifier
+        try:
+            panel.double_click(SimpleNamespace(x=5, y=5))
+        finally:
+            panel.tree.identify_region = original_region
+            panel.tree.identify_row = original_row
+    assert not edits, 'double-clicking heading/empty area opened selected editor'
+    model_box = panel.tree.bbox(row, 'model')
+    panel.double_click(SimpleNamespace(x=model_box[0] + 5, y=model_box[1] + 5))
+    assert len(edits) == 1, 'double-clicking a data cell did not open editor'
     print('WATCH_INTERACTIONS_OK')
 finally:
     panel.close()

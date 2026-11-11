@@ -88,7 +88,7 @@ def main():
         def no_probe(*args,**kwargs):
             raise RuntimeError('Real provider probes forbidden in tests')
         glob.update(collect=fake_collect,run_hidden=lambda *a,**k:(0,''),
-                    set_run_with_windows=lambda enabled:None,probe_model=no_probe,
+                    set_run_with_windows=lambda enabled:True,probe_model=no_probe,
                     list_chat_models=no_probe)
         class FakeTray:
             hwnd=0
