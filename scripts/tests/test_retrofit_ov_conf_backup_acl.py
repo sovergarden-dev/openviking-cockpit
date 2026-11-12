@@ -140,6 +140,179 @@ class TestRetrofitOvConfBackupAcl(unittest.TestCase):
         self.assertEqual(partial['hardened_names'], [self.sample.name])
         self.assertEqual(partial['error_class'], 'PermissionError')
 
+    def test_plan_and_receipt_omit_raw_sddl_and_sid(self):
+        import retrofit_ov_conf_backup_acl as mod
+
+        subprocess.run(['icacls', str(self.sample), '/grant', '*S-1-1-0:(R)'],
+                       capture_output=True, check=True, timeout=10)
+        plan = mod.build_plan(self.root)
+        plan_json = json.dumps(plan)
+        self.assertNotIn('S-1-5-', plan_json)
+        self.assertNotIn('sddl_access', plan['files'][0])
+        self.assertEqual(len(plan['files'][0]['sddl_sha256']), 64)
+
+        receipt = mod.apply_retrofit(self.root)
+        receipt_json = json.dumps(receipt)
+        self.assertNotIn('S-1-5-', receipt_json)
+        self.assertNotIn('sddl_after', receipt['files'][0])
+        self.assertEqual(len(receipt['files'][0]['sddl_after_sha256']), 64)
+
+    def test_plan_file_matching_applies_and_records_plan_sha256(self):
+        import retrofit_ov_conf_backup_acl as mod
+
+        subprocess.run(['icacls', str(self.sample), '/grant', '*S-1-1-0:(R)'],
+                       capture_output=True, check=True, timeout=10)
+        plan = mod.build_plan(self.root)
+        plan_path = Path(self.tmp.name) / 'reviewed-plan.json'
+        plan_bytes = (json.dumps(plan, indent=2) + '\n').encode('utf-8')
+        plan_path.write_bytes(plan_bytes)
+        expected_plan_sha = hashlib.sha256(plan_bytes).hexdigest()
+
+        receipt = mod.apply_retrofit(self.root, plan_file=plan_path)
+        self.assertEqual(receipt['mode'], 'APPLIED')
+        self.assertEqual(receipt['hardened_count'], 1)
+        self.assertEqual(receipt['plan_sha256'], expected_plan_sha)
+
+    def test_plan_file_rejects_drift_wrong_mode_outside_path_and_backup_dir_mismatch(self):
+        import retrofit_ov_conf_backup_acl as mod
+
+        subprocess.run(['icacls', str(self.sample), '/grant', '*S-1-1-0:(R)'],
+                       capture_output=True, check=True, timeout=10)
+        plan = mod.build_plan(self.root)
+        plan_path = Path(self.tmp.name) / 'bad-plan.json'
+        receipt_path = Path(self.tmp.name) / 'aborted-receipt.json'
+
+        # 1) wrong mode
+        wrong_mode = dict(plan, mode='APPLIED')
+        plan_path.write_text(json.dumps(wrong_mode), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'PLAN_ONLY'):
+            mod.apply_retrofit(self.root, receipt_path=receipt_path, plan_file=plan_path)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding='utf-8'))['mode'], 'APPLY_ABORTED')
+
+        # 2) backup_dir mismatch
+        other_dir = Path(self.tmp.name) / 'other-backups'
+        other_dir.mkdir()
+        wrong_dir = dict(plan, backup_dir=str(other_dir))
+        plan_path.write_text(json.dumps(wrong_dir), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'backup_dir'):
+            mod.apply_retrofit(self.root, plan_file=plan_path)
+
+        # 3) path outside backup_dir
+        outside_plan = json.loads(json.dumps(plan))
+        outside_plan['files'][0]['path'] = str(Path(self.tmp.name) / 'outside.json')
+        plan_path.write_text(json.dumps(outside_plan), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'outside'):
+            mod.apply_retrofit(self.root, plan_file=plan_path)
+
+        # 4) file drift after plan generation
+        plan_path.write_text(json.dumps(plan), encoding='utf-8')
+        self.sample.write_bytes(b'{"changed":true}\n')
+        with self.assertRaisesRegex(RuntimeError, 'drift'):
+            mod.apply_retrofit(self.root, receipt_path=receipt_path, plan_file=plan_path)
+        self.assertEqual(json.loads(receipt_path.read_text(encoding='utf-8'))['mode'], 'APPLY_ABORTED')
+        acl = mod._read_acl([self.sample])[str(self.sample.resolve())]
+        self.assertIn(';;;WD)', acl['sddl_access'])
+
+    def test_plan_file_rejects_reparse_and_malformed_json(self):
+        import retrofit_ov_conf_backup_acl as mod
+
+        bad_json = Path(self.tmp.name) / 'malformed.json'
+        bad_json.write_text('{', encoding='utf-8')
+        with self.assertRaises(ValueError):
+            mod.apply_retrofit(self.root, plan_file=bad_json)
+
+        outside = Path(self.tmp.name) / 'outside-dir'
+        outside.mkdir()
+        (outside / 'plan.json').write_text('{}', encoding='utf-8')
+        junc = Path(self.tmp.name) / 'junc-dir'
+        res = subprocess.run(['cmd.exe', '/d', '/c', 'mklink', '/J', str(junc), str(outside)],
+                             capture_output=True, text=True, timeout=10)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        try:
+            with patch.object(mod, '_has_reparse_point', side_effect=lambda p: p == junc / 'plan.json'):
+                with self.assertRaisesRegex(ValueError, 'reparse'):
+                    mod.apply_retrofit(self.root, plan_file=junc / 'plan.json')
+        finally:
+            os.rmdir(junc)
+
+    def test_keyboard_interrupt_writes_apply_partial_receipt_and_reraises(self):
+        import retrofit_ov_conf_backup_acl as mod
+
+        subprocess.run(['icacls', str(self.sample), '/grant', '*S-1-1-0:(R)'],
+                       capture_output=True, check=True, timeout=10)
+        receipt_path = Path(self.tmp.name) / 'interrupt-receipt.json'
+        with patch.object(mod, 'apply_restricted_file_acl', side_effect=KeyboardInterrupt('cancelled')):
+            with self.assertRaises(KeyboardInterrupt):
+                mod.apply_retrofit(self.root, receipt_path=receipt_path)
+        partial = json.loads(receipt_path.read_text(encoding='utf-8'))
+        self.assertEqual(partial['mode'], 'APPLY_PARTIAL')
+        self.assertEqual(partial['error_class'], 'KeyboardInterrupt')
+
+    def test_mixed_acl_order_alignment_and_non_ascii_filename(self):
+        import retrofit_ov_conf_backup_acl as mod
+
+        unicode_file = self.root / 'ov.conf-before-b\u1ea3n-sao-l\u01b0u-20261112.json'
+        third_file = self.root / 'ov.conf-before-zzz-20261112.json'
+        unicode_file.write_bytes(self.payload)
+        third_file.write_bytes(self.payload)
+        mod.apply_restricted_file_acl(unicode_file)
+        for p in (self.sample, third_file):
+            subprocess.run(['icacls', str(p), '/grant', '*S-1-1-0:(R)'],
+                           capture_output=True, check=True, timeout=10)
+        plan = mod.build_plan(self.root)
+        by_name = {row['name']: row for row in plan['files']}
+        self.assertTrue(by_name[self.sample.name]['needs_harden'])
+        self.assertFalse(by_name[unicode_file.name]['needs_harden'])
+        self.assertTrue(by_name[third_file.name]['needs_harden'])
+
+        receipt = mod.apply_retrofit(self.root)
+        self.assertEqual(receipt['hardened_count'], 2)
+        self.assertEqual(sorted(receipt['hardened_names']), sorted([self.sample.name, third_file.name]))
+
+    def test_plan_file_missing_or_mismatched_sddl_sha256_aborts(self):
+        import retrofit_ov_conf_backup_acl as mod
+
+        subprocess.run(['icacls', str(self.sample), '/grant', '*S-1-1-0:(R)'],
+                       capture_output=True, check=True, timeout=10)
+        plan = mod.build_plan(self.root)
+        plan_path = Path(self.tmp.name) / 'sddl-plan.json'
+        receipt_path = Path(self.tmp.name) / 'sddl-aborted.json'
+
+        stripped = json.loads(json.dumps(plan))
+        stripped['files'][0].pop('sddl_sha256')
+        plan_path.write_text(json.dumps(stripped), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'sddl_sha256'):
+            mod.apply_retrofit(self.root, receipt_path=receipt_path, plan_file=plan_path)
+        aborted = json.loads(receipt_path.read_text(encoding='utf-8'))
+        self.assertEqual(aborted['mode'], 'APPLY_ABORTED')
+        self.assertEqual(len(aborted.get('plan_sha256', '')), 64)
+
+        drifted = json.loads(json.dumps(plan))
+        drifted['files'][0]['sddl_sha256'] = '0' * 64
+        plan_path.write_text(json.dumps(drifted), encoding='utf-8')
+        with self.assertRaisesRegex(RuntimeError, 'drift'):
+            mod.apply_retrofit(self.root, receipt_path=receipt_path, plan_file=plan_path)
+
+    def test_receipt_write_failure_warns_without_masking_error_and_cli_rejects_plan_without_apply(self):
+        import io
+        from contextlib import redirect_stderr
+        import retrofit_ov_conf_backup_acl as mod
+
+        subprocess.run(['icacls', str(self.sample), '/grant', '*S-1-1-0:(R)'],
+                       capture_output=True, check=True, timeout=10)
+        receipt_path = Path(self.tmp.name) / 'unwritable-receipt.json'
+        stderr_buf = io.StringIO()
+        with patch.object(mod, 'apply_restricted_file_acl', return_value=False), \
+             patch.object(Path, 'write_text', side_effect=OSError('disk full')), \
+             redirect_stderr(stderr_buf):
+            with self.assertRaises(PermissionError):
+                mod.apply_retrofit(self.root, receipt_path=receipt_path)
+        self.assertIn('warning: failed to write receipt', stderr_buf.getvalue())
+
+        with self.assertRaises(SystemExit) as ctx, redirect_stderr(io.StringIO()):
+            mod.main(['--plan-file', 'x.json'])
+        self.assertNotEqual(ctx.exception.code, 0)
+
 
 if __name__ == '__main__':
     unittest.main()
