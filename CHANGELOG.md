@@ -67,6 +67,7 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 - Made `suite_bootstrap.py` create its own per-suite scratch profile before executing test code, including standalone invocations outside the full runner.
 - Added a subprocess sentinel regression that proves writes stay in the isolated profile and leave the caller's Monitor state untouched.
 - Added a filesystem audit guard against live `.openviking` access, including direct absolute paths.
+- Updated `suite_bootstrap.py` to provision and restore an isolated `TMPDIR` when unset or pointing at `%LOCALAPPDATA%\Temp` (ignoring transient Windows handle-cleanup errors during teardown, which can leave locked `ov-suite-*` scratch dirs behind if a child hangs onto a handle) while preserving explicit non-Temp caller `TMPDIR` overrides; kept the four state/watch suites fail-closed if invoked without the bootstrapper, with three-branch coverage in `test_suite_isolation.py`.
 - Drained pending Tk theme events before destroying the note-field test root to avoid callbacks targeting a destroyed interpreter.
 
 ### Monitor UI Recovery & DPI Validation — 2026-11-11
