@@ -93,8 +93,12 @@ openviking-cockpit/
 │       ├── check_layout_runtime.py     # Kiểm thử hình học giao diện (880px-1400px)
 │       └── ...
 ├── docs/
+│   ├── ops/
+│   │   ├── recovery-runbook.md         # Quy trình phục hồi state/ov.conf, .REJECTED & retrofit ACL
+│   │   └── windowless-startup.md       # Watchdog khởi chạy ẩn OpenViking & Ollama
 │   ├── TAXONOMY_V3_1.md                # Đặc tả kiến trúc kiểm định V3.1 toàn văn
 │   └── TAXONOMY_V2_2.md                # Đặc tả kiến trúc V2.2
+├── scripts/                            # Tiện ích vận hành chạy từ repo (retrofit ACL, retention, sync)
 ├── config/
 │   ├── ov.conf.example                 # Cấu hình OpenViking mẫu (đã lọc secret)
 │   └── monitor.json.example            # Cấu hình trạng thái Monitor mẫu
@@ -115,6 +119,10 @@ openviking-cockpit/
 ```cmd
 pythonw monitor/openviking-monitor.pyw
 ```
+
+### Vận hành & Phục hồi (Ops Runbooks):
+- [Disaster Recovery Runbook](docs/ops/recovery-runbook.md): Phục hồi `monitor/monitor.json` (`backups/monitor-state/<sha256>/`), `ov.conf` (`ov.conf-before-*`), xử lý `.REJECTED[-N].json`, siết ACL cũ bằng `scripts/retrofit_ov_conf_backup_acl.py` (`--plan-file`), và rollback mã nguồn qua `scripts/monitor_sync.py`.
+- [Windowless OpenViking Startup](docs/ops/windowless-startup.md): Kiến trúc khởi chạy ẩn qua `OpenViking Autostart` (`ollama.exe` & `openviking-server.exe`).
 
 ### Chạy Toàn Bộ 77 Test Suites:
 ```powershell

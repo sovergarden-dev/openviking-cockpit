@@ -4,6 +4,10 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 
 ## [Unreleased]
 
+### Operations Recovery Runbook
+- Added `docs/ops/recovery-runbook.md` covering manual recovery of `monitor/monitor.json` and `ov.conf`, `.REJECTED[-N].json` triage and checked-write asymmetry, `scripts/retrofit_ov_conf_backup_acl.py` (`--plan-file`), `scripts/backup_retention.py`, `scripts/monitor_sync.py` rollback, standalone `suite_bootstrap.py` `TMPDIR` isolation, and the 2026-11-12 verification provenance caveat.
+- Indexed `docs/ops/recovery-runbook.md`, `docs/ops/windowless-startup.md`, and repo-only `scripts/` utilities in `README.md`.
+
 ### Separate Reserve Tab and Independent Key Watchlist
 - Moved DỰ TRỮ into its own full-width tab. Its controls use two rows and keep manual probes/audits; the previous slot Auto loop is removed.
 - Added THEO DÕI to Tổng quan: at most 7 independent credentials, no search, global Auto switch plus per-row Auto. Both default off; migration does not reuse the old Auto setting.
