@@ -31,6 +31,7 @@ class TestBackupRetention(unittest.TestCase):
             "cleanup-mem-ticks-20261026-004827",
             "OpenViking-Autostart-20260926-130755.xml",
             "ov.conf-CONTAMINATED-20261026-165527.json.bak",
+            "ov.conf-before-slot-edit-20261112-030000-deadbeef.REJECTED.json",
             "live_safe_memories_20261012-142345",
             "mem-phase1-20261004-115356",
             "monitor-json-recovery",
@@ -41,6 +42,8 @@ class TestBackupRetention(unittest.TestCase):
 
         unprotected_names = [
             "ov.conf-before-slot-edit-20260901-044458.json",
+            "ov.conf-before-slot-edit-20261112-030000-0f499ad4.json",
+            "ov.conf-before-slot-edit-20261112-030000-0f499ad4-1.json",
             "monitor-sync-20261025T162218Z-0887e30b"
         ]
         for name in unprotected_names:
@@ -73,6 +76,34 @@ class TestBackupRetention(unittest.TestCase):
         self.assertIn("ov.conf-before-test-00.json", candidate_names)
         self.assertIn("ov.conf-before-test-04.json", candidate_names)
         self.assertNotIn("ov.conf-before-test-14.json", candidate_names)
+
+    def test_scan_backups_classifies_digest_suffixed_ov_conf_snapshots(self):
+        import time
+        now = time.time()
+        for i in range(12):
+            p = self.root / f"ov.conf-before-slot-edit-20261112-030000-0f499ad4-{i}.json"
+            p.write_text(f'{{"index": {i}}}', encoding="utf-8")
+            os.utime(p, (now - (12 - i) * 60, now - (12 - i) * 60))
+
+        plan = scan_backups(self.root, keep_recent=10)
+        self.assertEqual(plan["total_items"], 12)
+        self.assertEqual(plan["protected_count"], 10)
+        self.assertEqual(plan["candidates_count"], 2)
+        candidate_names = [c["name"] for c in plan["candidates"]]
+        self.assertEqual(
+            sorted(candidate_names),
+            [
+                "ov.conf-before-slot-edit-20261112-030000-0f499ad4-0.json",
+                "ov.conf-before-slot-edit-20261112-030000-0f499ad4-1.json",
+            ],
+        )
+
+    def test_rejected_backup_is_never_candidate_even_with_keep_recent_zero(self):
+        rejected = self.root / "ov.conf-before-slot-edit-20261112-030000-deadbeef.REJECTED.json"
+        rejected.write_text('{"rejected": true}', encoding="utf-8")
+        plan = scan_backups(self.root, keep_recent=0)
+        self.assertEqual(plan["candidates_count"], 0)
+        self.assertIn(rejected.name, plan["kept"])
 
     def test_apply_quarantine_moves_non_destructively(self):
         """apply_quarantine moves files to backups/quarantine/batch-<stamp> without deleting."""

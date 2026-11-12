@@ -1378,15 +1378,119 @@ def restart_protocol(progress) -> dict:
 
 
 def backup_ov_conf(reason: str) -> Path:
+    """Create a Windows no-clobber (os.rename), restricted-ACL raw-byte backup; callers hold .ov-writer.lock."""
+    import tempfile
+
+    if os.name != "nt":
+        raise OSError("backup_ov_conf chỉ hỗ trợ Windows (os.rename không ghi đè và ACL)")
     bak_dir = OV_HOME / "backups"
+    for path in (OV_HOME, bak_dir, CONF_PATH):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        if path.is_symlink() or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise ValueError("Không dùng reparse point cho backup ov.conf")
+    raw_bytes = CONF_PATH.read_bytes()
+    if not raw_bytes.strip():
+        raise ValueError("ov.conf rỗng; không thể tạo backup")
+    safe_reason = re.sub(r"[^A-Za-z0-9._-]+", "-", (reason or "").strip()).strip(".-") or "edit"
+    safe_reason = safe_reason[:40].strip(".-") or "edit"
+    digest8 = hashlib.sha256(raw_bytes).hexdigest()[:8]
+    stamp = _backup_stamp()
     bak_dir.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    dest = bak_dir / f"ov.conf-before-{reason}-{stamp}.json"
-    dest.write_bytes(CONF_PATH.read_bytes())
-    return dest
+    now = time.time()
+    for stale in bak_dir.glob(".ov-conf-bak-*.tmp"):
+        try:
+            st = stale.lstat()
+        except OSError:
+            continue
+        if stale.is_symlink() or getattr(st, "st_file_attributes", 0) & 0x400:
+            continue
+        if now - st.st_mtime > 3600:
+            try:
+                stale.unlink(missing_ok=True)
+            except OSError:
+                pass
+    fd, tmp_name = tempfile.mkstemp(prefix=".ov-conf-bak-", suffix=".tmp", dir=str(bak_dir))
+    tmp_path = Path(tmp_name)
+    dest: Path | None = None
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            if not apply_restricted_file_acl(tmp_path):
+                raise PermissionError("Không giới hạn được quyền staging backup ov.conf")
+            handle.write(raw_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if tmp_path.read_bytes() != raw_bytes:
+            raise OSError("Staging backup ov.conf không khớp dữ liệu nguồn")
+        for attempt in range(64):
+            suffix = "" if attempt == 0 else f"-{attempt}"
+            candidate = bak_dir / f"ov.conf-before-{safe_reason}-{stamp}-{digest8}{suffix}.json"
+            try:
+                info = candidate.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                if candidate.is_symlink() or getattr(info, "st_file_attributes", 0) & 0x400:
+                    raise ValueError("Không dùng reparse point cho đích backup ov.conf")
+                continue
+            try:
+                os.rename(tmp_path, candidate)
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                raise OSError("Không xuất bản được backup ov.conf; từ chối ghi") from exc
+            dest = candidate
+            break
+        if dest is None:
+            raise FileExistsError("Không tạo được tên backup ov.conf duy nhất")
+        if dest.read_bytes() != raw_bytes:
+            raise OSError("Backup ov.conf không khớp dữ liệu nguồn sau xuất bản")
+        if not apply_restricted_file_acl(dest):
+            raise PermissionError("Không giới hạn được quyền backup ov.conf")
+        return dest
+    except Exception as exc:
+        if dest is not None:
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            log_app(f"backup_ov_conf {type(exc).__name__}")
+        except Exception:
+            pass
+        raise
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
+def _backup_stamp() -> str:
+    return time.strftime("%Y%m%d-%H%M%S")
+
+
+def _quarantine_rejected_backup(backup: Path) -> Path:
+    if os.name != "nt":
+        raise OSError("_quarantine_rejected_backup chỉ hỗ trợ Windows")
+    for attempt in range(64):
+        suffix = "" if attempt == 0 else f"-{attempt}"
+        candidate = backup.with_name(f"{backup.stem}.REJECTED{suffix}.json")
+        try:
+            os.rename(backup, candidate)
+            return candidate
+        except FileExistsError:
+            continue
+        except OSError:
+            return backup
+    return backup
 
 
 def write_ov_conf(raw: dict) -> None:
+    # Legacy helper retained for isolated unit tests; production edits must use write_ov_conf_checked().
     # Invariant: ov.conf must NEVER receive dpapi: cipher strings (OpenViking server does not support DPAPI)
     vlm = raw.get("vlm") or {}
     top_key = vlm.get("api_key") or ""
@@ -1440,6 +1544,36 @@ def write_ov_conf_checked(
             if conditional != (expected_advisories or []):
                 raise RuntimeError("Admission result changed during final write check")
         backup = backup_ov_conf(reason)
+        try:
+            backup_digest = _conf_digest(json.loads(backup.read_bytes().decode("utf-8")))
+        except Exception as exc:
+            try:
+                rejected = _quarantine_rejected_backup(backup)
+            except Exception:
+                rejected = backup
+            tag = "quarantined" if rejected != backup else "quarantine_failed"
+            try:
+                log_app(f"write_ov_conf_checked unverifiable {tag}={rejected.name}")
+            except Exception:
+                pass
+            raise RuntimeError("ov.conf backup artifact not verifiable; no write was made") from exc
+        if backup_digest != expected_digest:
+            try:
+                rejected = _quarantine_rejected_backup(backup)
+            except Exception:
+                rejected = backup
+            tag = "quarantined" if rejected != backup else "quarantine_failed"
+            try:
+                log_app(f"write_ov_conf_checked drift {tag}={rejected.name}")
+            except Exception:
+                pass
+            raise RuntimeError("ov.conf changed during backup; no write was made")
+        try:
+            post_backup_digest = _conf_digest(json.loads(CONF_PATH.read_text(encoding="utf-8")))
+        except Exception as exc:
+            raise RuntimeError("ov.conf current config not verifiable after backup; no write was made") from exc
+        if post_backup_digest != expected_digest:
+            raise RuntimeError("ov.conf changed after backup; no write was made")
         try:
             safe_atomic_write_json(CONF_PATH, raw, indent=2, restrict_acl=True)
             written = json.loads(CONF_PATH.read_text(encoding="utf-8"))
@@ -3677,8 +3811,7 @@ def run_gui(start_hidden: bool) -> None:
         paint(snap)
 
     def conf_digest(raw: dict) -> str:
-        payload = json.dumps(raw, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        return hashlib.sha256(payload).hexdigest()
+        return _conf_digest(raw)
 
     def start_inline_audit(request: AuditRequired, mutator, note: str, detail: str, expected_digest: str, finish_action: str):
         if current["restarting"]:

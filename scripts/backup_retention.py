@@ -26,6 +26,7 @@ PERMANENTLY_PROTECTED_PATTERNS = [
     "cleanup-mem-",
     "OpenViking-Autostart-",
     "CONTAMINATED",
+    ".REJECTED",
     "live_safe_memories_",
     "mem-phase",
     "monitor-json-recovery",
