@@ -7,8 +7,9 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 ### Provider Safety Audit Presentation Layer & 3-Tab Dialog
 - Separated presentation modeling into a pure `build_audit_report_view()` contract with zero mutations to `_sanitize_report()`, `evaluate_v31_decision()`, or raw cache parity.
 - Implemented `_presentation_sanitize_text()` with fail-closed bearer masking, JSON embed inspection preserving numeric parameters (e.g. `max_tokens: 2048`), key collision protection, and 1 MiB truncation via `[OMITTED:LIMIT]`.
-- Upgraded the audit dialog to a 3-tab layout: Tab 1 Executive Summary with status badges, tally chips, and latency profile; Tab 2 Master-Detail Inspector with Vietnamese reason code mappings; Tab 3 Raw JSON viewer with clipboard redaction.
-- Added `test_audit_report_view.py` and `test_audit_report_ui.py`; verified 81 auditor tests across 6 suites and 79/79 PASS on the full Monitor suite (`--runtime-helpers`).
+- Upgraded the audit dialog to a 3-tab layout: Tab 1 Executive Summary with status badges, tally chips, and latency profile; Tab 2 Master-Detail Inspector with Vietnamese reason code mappings, concise signal column labels, and precomputed `signal_label` in row schema; Tab 3 Raw JSON viewer with clipboard redaction.
+- Hardened presentation sanitization: secret redaction on unmapped reason codes, empty-after-sanitize fallbacks, and control character stripping before length bounding.
+- Added `test_audit_report_view.py` and `test_audit_report_ui.py`; verified 155 tests across 5 pytest suites (audit view/UI, provider auditor, auditor recovery, reference core v31) and 79/79 PASS on the full Monitor suite (`--runtime-helpers`).
 
 ### Operations Recovery Runbook
 - Added `docs/ops/recovery-runbook.md` covering manual recovery of `monitor/monitor.json` and `ov.conf`, `.REJECTED[-N].json` triage and checked-write asymmetry, `scripts/retrofit_ov_conf_backup_acl.py` (`--plan-file`), `scripts/backup_retention.py`, `scripts/monitor_sync.py` rollback, standalone `suite_bootstrap.py` `TMPDIR` isolation, and the 2026-11-12 verification provenance caveat.

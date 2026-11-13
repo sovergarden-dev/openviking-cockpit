@@ -230,6 +230,13 @@ def test_tab1_and_tab2_surface_culprits_and_preserve_raw_verdict_label():
         # Auto-selected first culprit (tool_call_hijack -> probe-0003) on load, never calling tree.item()
         assert harness.tree_item_calls == []
         assert "No tool call: capability not verified." in rendered
+        # Tab-2 Treeview column displays concise Vietnamese signal label ("Bọc Markdown")
+        assert "Bọc Markdown" in rendered
+        tree_widget = next(w for w in harness.widgets if w.rows)
+        tree_rows = dict(tree_widget.rows)
+        assert tree_rows["probe-0004"][4] == "Bọc Markdown"
+        assert tree_rows["probe-0005"][4] == "Hết giờ chờ cổng"
+        assert tree_rows["probe-0000"][4] == "OK"
 
         # Clicking "Xem chi tiết" handles valid tuple, None, empty tuple, and unknown iid cleanly
         harness.click("Xem chi tiết")

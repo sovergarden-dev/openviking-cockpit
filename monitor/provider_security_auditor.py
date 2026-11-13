@@ -885,7 +885,9 @@ def probe_strict_json_vlm_compliance(
                 "status": "FAIL",
                 "reason_code": "INVALID_JSON_SYNTAX",
                 "summary": "Không thể parse JSON theo chuẩn RFC 8259",
-                "findings": [f"Lỗi cú pháp JSON: {jde}. Model không xuất được JSON hoàn chỉnh."],                "evidence": sanitize_text(redact_secrets(f"finish={finish_reason} | raw={content_clean[:120]}")),            }
+                "findings": [f"Lỗi cú pháp JSON: {jde}. Model không xuất được JSON hoàn chỉnh."],
+                "evidence": sanitize_text(redact_secrets(f"finish={finish_reason} | raw={content_clean[:120]}")),
+            }
 
     return make_inconclusive_probe(
         "strict_json_vlm",
@@ -1591,14 +1593,78 @@ _REASON_CODE_VI = {
     "PROPER_NOUN_ALTERED": "Thay đổi danh từ riêng Latin",
     "TRANSLATION_INTEGRITY_VERIFIED": "Toàn vẹn biến và danh từ riêng",
     "SYSTEM_EXCEPTION": "Ngoại lệ nội bộ khi chạy bài thử",
+    "WARN_WRAPPED_JSON": "JSON bị bọc trong wrapper",
+    "MALFORMED_ENVELOPE": "Cấu trúc phản hồi không hợp lệ hoặc rỗng",
+    "OUTPUT_BUDGET_EXHAUSTED": "Cạn ngân sách token sinh (finish_reason=length)",
+    "EMPTY_OUTPUT": "Model trả về nội dung rỗng (không do cạn token)",
+    "TRUNCATED_OUTPUT": "JSON bị cắt ngắn do chạm trần token",
+    "LADDER_EXHAUSTED": "Đã thử hết bậc thang ngân sách, không có kết luận",
+}
+
+_REASON_CODE_SHORT_VI = {
+    "GATEWAY_TIMEOUT": "Hết giờ chờ cổng",
+    "TIMEOUT_GATEWAY_SLOW": "Cổng phản hồi chậm",
+    "RATE_LIMITED": "Giới hạn 429",
+    "AUTH_OR_POLICY_ERROR": "Lỗi xác thực",
+    "ADAPTER_CONFIG_UNSUPPORTED": "Tham số 400",
+    "SERVER_ERROR": "Lỗi máy chủ 5xx",
+    "TRANSPORT_ERROR": "Lỗi mạng/TLS",
+    "NETWORK_ERROR": "Lỗi truyền tải",
+    "CONNECTION_FAILED": "Lỗi kết nối",
+    "CANCELLED": "Đã hủy",
+    "DEADLINE_EXCEEDED": "Quá hạn tổng",
+    "ROLE_NOT_SERVED": "Không phục vụ VLM",
+    "SCHEMA_MISMATCH": "Sai schema JSON",
+    "INVALID_JSON_SYNTAX": "JSON không hợp lệ",
+    "MARKDOWN_WRAPPER": "Bọc Markdown",
+    "WARN_DUPLICATE_OUTPUT": "Lặp JSON",
+    "WARN_EXTRA_TEXT": "Văn bản thừa",
+    "CONTRADICTORY_JSON_SUFFIX": "JSON mâu thuẫn",
+    "SECRET_LEAK_IN_SUFFIX": "Rò rỉ secret",
+    "FORMAT_CORRUPTED": "Sai biến/thẻ màu",
+    "PROPER_NOUN_ALTERED": "Đổi tên riêng",
+    "TRANSLATION_INTEGRITY_VERIFIED": "Toàn vẹn dịch",
+    "SYSTEM_EXCEPTION": "Ngoại lệ nội bộ",
+    "WARN_WRAPPED_JSON": "JSON bị bọc",
+    "MALFORMED_ENVELOPE": "Phản hồi hỏng",
+    "OUTPUT_BUDGET_EXHAUSTED": "Cạn token sinh",
+    "EMPTY_OUTPUT": "Phản hồi rỗng",
+    "TRUNCATED_OUTPUT": "JSON bị cắt",
+    "LADDER_EXHAUSTED": "Hết bậc ngân sách",
 }
 
 
-def _format_reason_code(rc: str) -> str:
+def _short_signal_label(rc: Any, status: str, *, api_key: Optional[str] = None) -> str:
+    if not rc:
+        return "OK" if status in ("PASS", "PASS_SLOW") else "—"
+    clean = _pres_strip_controls(str(rc)).strip()
+    if not clean:
+        return "OK" if status in ("PASS", "PASS_SLOW") else "—"
+    short = _REASON_CODE_SHORT_VI.get(clean)
+    if short:
+        return short
+    # Unknown unmapped code fallback: sanitize secrets and bound length
+    sanitized = _presentation_sanitize_text(clean, api_key=api_key).strip()
+    if not sanitized:
+        return "OK" if status in ("PASS", "PASS_SLOW") else "—"
+    return (sanitized[:23] + "…") if len(sanitized) > 24 else sanitized
+
+
+def _format_reason_code(rc: Any, *, api_key: Optional[str] = None) -> str:
     if not rc:
         return ""
-    vi = _REASON_CODE_VI.get(rc)
-    return f"{rc} ({vi})" if vi else rc
+    clean_rc = _pres_strip_controls(str(rc)).strip()
+    if not clean_rc:
+        return ""
+    vi = _REASON_CODE_VI.get(clean_rc)
+    if vi:
+        return f"{clean_rc} ({vi})"
+    # Unknown unmapped code: sanitize secrets before bounding to 64 chars
+    sanitized = _presentation_sanitize_text(clean_rc, api_key=api_key).strip()
+    if not sanitized:
+        return ""
+    bounded_rc = (sanitized[:63] + "…") if len(sanitized) > 64 else sanitized
+    return bounded_rc
 
 # Presentation parity table mirroring core_v31.Decision + _project_decision (covered by golden tests).
 _EXPECTED_PROJECTION_BY_LEVEL = {
@@ -2179,6 +2245,7 @@ def build_audit_report_view(report: Any, *, api_key: Optional[str] = None) -> Di
                 "findings": [],
                 "evidence": "",
                 "reason_code": "",
+                "signal_label": "—",
                 "isolated_decision": None,
                 "attribution": {"reason": global_reason, "match": "none", "facts": ["Dữ liệu hàng không phải Mapping"]},
                 "attribution_text": "Dữ liệu probe không hợp lệ; không dùng để cấp quyền.",
@@ -2287,7 +2354,7 @@ def build_audit_report_view(report: Any, *, api_key: Optional[str] = None) -> Di
         ]
         if entry["reported_tier_text"] and entry["reported_tier_text"] != entry["tier_text"]:
             detail_sections.append(f"Lưu ý phân tầng khai báo: {entry['reported_tier_text']} (chuẩn taxonomy: {entry['tier_text']})")
-        rc_display = _format_reason_code(rc) if rc else "Không có mã (đối chiếu tóm tắt và bằng chứng bên dưới)"
+        rc_display = _format_reason_code(rc, api_key=api_key) if rc else "Không có mã (đối chiếu tóm tắt và bằng chứng bên dưới)"
         detail_sections.append(f"Mã nguyên nhân (reason_code): {rc_display}")
         detail_sections.append(f"Giải thích trong báo cáo: {attr_text}")
         detail_sections.append("Lưu ý đơn lẻ: Không đánh giá quyết định tổng thể chỉ từ một probe riêng lẻ.")
@@ -2297,6 +2364,8 @@ def build_audit_report_view(report: Any, *, api_key: Optional[str] = None) -> Di
             detail_sections.append("Phát hiện chi tiết:\n  - " + "\n  - ".join(entry["findings"]))
         if entry["evidence"]:
             detail_sections.append(f"Bằng chứng đã làm sạch:\n{entry['evidence']}")
+
+        signal_label = _short_signal_label(rc, st, api_key=api_key)
 
         rows.append({
             "iid": entry["iid"],
@@ -2315,6 +2384,7 @@ def build_audit_report_view(report: Any, *, api_key: Optional[str] = None) -> Di
             "findings": entry["findings"],
             "evidence": entry["evidence"],
             "reason_code": rc,
+            "signal_label": signal_label,
             "isolated_decision": None,
             "attribution": {"reason": global_reason, "match": match, "facts": facts},
             "attribution_text": attr_text,
@@ -2873,8 +2943,8 @@ def launch_security_audit_ui(
                     st_tag = "st_fail"
                 else:
                     st_tag = "st_inc"
-                rc = r["reason_code"]
-                signal_col = rc or ("OK" if st_str in ("PASS", "PASS_SLOW") else "—")
+                rc = r.get("reason_code")
+                signal_col = r.get("signal_label") or _short_signal_label(rc, st_str, api_key=api_key)
                 tree.insert(
                     "",
                     "end",

@@ -213,6 +213,160 @@ def test_level_5_view_uses_caution_prefix_without_ban():
     assert "TUYỆT ĐỐI" not in view["summary"]["avoid_for"]
 
 
+def test_short_signal_label_fallbacks_and_bounds():
+    # Key parity: ensure every recognized reason code has a short Vietnamese translation
+    assert set(psa._REASON_CODE_SHORT_VI.keys()) == set(psa._REASON_CODE_VI.keys())
+    for rc, short in psa._REASON_CODE_SHORT_VI.items():
+        assert len(short) <= 20, f"Short label too long: {rc} -> {short}"
+
+    # Mapped reason codes return compact Vietnamese label
+    assert psa._short_signal_label("MARKDOWN_WRAPPER", "FAIL") == "Bọc Markdown"
+    assert psa._short_signal_label("GATEWAY_TIMEOUT", "INCONCLUSIVE") == "Hết giờ chờ cổng"
+    assert psa._short_signal_label("RATE_LIMITED", "FAIL") == "Giới hạn 429"
+    # Unmapped short code returns clean raw string
+    assert psa._short_signal_label("CUSTOM_ANOMALY", "FAIL") == "CUSTOM_ANOMALY"
+    # Unmapped code exceeding 24 chars is cleanly bounded with ellipsis
+    long_rc = "CUSTOM_VERY_LONG_ERROR_CODE_THAT_EXCEEDS_24_CHARS"
+    short_lbl = psa._short_signal_label(long_rc, "FAIL")
+    assert len(short_lbl) == 24
+    assert short_lbl.endswith("…")
+    # Empty or None reason code uses status distinction
+    assert psa._short_signal_label(None, "PASS") == "OK"
+    assert psa._short_signal_label("", "PASS_SLOW") == "OK"
+    assert psa._short_signal_label(None, "FAIL") == "—"
+    assert psa._short_signal_label("", "INCONCLUSIVE") == "—"
+    # Strips control characters from unexpected inputs
+    dirty = "\x1b[31mBAD_CODE\x07"
+    assert psa._short_signal_label(dirty, "FAIL") == "BAD_CODE"
+    # Pure whitespace or control-only input falls back cleanly to placeholder
+    assert psa._short_signal_label("\x07", "FAIL") == "—"
+    assert psa._short_signal_label("   ", "PASS") == "OK"
+    # Non-string input is coerced safely
+    assert psa._short_signal_label(429, "FAIL") == "429"
+    # Secret redaction inside unmapped reason code
+    leak_rc = f"ERR_KEY_{KEY}_SUFFIX"
+    masked_short = psa._short_signal_label(leak_rc, "FAIL", api_key=KEY)
+    assert KEY not in masked_short
+    assert "[REDACTED]" in masked_short
+
+
+def test_all_emitted_reason_codes_are_registered():
+    import ast
+
+    tree = ast.parse((MONITOR_DIR / "provider_security_auditor.py").read_text(encoding="utf-8"))
+    codes = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for k, v in zip(node.keys, node.values):
+                if isinstance(k, ast.Constant) and k.value == "reason_code" and isinstance(v, ast.Constant) and isinstance(v.value, str):
+                    if v.value:
+                        codes.add(v.value)
+        elif isinstance(node, ast.keyword) and node.arg == "reason_code" and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            if node.value.value:
+                codes.add(node.value.value)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for t in targets:
+                if isinstance(t, ast.Name) and t.id == "reason_code":
+                    if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str) and node.value.value:
+                        codes.add(node.value.value)
+                    elif isinstance(node.value, ast.IfExp):
+                        if isinstance(node.value.body, ast.Constant) and isinstance(node.value.body.value, str) and node.value.body.value:
+                            codes.add(node.value.body.value)
+                        if isinstance(node.value.orelse, ast.Constant) and isinstance(node.value.orelse.value, str) and node.value.orelse.value:
+                            codes.add(node.value.orelse.value)
+        elif isinstance(node, ast.Call):
+            func_name = getattr(node.func, "id", getattr(node.func, "attr", ""))
+            if func_name == "make_inconclusive_probe":
+                if len(node.args) >= 4 and isinstance(node.args[3], ast.Constant) and isinstance(node.args[3].value, str):
+                    codes.add(node.args[3].value)
+                for kw in node.keywords:
+                    if kw.arg == "reason_code" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                        codes.add(kw.value.value)
+        elif isinstance(node, ast.FunctionDef) and node.name == "classify_http_failure":
+            for child in ast.walk(node):
+                if isinstance(child, ast.Return) and isinstance(child.value, ast.Tuple):
+                    if len(child.value.elts) >= 2 and isinstance(child.value.elts[1], ast.Constant) and isinstance(child.value.elts[1].value, str):
+                        codes.add(child.value.elts[1].value)
+                elif isinstance(child, ast.For) and isinstance(child.iter, (ast.Tuple, ast.List)):
+                    for el in child.iter.elts:
+                        if isinstance(el, ast.Constant) and isinstance(el.value, str):
+                            codes.add(el.value)
+        elif isinstance(node, ast.Compare):
+            is_rc_check = False
+            left = node.left
+            if isinstance(left, ast.Call) and isinstance(left.func, ast.Attribute) and left.func.attr == "get":
+                if left.args and isinstance(left.args[0], ast.Constant) and left.args[0].value == "reason_code":
+                    is_rc_check = True
+            elif isinstance(left, ast.Name) and left.id in ("reason_code", "rc"):
+                is_rc_check = True
+            if is_rc_check:
+                for comp in node.comparators:
+                    if isinstance(comp, (ast.Set, ast.Tuple, ast.List)):
+                        for el in comp.elts:
+                            if isinstance(el, ast.Constant) and isinstance(el.value, str):
+                                codes.add(el.value)
+
+    assert len(codes) >= 25, f"Expected at least 25 static reason codes, found {len(codes)}"
+    for code in sorted(codes):
+        assert code in psa._REASON_CODE_SHORT_VI, f"Emitted reason code missing from _REASON_CODE_SHORT_VI: {code}"
+        assert code in psa._REASON_CODE_VI, f"Emitted reason code missing from _REASON_CODE_VI: {code}"
+
+
+def test_format_reason_code_edge_cases():
+    # Known code maps to CODE (vietnamese)
+    assert psa._format_reason_code("MARKDOWN_WRAPPER") == "MARKDOWN_WRAPPER (Bọc Markdown quanh JSON)"
+    assert psa._format_reason_code("GATEWAY_TIMEOUT") == "GATEWAY_TIMEOUT (Cổng kết nối quá hạn (Timeout))"
+    # Strips control characters before mapping
+    assert psa._format_reason_code("\x1b[31mRATE_LIMITED\x07") == "RATE_LIMITED (Bị giới hạn tần suất (HTTP 429))"
+    # Empty, None, or control-only inputs return empty string
+    assert psa._format_reason_code("") == ""
+    assert psa._format_reason_code(None) == ""
+    assert psa._format_reason_code("\x07   \x1b[0m") == ""
+    # Unknown short code returns clean raw string
+    assert psa._format_reason_code("CUSTOM_ERROR") == "CUSTOM_ERROR"
+    # Secret redaction inside unmapped reason code
+    leak_rc = f"CUSTOM_FAIL_LEAK_{KEY}"
+    masked_fmt = psa._format_reason_code(leak_rc, api_key=KEY)
+    assert KEY not in masked_fmt
+    assert "[REDACTED]" in masked_fmt
+    # Long unknown code capped at 64 chars
+    huge_rc = "UNKNOWN_CODE_" + ("X" * 100)
+    formatted = psa._format_reason_code(huge_rc)
+    assert len(formatted) == 64
+    assert formatted.endswith("…")
+
+
+def test_end_to_end_reason_code_secret_redaction():
+    results = _base_seven_results()
+    # Embed secret key in an unmapped reason code
+    results[0]["status"] = "FAIL"
+    results[0]["reason_code"] = f"ERR_LEAK_{KEY}_END"
+    report = _make_report(results)
+    view = psa.build_audit_report_view(report, api_key=KEY)
+
+    # Signal label and detail text must redact secret completely
+    row0 = view["rows"][0]
+    assert KEY not in row0["signal_label"]
+    assert "[REDACTED]" in row0["signal_label"]
+    assert KEY not in row0["detail_text"]
+    assert "[REDACTED]" in row0["detail_text"]
+    assert KEY not in row0["reason_code"]
+    assert "[REDACTED]" in row0["reason_code"]
+    assert KEY not in view["json_text"]
+    assert KEY not in view["clipboard_text"]
+
+    # Valid PASS probe gets precomputed "OK" signal label
+    row1 = view["rows"][1]
+    assert row1["signal_label"] == "OK"
+
+    # Invalid probe row gets precomputed "—" placeholder
+    inv_report = _make_report(["invalid_non_dict_entry"])
+    inv_view = psa.build_audit_report_view(inv_report, api_key=KEY)
+    assert inv_view["rows"][0]["signal_label"] == "—"
+
+
 def test_level_4_or_5_with_missing_coverage_marks_unverified_in_view():
     results = _base_seven_results()[:5]  # missing canary_isolation & operational_latency
     report = _make_report(results, total_duration_s=5.0)
@@ -322,6 +476,7 @@ def test_build_view_schema_pure_deterministic_and_no_input_mutation():
         "findings",
         "evidence",
         "reason_code",
+        "signal_label",
         "isolated_decision",
         "attribution",
         "attribution_text",
@@ -333,6 +488,7 @@ def test_build_view_schema_pure_deterministic_and_no_input_mutation():
         assert set(row.keys()) == expected_row_keys
         assert row["iid"] == f"probe-{idx:04d}"
         assert row["isolated_decision"] is None
+        assert isinstance(row["signal_label"], str) and row["signal_label"] != ""
         assert set(row["attribution"].keys()) == {"reason", "match", "facts"}
     assert view1["clipboard_text"] == view1["executive_text"] + "\n\n" + view1["json_text"]
 
