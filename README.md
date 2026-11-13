@@ -86,7 +86,7 @@ openviking-cockpit/
 │   ├── watch_panel.py                  # Khung THEO DÕI trong tab Tổng quan
 │   ├── openviking_monitor_notification.py # Bộ điều khiển thông báo hệ thống (Toasts)
 │   ├── openviking.ico                  # Icon ứng dụng
-│   └── tests/                          # 72 suite Monitor + 5 suite scripts tích hợp
+│   └── tests/                          # 74 suite Monitor + 5 suite scripts tích hợp
 │       ├── run_all_tests.py            # Test runner tổng thể
 │       ├── test_reference_core_v31.py  # 84 unit tests tham chiếu V3.1
 │       ├── test_provider_security_auditor.py # 24 unit tests kiểm định an toàn
@@ -116,20 +116,34 @@ openviking-cockpit/
 - Python: **3.11+** (Chỉ dùng thư viện chuẩn, không cần `pip install`).
 
 ### Khởi chạy Giao diện Monitor:
-```cmd
-pythonw monitor/openviking-monitor.pyw
+Khuyến nghị dùng đường dẫn Python 3.11 chuẩn để tránh PATH ưu tiên nhầm môi trường ảo (virtualenv) thiếu Tkinter:
+
+**1. Khởi chạy bản live đã triển khai (khuyến nghị cho vận hành hàng ngày):**
+```powershell
+& "$env:LOCALAPPDATA\Programs\Python\Python311\pythonw.exe" "$env:USERPROFILE\.openviking\monitor\openviking-monitor.pyw"
 ```
+Hoặc trên Command Prompt (CMD):
+```cmd
+"%LOCALAPPDATA%\Programs\Python\Python311\pythonw.exe" "%USERPROFILE%\.openviking\monitor\openviking-monitor.pyw"
+```
+
+**2. Khởi chạy trực tiếp từ thư mục mã nguồn repository (dành cho phát triển / thử nghiệm):**
+```powershell
+# Chạy từ thư mục gốc repository:
+& "$env:LOCALAPPDATA\Programs\Python\Python311\pythonw.exe" monitor\openviking-monitor.pyw
+```
+*(Lưu ý: Khởi chạy từ repo vẫn sử dụng dữ liệu cấu hình live tại `%USERPROFILE%\.openviking\`. Cơ chế Win32 Mutex trong ứng dụng sẽ tự động kích hoạt cửa sổ hiện có nếu Monitor đang chạy nền).*
 
 ### Vận hành & Phục hồi (Ops Runbooks):
 - [Disaster Recovery Runbook](docs/ops/recovery-runbook.md): Phục hồi `monitor/monitor.json` (`backups/monitor-state/<sha256>/`), `ov.conf` (`ov.conf-before-*`), xử lý `.REJECTED[-N].json`, siết ACL cũ bằng `scripts/retrofit_ov_conf_backup_acl.py` (`--plan-file`), và rollback mã nguồn qua `scripts/monitor_sync.py`.
 - [Windowless OpenViking Startup](docs/ops/windowless-startup.md): Kiến trúc khởi chạy ẩn qua `OpenViking Autostart` (`ollama.exe` & `openviking-server.exe`).
 
-### Chạy Toàn Bộ 77 Test Suites:
+### Chạy Toàn Bộ 79 Test Suites:
 ```powershell
 $env:PYTHONPATH = ""
 & "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe" monitor/tests/run_all_tests.py --runtime-helpers
 ```
-Chạy bằng Python 3.11 (Tk 8.6). Runner tích hợp **72 suite Monitor + 5 suite scripts**; `--runtime-helpers` bật hai suite runtime dùng fixture/provider giả lập. `suite_bootstrap.py` tự tạo home, `TMPDIR` cô lập (khi chưa đặt hoặc đang trỏ tới `%LOCALAPPDATA%\Temp`) và cấu hình giả riêng cho mỗi suite, kể cả khi chạy trực tiếp ngoài runner; audit hook chặn truy cập thư mục `.openviking` live và socket guard chặn provider thật. Ma trận giao diện có startup từ 1020×640, kích thước tối thiểu 880×560, 880×800, 996×960 và các bề ngang 1100/1400; dashboard lẫn slot editor chạy ở Tk scaling **1.333333 / 1.666667 / 2.0** (Windows **100% / 125% / 150%**). Dashboard phải hiện tối thiểu 3 hàng THEO DÕI đầy đủ và cuộn tới key thứ 7. Màn hình thấp có thể cần tăng chiều cao cửa sổ; không tuyên bố hỗ trợ Windows 200% từ Tk scaling 2.0.
+Chạy bằng Python 3.11 (Tk 8.6). Runner tích hợp **74 suite Monitor + 5 suite scripts**; `--runtime-helpers` bật hai suite runtime dùng fixture/provider giả lập. `suite_bootstrap.py` tự tạo home, `TMPDIR` cô lập (khi chưa đặt hoặc đang trỏ tới `%LOCALAPPDATA%\Temp`) và cấu hình giả riêng cho mỗi suite, kể cả khi chạy trực tiếp ngoài runner; audit hook chặn truy cập thư mục `.openviking` live và socket guard chặn provider thật. Ma trận giao diện có startup từ 1020×640, kích thước tối thiểu 880×560, 880×800, 996×960 và các bề ngang 1100/1400; dashboard lẫn slot editor chạy ở Tk scaling **1.333333 / 1.666667 / 2.0** (Windows **100% / 125% / 150%**). Dashboard phải hiện tối thiểu 3 hàng THEO DÕI đầy đủ và cuộn tới key thứ 7. Màn hình thấp có thể cần tăng chiều cao cửa sổ; không tuyên bố hỗ trợ Windows 200% từ Tk scaling 2.0.
 ```powershell
 $env:PYTHONPATH = ""
 foreach ($scale in @("1.333333", "1.666667", "2.0")) {

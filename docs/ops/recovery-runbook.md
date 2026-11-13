@@ -120,6 +120,14 @@ $env:PYTHONPATH = ""
 
 - **Default is plan-only:** Run `deploy` or `pull` without `--apply` to inspect SHA-256 differences first (`pull` refuses a dirty repository `monitor/` tree).
 - **GUI guard:** `deploy --apply` runs `assert_monitor_stopped()` before staging and again before publishing; close Monitor GUI first, then re-run `scripts/monitor_sync.py deploy --apply`.
+- **Relaunch Monitor GUI after deploy:** Always launch using the canonical Python 3.11 path to prevent Windows PATH from resolving to a virtualenv lacking Tkinter:
+  ```powershell
+  Start-Process -FilePath "$env:LOCALAPPDATA\Programs\Python\Python311\pythonw.exe" -ArgumentList "`"$env:USERPROFILE\.openviking\monitor\openviking-monitor.pyw`"" -WorkingDirectory "$env:USERPROFILE\.openviking"
+  ```
+  Confirm the running process and interpreter path via:
+  ```powershell
+  Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'pythonw*' -and $_.CommandLine -like '*openviking-monitor.pyw*' } | Select-Object ProcessId, ExecutablePath, CommandLine
+  ```
 - **Rollback source files:** If a deployed Monitor update misbehaves, close Monitor GUI and restore files from `%USERPROFILE%\.openviking\backups\monitor-sync-<stamp>-<uuid8>\original\` using `receipt.json` as the file inventory.
 
 ---
