@@ -2,7 +2,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests: 77/77 PASS](https://img.shields.io/badge/tests-77%2F77%20passed-brightgreen.svg)]()
+[![Tests: 79/79 PASS](https://img.shields.io/badge/tests-79%2F79%20passed-brightgreen.svg)]()
 [![Standard Library Only](https://img.shields.io/badge/dependencies-stdlib--only-success.svg)]()
 
 **OpenViking Cockpit** là bộ công cụ buồng lái giám sát vận hành thời gian thực, quản trị cân bằng tải định tuyến slot, và **Khung kiểm định an toàn ranh giới hành vi nhà cung cấp AI (Provider Behavioral Safety & Boundary Auditor — Taxonomy V3.1)** được phát triển dành riêng cho hệ sinh thái **OpenViking** (Local Vector DB & Autonomous AI Agent System).

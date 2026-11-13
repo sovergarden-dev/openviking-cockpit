@@ -1513,6 +1513,973 @@ def get_latest_audit_report(
         return None
 
 
+_PRES_SENSITIVE_KEYS = frozenset({
+    "api_key",
+    "api-key",
+    "apikey",
+    "token",
+    "access_token",
+    "auth_token",
+    "secret",
+    "password",
+    "authorization",
+    "proxy-authorization",
+    "x-api-key",
+    "credential_digest",
+})
+_PRES_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+# Intentionally fail-closed on `\bbearer\s+` to EOL so untrusted token prefixes cannot leak at presentation sinks.
+_PRES_ASSIGN_LINE_RE = re.compile(
+    r"""(?i)(["']?\b(?:api[_-]?key|access_token|auth_token|token|secret|password|authorization|proxy-authorization)\b["']?\s*[:=]\s*|\bbearer\s+)([^\x0d\x0a]*)"""
+)
+_PRES_MAX_DEPTH = 32
+_PRES_MAX_NODES = 32768
+_PRES_MAX_TEXT_BYTES = 1048576
+
+_PROBE_SHORT_NAMES = {
+    "transport_routing": "Kết nối & định tuyến",
+    "ansi_control_hygiene": "Ký tự điều khiển",
+    "prompt_boundary": "Ranh giới chỉ dẫn",
+    "tool_call_hijack": "Chống thao túng công cụ",
+    "strict_json_vlm": "JSON nghiêm ngặt",
+    "canary_isolation": "Cách ly phiên",
+    "operational_latency": "Lập luận & độ trễ",
+    "translation_integrity": "Toàn vẹn bản dịch",
+}
+
+_STATUS_TEXT_VI = {
+    "PASS": "Đạt",
+    "PASS_SLOW": "Đạt chậm",
+    "WARN": "Cảnh báo",
+    "FAIL": "Lỗi",
+    "CRITICAL_FAIL": "Vi phạm nghiêm trọng",
+    "INCONCLUSIVE": "Chưa kết luận",
+    "REFUSAL": "Từ chối",
+}
+
+_STATUS_LEGENDS = {
+    "PASS": "PASS (Đạt)",
+    "PASS_SLOW": "PASS_SLOW (Đạt chậm)",
+    "WARN": "WARN (Cảnh báo)",
+    "FAIL": "FAIL (Lỗi)",
+    "CRITICAL_FAIL": "CRITICAL_FAIL (Vi phạm nghiêm trọng)",
+    "INCONCLUSIVE": "INCONCLUSIVE (Chưa kết luận)",
+    "REFUSAL": "REFUSAL (Từ chối)",
+}
+
+_REASON_CODE_VI = {
+    "GATEWAY_TIMEOUT": "Cổng kết nối quá hạn (Timeout)",
+    "TIMEOUT_GATEWAY_SLOW": "Cổng kết nối phản hồi chậm",
+    "RATE_LIMITED": "Bị giới hạn tần suất (HTTP 429)",
+    "AUTH_OR_POLICY_ERROR": "Lỗi xác thực hoặc chính sách (401/403)",
+    "ADAPTER_CONFIG_UNSUPPORTED": "Cấu hình tham số không được hỗ trợ (400)",
+    "SERVER_ERROR": "Lỗi máy chủ phía provider (5xx)",
+    "TRANSPORT_ERROR": "Lỗi kết nối mạng / TLS",
+    "NETWORK_ERROR": "Lỗi mạng khi truyền tải",
+    "CONNECTION_FAILED": "Không thiết lập được kết nối",
+    "CANCELLED": "Đã hủy theo yêu cầu",
+    "DEADLINE_EXCEEDED": "Vượt quá ngân sách thời gian tổng",
+    "ROLE_NOT_SERVED": "Endpoint không phục vụ vai trò VLM trích xuất bộ nhớ",
+    "SCHEMA_MISMATCH": "JSON không khớp schema bắt buộc của OpenViking",
+    "INVALID_JSON_SYNTAX": "Phản hồi không phải JSON RFC 8259 hợp lệ",
+    "MARKDOWN_WRAPPER": "Bọc Markdown quanh JSON",
+    "WARN_DUPLICATE_OUTPUT": "Lặp đối tượng JSON hai lần",
+    "WARN_EXTRA_TEXT": "Có văn bản thừa ngoài JSON",
+    "CONTRADICTORY_JSON_SUFFIX": "JSON nối thêm mâu thuẫn ngữ nghĩa",
+    "SECRET_LEAK_IN_SUFFIX": "Rò rỉ chuỗi nhạy cảm ở phần thừa",
+    "FORMAT_CORRUPTED": "Sai định dạng biến/thẻ màu",
+    "PROPER_NOUN_ALTERED": "Thay đổi danh từ riêng Latin",
+    "TRANSLATION_INTEGRITY_VERIFIED": "Toàn vẹn biến và danh từ riêng",
+    "SYSTEM_EXCEPTION": "Ngoại lệ nội bộ khi chạy bài thử",
+}
+
+
+def _format_reason_code(rc: str) -> str:
+    if not rc:
+        return ""
+    vi = _REASON_CODE_VI.get(rc)
+    return f"{rc} ({vi})" if vi else rc
+
+# Presentation parity table mirroring core_v31.Decision + _project_decision (covered by golden tests).
+_EXPECTED_PROJECTION_BY_LEVEL = {
+    1: ({"CONFIRMED_VIOLATION"}, "BLOCKED_SECURITY", False, True),
+    2: ({"SUSPECT", "MISSING_EVIDENCE"}, "INSUFFICIENT_DATA", False, False),
+    3: ({"FAILED_QUALITY"}, "ROLE_REJECTED", False, False),
+    4: ({"SLOW_CEILING"}, "SAFE_TO_ADMIT", True, False),
+    5: ({"VERIFIED_FAST"}, "SAFE_TO_ADMIT", True, False),
+}
+
+
+def _pres_strip_controls(text: Any) -> str:
+    # Presentation-only zero-width/OSC stripping; keep sanitize_text() untouched for cache/probe stability.
+    if text is None:
+        return ""
+    raw = str(text)
+    cleaned = _PRES_OSC_RE.sub("", raw)
+    cleaned = ANSI_ESCAPE_RE.sub("", cleaned)
+    cleaned = DANGEROUS_CONTROL_RE.sub("", cleaned)
+    cleaned = BIDI_OVERRIDE_RE.sub("", cleaned)
+    cleaned = ZERO_WIDTH_RE.sub("", cleaned)
+    return cleaned
+
+
+def _pres_mask_exact_key(text: str, api_key: Optional[str]) -> str:
+    if not api_key or not isinstance(api_key, str):
+        return text
+    out = text.replace(api_key, "[REDACTED]")
+    cleaned_key = _pres_strip_controls(api_key)
+    if cleaned_key:
+        out = out.replace(cleaned_key, "[REDACTED]")
+    return out
+
+
+def _pres_is_sensitive_key(key_str: str) -> bool:
+    norm = _pres_strip_controls(key_str).strip().casefold()
+    return norm in _PRES_SENSITIVE_KEYS
+
+
+def _pres_sanitize_json_embeds(text: str, api_key: Optional[str], diagnostics: List[str], *, json_depth: int = 0) -> str:
+    if json_depth >= 2 or ('"' not in text) or ("{" not in text and "[" not in text):
+        return text
+    decoder = json.JSONDecoder()
+    out: List[str] = []
+    idx = 0
+    n = len(text)
+    attempts = 0
+    while idx < n:
+        ch = text[idx]
+        if ch in "{[" and attempts < 64:
+            attempts += 1
+            try:
+                parsed, end_idx = decoder.raw_decode(text, idx)
+                if isinstance(parsed, (dict, list)):
+                    clean_node = _pres_clone_value(
+                        parsed,
+                        api_key=api_key,
+                        diagnostics=diagnostics,
+                        depth=0,
+                        node_budget=[_PRES_MAX_NODES],
+                        seen=set(),
+                        json_depth=json_depth + 1,
+                    )
+                    out.append(json.dumps(clean_node, ensure_ascii=False, allow_nan=False))
+                    idx = end_idx
+                    continue
+            except Exception:
+                pass
+        elif ch in "{[" and attempts == 64:
+            diagnostics.append("Giới hạn giải mã JSON lồng nhau đã kích hoạt ở lớp trình bày.")
+            attempts += 1
+            out.append("[OMITTED:LIMIT]")
+            break
+        out.append(ch)
+        idx += 1
+    return "".join(out)
+
+
+def _presentation_sanitize_text(
+    text: Any,
+    *,
+    api_key: Optional[str] = None,
+    diagnostics: Optional[List[str]] = None,
+    json_depth: int = 0,
+) -> str:
+    diag = diagnostics if diagnostics is not None else []
+    raw = "" if text is None else str(text)
+    if len(raw.encode("utf-8", errors="replace")) > _PRES_MAX_TEXT_BYTES:
+        diag.append("Một trường văn bản vượt giới hạn 1 MiB đã được cắt bỏ ở tầng trình bày.")
+        return "[OMITTED:LIMIT]"
+    masked = _pres_mask_exact_key(raw, api_key)
+    cleaned = _pres_strip_controls(masked)
+    cleaned = _pres_mask_exact_key(cleaned, api_key)
+    cleaned = _pres_sanitize_json_embeds(cleaned, api_key, diag, json_depth=json_depth)
+
+    def _replace_assign(match: re.Match[str]) -> str:
+        prefix, tail = match.group(1), match.group(2)
+        if re.match(r'^"?\[(?:REDACTED(?::UNPARSEABLE)?|OMITTED:LIMIT)\]"?\s*(?:[,}\]]|$)', tail.lstrip()):
+            return match.group(0)
+        if any(marker in tail for marker in ("{", "[", '\\"', '\\",', '",', "':")):
+            return prefix + "[REDACTED:UNPARSEABLE]"
+        return prefix + "[REDACTED]"
+
+    cleaned = _PRES_ASSIGN_LINE_RE.sub(_replace_assign, cleaned)
+    cleaned = redact_secrets(cleaned)
+    cleaned = _pres_mask_exact_key(cleaned, api_key)
+    return _pres_strip_controls(cleaned)
+
+
+def _pres_stringify_key(key: Any, api_key: Optional[str], diagnostics: List[str]) -> str:
+    if isinstance(key, str):
+        return _presentation_sanitize_text(key, api_key=api_key, diagnostics=diagnostics)
+    if key is None:
+        return "null"
+    if type(key) is bool:
+        return "true" if key else "false"
+    if type(key) is int:
+        return str(key)
+    if type(key) is float and math.isfinite(key):
+        return json.dumps(key)
+    diagnostics.append("Khóa kiểu không hỗ trợ đã được thay thế tại lớp trình bày.")
+    return "[UNSUPPORTED_KEY]"
+
+
+def _pres_clone_value(
+    value: Any,
+    *,
+    api_key: Optional[str],
+    diagnostics: List[str],
+    depth: int,
+    node_budget: List[int],
+    seen: set[int],
+    json_depth: int = 0,
+) -> Any:
+    if depth > _PRES_MAX_DEPTH or node_budget[0] <= 0:
+        diagnostics.append("Dữ liệu lồng nhau vượt giới hạn an toàn trình bày đã được lược bỏ.")
+        return "[OMITTED:LIMIT]"
+    node_budget[0] -= 1
+
+    if value is None or type(value) is bool or type(value) is int:
+        return value
+    if type(value) is float:
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        return _presentation_sanitize_text(value, api_key=api_key, diagnostics=diagnostics, json_depth=json_depth)
+
+    obj_id = id(value)
+    if isinstance(value, dict):
+        if obj_id in seen:
+            diagnostics.append("Phát hiện tham chiếu vòng trong cấu trúc báo cáo.")
+            return "[OMITTED:LIMIT]"
+        seen.add(obj_id)
+        try:
+            cloned: Dict[str, Any] = {}
+            for raw_k, raw_v in value.items():
+                key_str = _pres_stringify_key(raw_k, api_key, diagnostics)
+                if key_str in cloned:
+                    diagnostics.append("Xung đột khóa sau chuẩn hóa trình bày; áp dụng fail-closed.")
+                    return {"_redaction_error": "KEY_COLLISION"}
+                if _pres_is_sensitive_key(key_str) or (isinstance(raw_k, str) and _pres_is_sensitive_key(raw_k)):
+                    cloned[key_str] = "[REDACTED]"
+                else:
+                    cloned[key_str] = _pres_clone_value(
+                        raw_v,
+                        api_key=api_key,
+                        diagnostics=diagnostics,
+                        depth=depth + 1,
+                        node_budget=node_budget,
+                        seen=seen,
+                        json_depth=json_depth,
+                    )
+            return cloned
+        finally:
+            seen.discard(obj_id)
+
+    if isinstance(value, (list, tuple)):
+        if obj_id in seen:
+            diagnostics.append("Phát hiện tham chiếu vòng trong danh sách báo cáo.")
+            return "[OMITTED:LIMIT]"
+        seen.add(obj_id)
+        try:
+            return [
+                _pres_clone_value(
+                    item,
+                    api_key=api_key,
+                    diagnostics=diagnostics,
+                    depth=depth + 1,
+                    node_budget=node_budget,
+                    seen=seen,
+                    json_depth=json_depth,
+                )
+                for item in value
+            ]
+        finally:
+            seen.discard(obj_id)
+
+    diagnostics.append("Đối tượng kiểu không chuẩn đã được thay bằng marker an toàn.")
+    return "[UNSUPPORTED]"
+
+
+def _display_number(value: Any, unit: str) -> str:
+    if type(value) not in (int, float):
+        return "N/A"
+    try:
+        if value < 0 or not math.isfinite(value):
+            return "N/A"
+        if value == 0:
+            value = 0
+        return f"{value:.2f} s" if unit == "s" else f"{value:.0f} ms"
+    except (ValueError, OverflowError):
+        return "N/A"
+
+
+def _row_tier_info(pid: str, raw_tier: Any) -> Tuple[Optional[int], str, str, bool]:
+    auth_tier = PROBE_TIERS.get(pid) if isinstance(pid, str) and pid in PROBE_TIERS else None
+    tier_text = f"Tier {auth_tier}" if type(auth_tier) is int else "Không xác định"
+    reported_tier_text = ""
+    tier_mismatch = False
+    if raw_tier is not None:
+        if type(raw_tier) is int and 0 <= raw_tier <= 2:
+            reported_tier_text = f"Tier {raw_tier}"
+            if auth_tier is not None and raw_tier != auth_tier:
+                tier_mismatch = True
+        else:
+            reported_tier_text = "Không hợp lệ"
+            tier_mismatch = True
+    return auth_tier, tier_text, reported_tier_text, tier_mismatch
+
+
+def _format_evidence_value(raw_ev: Any, *, api_key: Optional[str], diagnostics: List[str]) -> str:
+    if raw_ev is None or raw_ev == "":
+        return ""
+    if isinstance(raw_ev, str):
+        return _presentation_sanitize_text(raw_ev, api_key=api_key, diagnostics=diagnostics)
+    if isinstance(raw_ev, (dict, list, tuple)):
+        safe_obj = _pres_clone_value(
+            raw_ev,
+            api_key=api_key,
+            diagnostics=diagnostics,
+            depth=0,
+            node_budget=[_PRES_MAX_NODES],
+            seen=set(),
+        )
+        return json.dumps(safe_obj, ensure_ascii=False, allow_nan=False)
+    if type(raw_ev) in (bool, int, float):
+        if type(raw_ev) is float and not math.isfinite(raw_ev):
+            return "null"
+        return str(raw_ev)
+    diagnostics.append("Kiểu dữ liệu evidence không chuẩn đã được che.")
+    return "[UNSUPPORTED]"
+
+
+def _format_findings_list(raw_findings: Any, *, api_key: Optional[str], diagnostics: List[str]) -> List[str]:
+    if raw_findings is None:
+        return []
+    if isinstance(raw_findings, (list, tuple)):
+        items: List[str] = []
+        for entry in raw_findings:
+            if isinstance(entry, str):
+                items.append(_presentation_sanitize_text(entry, api_key=api_key, diagnostics=diagnostics))
+            elif isinstance(entry, (dict, list, tuple)):
+                safe_obj = _pres_clone_value(
+                    entry,
+                    api_key=api_key,
+                    diagnostics=diagnostics,
+                    depth=0,
+                    node_budget=[_PRES_MAX_NODES],
+                    seen=set(),
+                )
+                items.append(json.dumps(safe_obj, ensure_ascii=False, allow_nan=False))
+            elif entry is None or type(entry) in (bool, int, float):
+                items.append(str(entry))
+            else:
+                diagnostics.append("Phần tử findings không chuẩn đã được thay thế.")
+                items.append("[UNSUPPORTED]")
+        return items
+    diagnostics.append("Trường findings không phải danh sách.")
+    return [_format_evidence_value(raw_findings, api_key=api_key, diagnostics=diagnostics)]
+
+
+def build_audit_report_view(report: Any, *, api_key: Optional[str] = None) -> Dict[str, Any]:
+    """Build a pure, sanitized, non-authoritative presentation view from an audit report.
+
+    Presentation-only boundary guarantees:
+    - Sensitive ``key[:=]``/``Bearer `` lines redact through EOL to prevent secret tails.
+    - Strings > 1 MiB become ``[OMITTED:LIMIT]`` and ``credential_digest`` is masked here
+      without altering ``_sanitize_report`` or cache validation parity.
+    """
+    diagnostics: List[str] = []
+    default_disclaimer = (
+        "Synthetic probes only; no absolute OS safety guarantee. "
+        "Not proof of real OpenViking extraction compatibility."
+    )
+
+    is_mapping = isinstance(report, dict)
+    raw_verdict = report.get("verdict") if is_mapping and isinstance(report.get("verdict"), dict) else None
+    raw_results = report.get("results") if is_mapping and isinstance(report.get("results"), list) else None
+
+    if not is_mapping or raw_verdict is None or raw_results is None:
+        diagnostics.append("Cấu trúc báo cáo thiếu verdict hoặc results hợp lệ; không cấp quyền sử dụng.")
+
+    # Authority copy + consistency verification (presentation-only, never grants admission)
+    level = raw_verdict.get("verdict_level") if raw_verdict is not None else None
+    if type(level) is not int or level not in range(1, 6):
+        level = None
+    level_label = (
+        _presentation_sanitize_text(raw_verdict.get("level_label"), api_key=api_key, diagnostics=diagnostics)
+        if raw_verdict is not None and isinstance(raw_verdict.get("level_label"), str)
+        else ""
+    )
+    actionable_verdict = (
+        _presentation_sanitize_text(raw_verdict.get("actionable_verdict"), api_key=api_key, diagnostics=diagnostics)
+        if raw_verdict is not None and isinstance(raw_verdict.get("actionable_verdict"), str)
+        else ""
+    )
+    raw_mem = raw_verdict.get("memory_permitted") if raw_verdict is not None else None
+    memory_permitted = raw_mem if type(raw_mem) is bool else None
+    raw_stop = raw_verdict.get("safety_stop") if raw_verdict is not None else None
+    safety_stop = raw_stop if type(raw_stop) is bool else None
+    global_reason = (
+        _presentation_sanitize_text(raw_verdict.get("v31_decision_reason"), api_key=api_key, diagnostics=diagnostics)
+        if raw_verdict is not None and isinstance(raw_verdict.get("v31_decision_reason"), str)
+        else ""
+    )
+    raw_disc = (
+        _presentation_sanitize_text(raw_verdict.get("disclaimer"), api_key=api_key, diagnostics=diagnostics)
+        if raw_verdict is not None and isinstance(raw_verdict.get("disclaimer"), str)
+        else ""
+    )
+    disclaimer = raw_disc or default_disclaimer
+    if "Synthetic probes only" not in disclaimer:
+        disclaimer = f"{disclaimer} ({default_disclaimer})"
+
+    unverified = False
+    if not is_mapping or raw_verdict is None or raw_results is None or level is None or not level_label:
+        unverified = True
+    else:
+        exp_reasons, exp_action, exp_mem, exp_stop = _EXPECTED_PROJECTION_BY_LEVEL[level]
+        if (
+            global_reason not in exp_reasons
+            or actionable_verdict != exp_action
+            or memory_permitted is not exp_mem
+            or safety_stop is not exp_stop
+        ):
+            unverified = True
+            diagnostics.append("Tổ hợp authority trong verdict không nhất quán; áp dụng chế độ không cấp quyền.")
+
+    authority = {
+        "level": level,
+        "level_label": level_label,
+        "actionable_verdict": actionable_verdict,
+        "memory_permitted": memory_permitted,
+        "safety_stop": safety_stop,
+        "reason": global_reason,
+        "disclaimer": disclaimer,
+        "unverified": unverified,
+    }
+
+    # Metrics formatting
+    tprof = raw_verdict.get("timeout_profile") if raw_verdict is not None else None
+    if isinstance(tprof, dict):
+        baseline_text = _display_number(tprof.get("baseline_s"), "s")
+        timeout_text = _display_number(tprof.get("t_base"), "s")
+        rescue_text = _display_number(tprof.get("t_rescue"), "s")
+        if "N/A" in (baseline_text, timeout_text, rescue_text):
+            diagnostics.append("Một hoặc nhiều chỉ số timeout_profile thiếu hoặc không hợp lệ.")
+    else:
+        baseline_text = timeout_text = rescue_text = "N/A"
+        if raw_verdict is not None:
+            diagnostics.append("Thiếu timeout_profile hợp lệ.")
+
+    total_raw = raw_verdict.get("total_duration_s") if raw_verdict is not None else None
+    total_duration_text = _display_number(total_raw, "s")
+    if total_duration_text == "N/A" and raw_verdict is not None:
+        diagnostics.append("Thiếu hoặc sai định dạng total_duration_s.")
+
+    op_raw = raw_verdict.get("operational_status") if raw_verdict is not None else None
+    operational_text = (
+        _presentation_sanitize_text(op_raw, api_key=api_key, diagnostics=diagnostics)
+        if isinstance(op_raw, str) and op_raw.strip()
+        else "Chưa có dữ liệu vận hành"
+    )
+    numeric_line = (
+        f"Baseline: {baseline_text} · Timeout: {timeout_text} "
+        f"· Rescue: {rescue_text} · Tổng: {total_duration_text}"
+    )
+    metrics = {
+        "baseline_text": baseline_text,
+        "timeout_text": timeout_text,
+        "rescue_text": rescue_text,
+        "total_duration_text": total_duration_text,
+        "numeric_line": numeric_line,
+        "operational_text": operational_text,
+    }
+
+    # Tally & row preparation
+    counts = {
+        "PASS": 0,
+        "PASS_SLOW": 0,
+        "WARN": 0,
+        "FAIL": 0,
+        "CRITICAL_FAIL": 0,
+        "INCONCLUSIVE": 0,
+    }
+    other_count = 0
+    invalid_row_count = 0
+    seen_ids: set[str] = set()
+    dup_ids_set: set[str] = set()
+    rows: List[Dict[str, Any]] = []
+
+    required_ids = sorted(set(PROBE_TIERS) - {"translation_integrity"})
+    source_list = raw_results if raw_results is not None else []
+
+    # Pre-scan local signals for report-level honesty checks
+    sec_culprits: List[str] = []
+    susp_culprits: List[str] = []
+    inc_culprits: List[str] = []
+    qual_candidates: List[str] = []
+    slow_culprits: List[str] = []
+    other_nonpass: List[str] = []
+
+    parsed_pre: List[Dict[str, Any]] = []
+    for idx, item in enumerate(source_list):
+        iid = f"probe-{idx:04d}"
+        if not isinstance(item, dict):
+            invalid_row_count += 1
+            diagnostics.append(f"Hàng {iid} không phải Mapping hợp lệ.")
+            parsed_pre.append({"iid": iid, "valid_row": False})
+            continue
+
+        raw_id = item.get("id")
+        pid = _presentation_sanitize_text(raw_id, api_key=api_key, diagnostics=diagnostics) if isinstance(raw_id, str) else ""
+        if pid:
+            if pid in seen_ids:
+                dup_ids_set.add(pid)
+            seen_ids.add(pid)
+
+        raw_status = item.get("status")
+        status = raw_status if isinstance(raw_status, str) else ""
+        if status in counts:
+            counts[status] += 1
+        else:
+            other_count += 1
+
+        raw_risk = item.get("risk_level")
+        risk_level = _presentation_sanitize_text(raw_risk, api_key=api_key, diagnostics=diagnostics) if isinstance(raw_risk, str) else "N/A"
+        tier, tier_text, reported_tier_text, tier_mismatch = _row_tier_info(pid, item.get("tier"))
+
+        raw_name = item.get("name")
+        orig_name = _presentation_sanitize_text(raw_name, api_key=api_key, diagnostics=diagnostics) if isinstance(raw_name, str) else ""
+        short_vi = _PROBE_SHORT_NAMES.get(pid) or orig_name or pid or "Probe không xác định"
+        display_name = f"{short_vi} ({orig_name})" if orig_name and orig_name != short_vi else short_vi
+
+        reason_code = (
+            _presentation_sanitize_text(item.get("reason_code"), api_key=api_key, diagnostics=diagnostics)
+            if isinstance(item.get("reason_code"), str)
+            else ""
+        )
+        summary_txt = (
+            _presentation_sanitize_text(item.get("summary"), api_key=api_key, diagnostics=diagnostics)
+            if isinstance(item.get("summary"), str)
+            else ""
+        )
+        findings_list = _format_findings_list(item.get("findings"), api_key=api_key, diagnostics=diagnostics)
+        evidence_txt = _format_evidence_value(item.get("evidence"), api_key=api_key, diagnostics=diagnostics)
+        duration_text = _display_number(item.get("duration_ms"), "ms")
+
+        security_signal = status == "CRITICAL_FAIL" or risk_level == "CRITICAL" or (tier == 0 and status == "FAIL")
+        suspect_signal = tier == 0 and status == "WARN"
+        incomplete_signal = status == "INCONCLUSIVE" or (status not in counts and status != "REFUSAL")
+        quality_candidate = ((tier == 1 or pid == "operational_latency") and status in ("FAIL", "REFUSAL") and not security_signal)
+        slow_signal = status == "PASS_SLOW"
+
+        conflict = False
+        if tier_mismatch:
+            conflict = True
+            diagnostics.append(f"Hàng {pid or iid}: phân tầng khai báo {reported_tier_text} khác chuẩn taxonomy {tier_text}.")
+        if status in ("PASS", "PASS_SLOW") and risk_level == "CRITICAL":
+            conflict = True
+        if status == "PASS" and reason_code in ("FORMAT_CORRUPTED", "PROPER_NOUN_ALTERED"):
+            conflict = True
+        if status == "INCONCLUSIVE" and risk_level in ("HIGH", "CRITICAL"):
+            conflict = True
+        if global_reason == "VERIFIED_FAST" and pid in required_ids and status not in ("PASS",):
+            conflict = True
+        if global_reason == "SUSPECT" and security_signal:
+            conflict = True
+
+        tag = f"{pid or iid} [{status or 'UNKNOWN'}]"
+        if security_signal:
+            sec_culprits.append(tag)
+        if suspect_signal:
+            susp_culprits.append(f"{pid} (Tier 0 WARN)")
+        if status == "INCONCLUSIVE":
+            inc_culprits.append(f"{pid} ({reason_code or 'INCONCLUSIVE'})")
+        if quality_candidate:
+            qual_candidates.append(f"{pid} ({status}{': ' + reason_code if reason_code else ''})")
+        if slow_signal:
+            slow_culprits.append(pid)
+        if status not in ("PASS", "PASS_SLOW") and not security_signal and not suspect_signal and status != "INCONCLUSIVE" and not quality_candidate:
+            other_nonpass.append(tag)
+
+        parsed_pre.append({
+            "iid": iid,
+            "valid_row": True,
+            "id": pid,
+            "name": short_vi,
+            "orig_name": orig_name,
+            "display_name": display_name,
+            "tier": tier,
+            "tier_text": tier_text,
+            "reported_tier_text": reported_tier_text,
+            "risk_level": risk_level,
+            "status": _presentation_sanitize_text(status, api_key=api_key, diagnostics=diagnostics),
+            "status_text": _STATUS_TEXT_VI.get(status, "Không xác định"),
+            "status_legend": _STATUS_LEGENDS.get(status, f"{_presentation_sanitize_text(status or 'UNKNOWN', api_key=api_key)} (Không xác định)"),
+            "duration_text": duration_text,
+            "summary": summary_txt,
+            "findings": findings_list,
+            "evidence": evidence_txt,
+            "reason_code": reason_code,
+            "security_signal": security_signal,
+            "suspect_signal": suspect_signal,
+            "incomplete_signal": incomplete_signal,
+            "quality_candidate": quality_candidate,
+            "slow_signal": slow_signal,
+            "has_conflict": conflict,
+        })
+
+    observed_count = len(source_list)
+    missing_required_ids = sorted(pid for pid in required_ids if pid not in seen_ids)
+    duplicate_ids = sorted(dup_ids_set)
+    if duplicate_ids:
+        diagnostics.append(f"Phát hiện probe trùng lặp id: {', '.join(duplicate_ids)}.")
+    if missing_required_ids:
+        diagnostics.append(f"Thiếu probe bắt buộc trong coverage: {', '.join(missing_required_ids)}.")
+    if level is not None and level >= 4 and (observed_count == 0 or missing_required_ids or duplicate_ids):
+        authority["unverified"] = True
+        unverified = True
+        diagnostics.append("Báo cáo mức 4/5 nhưng độ phủ bắt buộc chưa đầy đủ; áp dụng chế độ không cấp quyền trình bày.")
+
+    tally = {
+        "PASS": counts["PASS"],
+        "PASS_SLOW": counts["PASS_SLOW"],
+        "WARN": counts["WARN"],
+        "FAIL": counts["FAIL"],
+        "CRITICAL_FAIL": counts["CRITICAL_FAIL"],
+        "INCONCLUSIVE": counts["INCONCLUSIVE"],
+        "other_count": other_count,
+        "invalid_row_count": invalid_row_count,
+        "observed_count": observed_count,
+        "missing_required_ids": missing_required_ids,
+        "duplicate_ids": duplicate_ids,
+    }
+
+    # Build final Row dicts + attribution
+    for entry in parsed_pre:
+        if not entry["valid_row"]:
+            detail_lines = [
+                "Hạng mục: Dữ liệu probe không hợp lệ",
+                f"Mã hàng: {entry['iid']}",
+                "Đánh giá đơn lẻ: Không đánh giá quyết định tổng thể bằng một probe.",
+            ]
+            rows.append({
+                "iid": entry["iid"],
+                "valid_row": False,
+                "id": "",
+                "name": "Dữ liệu probe không hợp lệ",
+                "display_name": "Dữ liệu probe không hợp lệ",
+                "tier": None,
+                "tier_text": "Không xác định",
+                "reported_tier_text": "",
+                "risk_level": "N/A",
+                "status": "",
+                "status_text": "Không xác định",
+                "duration_text": "N/A",
+                "summary": "",
+                "findings": [],
+                "evidence": "",
+                "reason_code": "",
+                "isolated_decision": None,
+                "attribution": {"reason": global_reason, "match": "none", "facts": ["Dữ liệu hàng không phải Mapping"]},
+                "attribution_text": "Dữ liệu probe không hợp lệ; không dùng để cấp quyền.",
+                "detail_text": "\n".join(detail_lines),
+                "status_legend": "Không xác định",
+                "has_conflict": True,
+            })
+            continue
+
+        st = entry["status"]
+        pid = entry["id"]
+        rc = entry["reason_code"]
+        facts: List[str] = []
+        match = "none"
+        attr_text = ""
+
+        if unverified:
+            match = "none"
+            attr_text = "Báo cáo tổng thể không nhất quán/chưa xác thực; không suy diễn cấp quyền từ từng hàng."
+            facts.append("Verdict tổng thể chưa xác thực")
+        elif global_reason == "CONFIRMED_VIOLATION":
+            if entry["security_signal"] and not entry["has_conflict"]:
+                match = "direct"
+                attr_text = f"Tín hiệu bảo mật phù hợp với kết luận tổng thể ({st}, risk={entry['risk_level']}, {entry['tier_text']})."
+                facts.append(attr_text)
+            elif entry["security_signal"]:
+                match = "candidate"
+                attr_text = "Có tín hiệu bảo mật kèm xung đột dữ liệu hàng; cần đối chiếu."
+                facts.append(attr_text)
+            else:
+                match = "context" if st != "PASS" else "none"
+                attr_text = "Probe đạt; không phải nguyên nhân vi phạm của báo cáo." if st in ("PASS", "PASS_SLOW") else f"Bối cảnh bổ sung ({st})."
+        elif global_reason == "SUSPECT":
+            if entry["suspect_signal"] and not entry["has_conflict"]:
+                match = "direct"
+                attr_text = f"Cảnh báo Tier 0 ({pid}); nghi vấn chưa xác nhận vi phạm an ninh."
+                facts.append(attr_text)
+            elif st == "INCONCLUSIVE":
+                match = "context"
+                attr_text = f"Chưa kết luận ({rc or 'INCONCLUSIVE'}); thiếu bằng chứng hoàn tất ở hạng mục này."
+                facts.append(attr_text)
+            elif entry["quality_candidate"]:
+                match = "context"
+                attr_text = f"Thất bại chất lượng ({st}{': ' + rc if rc else ''}) đang đi kèm trạng thái tổng thể cấp 2 SUSPECT."
+                facts.append(attr_text)
+            elif st in ("PASS", "PASS_SLOW"):
+                match = "none"
+                attr_text = "Probe đạt; không phải nguyên nhân của kết luận cấp 2 hoặc lỗi."
+            else:
+                match = "context"
+                attr_text = f"Quan sát bổ sung ({entry['status_legend']})."
+        elif global_reason == "MISSING_EVIDENCE":
+            if st == "INCONCLUSIVE":
+                match = "direct"
+                attr_text = f"Chưa kết luận ({rc or 'MISSING_EVIDENCE'}); khiến thiếu bằng chứng để mở quyền."
+                facts.append(attr_text)
+            elif st not in ("PASS", "PASS_SLOW") or entry["incomplete_signal"]:
+                match = "candidate"
+                attr_text = f"Chưa đạt điều kiện bằng chứng hoàn chỉnh ({entry['status_legend']})."
+                facts.append(attr_text)
+            else:
+                match = "none"
+                attr_text = "Probe đạt; không gây thiếu bằng chứng."
+        elif global_reason == "FAILED_QUALITY":
+            if entry["quality_candidate"]:
+                match = "candidate"
+                extra = " (tính liên quan gate tùy thuộc cấu hình required)" if pid == "translation_integrity" else ""
+                attr_text = f"Ứng viên lỗi chất lượng vai trò Memory ({pid}: {st}{', ' + rc if rc else ''}){extra}."
+                facts.append(attr_text)
+            elif st in ("PASS", "PASS_SLOW"):
+                match = "none"
+                attr_text = "Probe đạt; không gây lỗi chất lượng."
+            else:
+                match = "context"
+                attr_text = f"Quan sát bổ sung ({entry['status_legend']})."
+        elif global_reason == "SLOW_CEILING":
+            if entry["slow_signal"]:
+                match = "direct"
+                attr_text = "Đạt chuẩn sau lượt cứu thích ứng (PASS_SLOW), góp phần đưa mức về cấp 4."
+                facts.append(attr_text)
+            elif st == "PASS":
+                match = "context"
+                attr_text = "Probe đạt trong báo cáo cấp 4 (SLOW_CEILING)."
+            else:
+                match = "context"
+                attr_text = f"Quan sát bổ sung ({entry['status_legend']})."
+        elif global_reason == "VERIFIED_FAST":
+            if st == "PASS":
+                match = "context"
+                attr_text = "Probe đạt trên bộ thử nghiệm tổng hợp (VERIFIED_FAST); không tự động chứng minh chat/production."
+            else:
+                match = "candidate"
+                attr_text = f"Bất nhất dữ liệu hàng ({entry['status_legend']}) so với kết luận VERIFIED_FAST."
+                facts.append(attr_text)
+        else:
+            match = "none"
+            attr_text = f"Chưa có ánh xạ giải thích cho mã '{global_reason or 'UNKNOWN'}'."
+
+        if entry["has_conflict"]:
+            facts.append("Có xung đột dữ liệu giữa trạng thái, rủi ro hoặc phân tầng.")
+
+        detail_sections = [
+            f"Hạng mục: {entry['display_name']}",
+            f"Mã probe: {pid or 'N/A'} | Phân tầng: {entry['tier_text']} | Thời lượng: {entry['duration_text']}",
+            f"Kết quả: {entry['status_legend']} | Mức rủi ro: {entry['risk_level']}",
+        ]
+        if entry["reported_tier_text"] and entry["reported_tier_text"] != entry["tier_text"]:
+            detail_sections.append(f"Lưu ý phân tầng khai báo: {entry['reported_tier_text']} (chuẩn taxonomy: {entry['tier_text']})")
+        rc_display = _format_reason_code(rc) if rc else "Không có mã (đối chiếu tóm tắt và bằng chứng bên dưới)"
+        detail_sections.append(f"Mã nguyên nhân (reason_code): {rc_display}")
+        detail_sections.append(f"Giải thích trong báo cáo: {attr_text}")
+        detail_sections.append("Lưu ý đơn lẻ: Không đánh giá quyết định tổng thể chỉ từ một probe riêng lẻ.")
+        if entry["summary"]:
+            detail_sections.append(f"Tóm tắt: {entry['summary']}")
+        if entry["findings"]:
+            detail_sections.append("Phát hiện chi tiết:\n  - " + "\n  - ".join(entry["findings"]))
+        if entry["evidence"]:
+            detail_sections.append(f"Bằng chứng đã làm sạch:\n{entry['evidence']}")
+
+        rows.append({
+            "iid": entry["iid"],
+            "valid_row": True,
+            "id": pid,
+            "name": entry["name"],
+            "display_name": entry["display_name"],
+            "tier": entry["tier"],
+            "tier_text": entry["tier_text"],
+            "reported_tier_text": entry["reported_tier_text"],
+            "risk_level": entry["risk_level"],
+            "status": st,
+            "status_text": entry["status_text"],
+            "duration_text": entry["duration_text"],
+            "summary": entry["summary"],
+            "findings": entry["findings"],
+            "evidence": entry["evidence"],
+            "reason_code": rc,
+            "isolated_decision": None,
+            "attribution": {"reason": global_reason, "match": match, "facts": facts},
+            "attribution_text": attr_text,
+            "detail_text": _presentation_sanitize_text("\n".join(detail_sections), api_key=api_key, diagnostics=diagnostics),
+            "status_legend": entry["status_legend"],
+            "has_conflict": entry["has_conflict"],
+        })
+
+    tally_parts = [
+        f"{counts['PASS']} PASS",
+        f"{counts['PASS_SLOW']} PASS_SLOW",
+        f"{counts['WARN']} WARN",
+        f"{counts['FAIL']} FAIL",
+        f"{counts['CRITICAL_FAIL']} CRITICAL_FAIL",
+        f"{counts['INCONCLUSIVE']} INCONCLUSIVE",
+    ]
+    if other_count:
+        tally_parts.append(f"{other_count} Khác")
+    if invalid_row_count:
+        tally_parts.append(f"{invalid_row_count} Hỏng")
+    tally_text = f"{' · '.join(tally_parts)} ({observed_count} hàng quan sát)"
+
+    req_present = len(required_ids) - len(missing_required_ids)
+    coverage_text = f"Độ phủ bắt buộc: {req_present}/{len(required_ids)} hạng mục"
+    if missing_required_ids:
+        coverage_text += f" (Thiếu: {', '.join(missing_required_ids)})"
+    if duplicate_ids:
+        coverage_text += f" | Trùng lặp: {', '.join(duplicate_ids)}"
+
+    # Dynamic Vietnamese executive summary
+    culprit_chunks: List[str] = []
+    if sec_culprits:
+        culprit_chunks.append("Vi phạm bảo mật: " + ", ".join(sec_culprits))
+    if susp_culprits:
+        culprit_chunks.append("Nghi vấn Tier 0: " + ", ".join(susp_culprits))
+    if inc_culprits:
+        culprit_chunks.append("Chưa kết luận: " + ", ".join(inc_culprits))
+    if qual_candidates:
+        culprit_chunks.append("Không đạt chất lượng/vai trò: " + ", ".join(qual_candidates))
+    if missing_required_ids:
+        culprit_chunks.append("Thiếu probe bắt buộc: " + ", ".join(missing_required_ids))
+    if other_nonpass:
+        culprit_chunks.append("Bất thường khác: " + ", ".join(other_nonpass))
+
+    if unverified:
+        headline = "Chưa xác minh — dữ liệu báo cáo không hợp lệ"
+        use_for = "Chỉ dùng để chẩn đoán lỗi dữ liệu và chạy kiểm định lại."
+        avoid_for = "VLM Memory admission hoặc tự động vận hành."
+        why = "Dữ liệu verdict/results thiếu hoặc không nhất quán" + (f" ({'; '.join(culprit_chunks)})" if culprit_chunks else ".")
+        next_step = "Kiểm tra lại kết nối provider và chạy lại chuỗi kiểm định an toàn đầy đủ."
+    elif level == 1:
+        headline = f"Mức 1/5 — {level_label or 'NGUY HIỂM — CẤM DÙNG'}"
+        use_for = "Không dùng cho luồng sản xuất; chỉ cách ly để phân tích sự cố."
+        avoid_for = "VLM Memory admission, Agent gọi công cụ, hay xử lý dữ liệu nhạy cảm."
+        why = f"Phát hiện vi phạm an ninh nghiêm trọng ({global_reason}): " + ("; ".join(culprit_chunks) or "Verdict báo vi phạm; đối chiếu tab Chi tiết Hạng mục.")
+        next_step = "Ngưng sử dụng route/model này ngay, cô lập nhật ký bằng chứng và thay thế provider đạt chuẩn."
+    elif level == 2:
+        headline = f"Mức 2/5 — {level_label or 'CHƯA XÁC MINH'} ({global_reason})"
+        use_for = "Chỉ thử nghiệm chẩn đoán và chạy kiểm định bổ sung; chưa cấp quyền sản xuất."
+        avoid_for = "VLM Memory admission hoặc bật tự động chuyển mạch chưa xác minh."
+        if global_reason == "SUSPECT":
+            why = "Nghi vấn ở tầng bảo mật Tier 0 nên chặn mở quyền" + (f" — chi tiết: {'; '.join(culprit_chunks)}." if culprit_chunks else ".")
+        else:
+            why = "Thiếu bằng chứng kiểm chứng đầy đủ" + (f" — chi tiết: {'; '.join(culprit_chunks)}." if culprit_chunks else ".")
+        next_targets = ", ".join(susp_culprits + inc_culprits + qual_candidates + missing_required_ids) or "các hạng mục chưa đạt"
+        next_step = f"Xử lý hoặc chạy kiểm định lại các hạng mục: {next_targets} trước khi xem xét cấp quyền."
+    elif level == 3:
+        headline = f"Mức 3/5 — {level_label or 'DÙNG TẠM (CÓ ĐIỀU KIỆN)'}"
+        use_for = "Chỉ thí nghiệm trò chuyện ngoài bộ nhớ (Chat quality chưa được kiểm chứng)."
+        avoid_for = "VLM Memory admission (trích xuất ghi nhớ yêu cầu JSON/logic đạt chuẩn)."
+        why = f"Không đạt yêu cầu chất lượng vai trò ({global_reason}): " + ("; ".join(culprit_chunks) or "Cần đối chiếu cấu hình JSON/logic.")
+        next_step = f"Khắc phục cấu hình đầu ra ở {', '.join(qual_candidates) or 'hạng mục chất lượng'} rồi kiểm định lại."
+    elif level == 4:
+        headline = f"Mức 4/5 — {level_label or 'DÙNG ĐƯỢC'}"
+        use_for = "Đạt bộ bài thử tổng hợp cho VLM Memory với độ trễ cao/chậm; Chat & dịch thuật chưa được đánh giá."
+        avoid_for = "Cần kiểm chứng tích hợp OpenViking thực tế trước khi mặc định đạt production."
+        why = f"Các bài thử an toàn và JSON tổng hợp đều đạt, nhưng độ trễ chậm hoặc cần lượt cứu ({'; '.join(slow_culprits) or global_reason})."
+        next_step = "Theo dõi timeout thực tế và xác minh thử một phiên trích xuất OpenViking thật trước khi đưa vào vận hành."
+    else:
+        headline = f"Mức 5/5 — {level_label or 'DÙNG TỐT'}"
+        use_for = "Đạt bộ bài thử tổng hợp và ngưỡng tốc độ cho VLM Memory; Chat & dịch thuật chưa được đánh giá."
+        avoid_for = "Cần chạy kiểm thử tích hợp OpenViking thật trước khi vận hành chính thức."
+        why = f"Tất cả hạng mục bắt buộc đạt chuẩn trên bộ thử nghiệm tổng hợp ({global_reason})."
+        next_step = "Xác minh tích hợp trích xuất OpenViking thực tế và theo dõi độ ổn định định kỳ."
+
+    # avoid_prefix carries the UI indicator icon; avoid_for describes the forbidden or cautioned scope.
+    avoid_prefix = "⚠ Lưu ý trước khi dùng" if (not unverified and level >= 4) else "✖ TUYỆT ĐỐI KHÔNG DÙNG CHO"
+    summary = {
+        "headline": _presentation_sanitize_text(headline, api_key=api_key, diagnostics=diagnostics),
+        "use_for": _presentation_sanitize_text(use_for, api_key=api_key, diagnostics=diagnostics),
+        "avoid_for": _presentation_sanitize_text(avoid_for, api_key=api_key, diagnostics=diagnostics),
+        "avoid_prefix": avoid_prefix,
+        "why": _presentation_sanitize_text(why, api_key=api_key, diagnostics=diagnostics),
+        "next_step": _presentation_sanitize_text(next_step, api_key=api_key, diagnostics=diagnostics),
+        "disclaimer": disclaimer,
+        "tally_text": tally_text,
+        "coverage_text": coverage_text,
+    }
+
+    # Sanitized JSON clone of report (never mutates input, never embeds view fields)
+    if is_mapping:
+        safe_report_clone = _pres_clone_value(
+            report,
+            api_key=api_key,
+            diagnostics=diagnostics,
+            depth=0,
+            node_budget=[_PRES_MAX_NODES],
+            seen=set(),
+        )
+        if isinstance(safe_report_clone, dict) and isinstance(safe_report_clone.get("saved_report_file"), str) and safe_report_clone["saved_report_file"]:
+            safe_report_clone["saved_report_file"] = Path(safe_report_clone["saved_report_file"]).name
+    else:
+        safe_report_clone = {"error": "INVALID_REPORT_FORMAT"}
+    try:
+        json_text = json.dumps(safe_report_clone, indent=2, ensure_ascii=False, allow_nan=False)
+        json.loads(json_text)
+    except Exception:
+        diagnostics.append("Không thể tuần tự hóa JSON an toàn cho báo cáo thô.")
+        json_text = json.dumps({"error": "JSON_SERIALIZATION_FAILED"}, indent=2, ensure_ascii=False)
+
+    dedup_diagnostics: List[str] = []
+    seen_diag: set[str] = set()
+    for d in diagnostics:
+        clean_d = _presentation_sanitize_text(d, api_key=api_key)
+        if clean_d and clean_d not in seen_diag:
+            seen_diag.add(clean_d)
+            dedup_diagnostics.append(clean_d)
+
+    verdict_line = (
+        f"Mã nguồn (chưa xác thực): {actionable_verdict or 'UNKNOWN'}"
+        if unverified
+        else f"Mã phán quyết: {actionable_verdict or 'UNKNOWN'}"
+    )
+    exec_lines = [
+        summary["headline"],
+        verdict_line,
+        f"Tổng hợp: {summary['tally_text']}",
+        summary["coverage_text"],
+        f"✔ Dùng cho việc gì: {summary['use_for']}",
+        f"{summary['avoid_prefix']}: {summary['avoid_for']}",
+        f"ℹ Nguyên nhân & hạng mục liên quan: {summary['why']}",
+        f"➤ Bước tiếp theo: {summary['next_step']}",
+        f"Chỉ số kỹ thuật: {metrics['numeric_line']}",
+        f"Trạng thái vận hành: {metrics['operational_text']}",
+        f"Lưu ý giới hạn: {summary['disclaimer']}",
+    ]
+    if dedup_diagnostics:
+        exec_lines.append("Chẩn đoán trình bày: " + " | ".join(dedup_diagnostics))
+
+    executive_text = _presentation_sanitize_text("\n".join(exec_lines), api_key=api_key)
+    clipboard_text = executive_text + "\n\n" + json_text
+
+    return {
+        "authority": authority,
+        "summary": summary,
+        "tally": tally,
+        "metrics": metrics,
+        "rows": rows,
+        "diagnostics": dedup_diagnostics,
+        "executive_text": executive_text,
+        "json_text": json_text,
+        "clipboard_text": clipboard_text,
+    }
+
+
 def launch_security_audit_ui(
     parent: Any,
     api_base: str,
@@ -1548,6 +2515,40 @@ def launch_security_audit_ui(
     win.transient(parent)
     win.minsize(820, 600)
     win.geometry("860x640")
+
+    c_elevated = (colors or {}).get("elevated", c_btn)
+    audit_style_ok = False
+    style_cls = getattr(ttk, "Style", None)
+    if callable(style_cls):
+        try:
+            style = style_cls(win)
+            # Unconditionally configure Audit.* ttk styles; safe on all ttk engines without mutating global theme.
+            # Production openviking-monitor.pyw pins clam at startup.
+            style.configure("Audit.TNotebook", background=c_bg, bordercolor=c_line, tabmargins=(2, 2, 2, 0))
+            style.configure("Audit.TNotebook.Tab", background=c_surface, foreground=c_muted, padding=(12, 6), bordercolor=c_line)
+            style.map("Audit.TNotebook.Tab", background=[("selected", c_elevated)], foreground=[("selected", c_accent)])
+            style.configure(
+                "Audit.Treeview",
+                background=c_surface, fieldbackground=c_surface, foreground=c_ink,
+                bordercolor=c_line, lightcolor=c_line, darkcolor=c_bg, rowheight=26,
+            )
+            style.configure(
+                "Audit.Treeview.Heading",
+                background=c_elevated, foreground=c_ink, font=(font_family, 9, "bold"),
+                relief="flat", bordercolor=c_line, padding=(6, 4),
+            )
+            style.map("Audit.Treeview.Heading", background=[("active", c_btn)])
+            style.map("Audit.Treeview", background=[("selected", "#2c435c")], foreground=[("selected", c_ink)])
+            for orient in ("Vertical", "Horizontal"):
+                style.configure(
+                    f"Audit.{orient}.TScrollbar",
+                    background=c_btn, troughcolor=c_bg, bordercolor=c_bg,
+                    arrowcolor=c_muted, lightcolor=c_btn, darkcolor=c_btn,
+                )
+                style.map(f"Audit.{orient}.TScrollbar", background=[("active", c_elevated)])
+            audit_style_ok = True
+        except Exception:
+            audit_style_ok = False
     if sys.platform == "win32":
         try:
             import ctypes
@@ -1558,28 +2559,6 @@ def launch_security_audit_ui(
                 ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val), ctypes.sizeof(val))
         except Exception:
             pass
-
-    # Header
-    hdr = tk.Frame(win, bg=c_surface, padx=16, pady=12)
-    hdr.pack(fill="x", side="top")
-    tk.Label(
-        hdr, text="KIỂM ĐỊNH TƯƠNG THÍCH, HÀNH VI & RANH GIỚI AN TOÀN (TAXONOMY V3.1 — CHÍNH SÁCH 5 CẤP ĐỘ THỰC CHIẾN)",
-        bg=c_surface, fg=c_accent, font=(font_family, 11, "bold")
-    ).pack(anchor="w")
-    tk.Label(
-        hdr, text=_sanitize_report(f"Target: {model}  |  Endpoint: {api_base}", api_key),
-        bg=c_surface, fg=c_muted, font=(font_family, 9)
-    ).pack(anchor="w", pady=(2, 0))
-
-    body = tk.Frame(win, bg=c_bg, padx=16, pady=12)
-    body.pack(fill="both", expand=True)
-
-    # Khung tiến độ
-    prog_frame = tk.Frame(body, bg=c_bg)
-    prog_frame.pack(fill="x", pady=(8, 12))
-    status_var = tk.StringVar(value="Đang bắt đầu chuỗi kiểm định an toàn...")
-    status_lbl = tk.Label(prog_frame, textvariable=status_var, bg=c_bg, fg=c_ink, font=(font_family, 10))
-    status_lbl.pack(side="left", anchor="w")
 
     stop_event = threading.Event()
     closed = threading.Event()
@@ -1627,6 +2606,59 @@ def launch_security_audit_ui(
     win.protocol("WM_DELETE_WINDOW", close_dialog)
     win.bind("<Destroy>", on_destroy, add="+")
 
+    # Header
+    hdr = tk.Frame(win, bg=c_surface, padx=16, pady=10)
+    hdr.pack(fill="x", side="top")
+    hdr_title = tk.Label(
+        hdr, text="KIỂM ĐỊNH TƯƠNG THÍCH & AN TOÀN — TAXONOMY V3.1 (5 CẤP ĐỘ)",
+        bg=c_surface, fg=c_accent, font=(font_family, 11, "bold"),
+        wraplength=740, justify="left", anchor="w",
+    )
+    hdr_title.pack(anchor="w", fill="x")
+    hdr_target = tk.Label(
+        hdr, text=_presentation_sanitize_text(f"Target: {model}  |  Endpoint: {api_base}", api_key=api_key),
+        bg=c_surface, fg=c_muted, font=(font_family, 9),
+        wraplength=740, justify="left", anchor="w",
+    )
+    hdr_target.pack(anchor="w", fill="x", pady=(2, 0))
+
+    wrap_labels = [hdr_title, hdr_target]
+
+    def _safe_wrap_configure(event):
+        if closed.is_set():
+            return
+        w = getattr(event, "width", None)
+        if isinstance(w, bool) or not isinstance(w, (int, float)) or not math.isfinite(w) or w <= 120:
+            return
+        target_wrap = max(240, int(w) - 36)
+        for lbl in wrap_labels:
+            try:
+                lbl.configure(wraplength=target_wrap)
+            except Exception:
+                pass
+
+    hdr.bind("<Configure>", _safe_wrap_configure, add="+")
+
+    # Pack footer before expanding body so action buttons remain visible at high DPI
+    footer = tk.Frame(win, bg=c_surface, padx=16, pady=10)
+    footer.pack(fill="x", side="bottom")
+    footer_left = tk.Frame(footer, bg=c_surface)
+    footer_left.pack(side="left")
+    tk.Button(
+        footer, text="Đóng", command=close_dialog, bg=c_btn, fg=c_accent,
+        relief="flat", font=(font_family, 9), padx=14, pady=4,
+    ).pack(side="right")
+
+    body = tk.Frame(win, bg=c_bg, padx=16, pady=10)
+    body.pack(fill="both", expand=True)
+
+    # Khung tiến độ
+    prog_frame = tk.Frame(body, bg=c_bg)
+    prog_frame.pack(fill="x", pady=(8, 12))
+    status_var = tk.StringVar(value="Đang bắt đầu chuỗi kiểm định an toàn...")
+    status_lbl = tk.Label(prog_frame, textvariable=status_var, bg=c_bg, fg=c_ink, font=(font_family, 10))
+    status_lbl.pack(side="left", anchor="w")
+
     def do_stop():
         cancel_pending()
         status_var.set("Đang yêu cầu dừng tiến trình...")
@@ -1639,151 +2671,384 @@ def launch_security_audit_ui(
     stop_btn.pack(side="right")
 
     notebook_frame = tk.Frame(body, bg=c_bg)
+    view_holder: Dict[str, Any] = {"view": None, "attempted": False}
+    open_dir_added = False
+    copying_clipboard = False
 
     def render_report(report: Dict[str, Any]):
-        if closed.is_set():
+        nonlocal open_dir_added, copying_clipboard
+        # Single-shot guard per dialog instance: drain/cached_report invoke render_report at most once.
+        if closed.is_set() or view_holder["attempted"] or view_holder["view"] is not None:
             return
-        report = _sanitize_report(report, api_key)
+        view_holder["attempted"] = True
         try:
+            # Keep _sanitize_report untouched for cache parity; build_audit_report_view applies presentation-sink redaction.
+            report = _sanitize_report(report, api_key)
+            view = build_audit_report_view(report, api_key=api_key)
             prog_frame.pack_forget()
             notebook_frame.pack(fill="both", expand=True)
 
-            notebook = ttk.Notebook(notebook_frame)
+            nb_style_kw = {"style": "Audit.TNotebook"} if audit_style_ok else {}
+            tree_style_kw = {"style": "Audit.Treeview"} if audit_style_ok else {}
+            vsb_style_kw = {"style": "Audit.Vertical.TScrollbar"} if audit_style_ok else {}
+            hsb_style_kw = {"style": "Audit.Horizontal.TScrollbar"} if audit_style_ok else {}
+
+            notebook = ttk.Notebook(notebook_frame, **nb_style_kw)
             notebook.pack(fill="both", expand=True)
 
-            verdict = report.get("verdict", {})
-            results = report.get("results", [])
-            os_status = verdict.get("os_security_status", "UNKNOWN")
-            role_fit = verdict.get("role_fitness", {})
+            auth = view["authority"]
+            summary = view["summary"]
+            tally = view["tally"]
+            metrics = view["metrics"]
+            rows = view["rows"]
+            unverified = bool(auth["unverified"])
 
-            # Tab 1: Kết luận thực chiến 5 mức (Taxonomy V2.2)
-            tab1 = tk.Frame(notebook, bg=c_surface, padx=16, pady=12)
+            level_colors = {
+                1: "#dc2626",
+                2: "#d97706",
+                3: "#ea580c",
+                4: "#16a34a",
+                5: "#059669",
+            }
+            lvl_num = auth["level"] if isinstance(auth["level"], int) else 2
+            badge_color = "#d97706" if unverified else level_colors.get(lvl_num, "#d97706")
+            lvl_badge_text = (
+                "CHƯA XÁC MINH — DỮ LIỆU KHÔNG NHẤT QUÁN"
+                if unverified
+                else (auth["level_label"] or "CHƯA XÁC MINH")
+            )
+            raw_action = auth["actionable_verdict"] or "UNKNOWN"
+
+            # Tab 1: Kết luận & Hướng dẫn sử dụng
+            tab1 = tk.Frame(notebook, bg=c_surface, padx=12, pady=10)
             notebook.add(tab1, text="1. Kết luận & Hướng dẫn sử dụng")
 
-            # Banner 5 cấp độ thực chiến: Nổi bật, trực quan, đọc là hiểu ngay
-            lvl_num = verdict.get("verdict_level", 2)
-            lvl_label = verdict.get("level_label", "CHƯA XÁC MINH")
-            badge_color = verdict.get("badge_color", "#d97706")
-
-            banner_frame = tk.Frame(tab1, bg=c_bg, padx=14, pady=10, highlightbackground=badge_color, highlightthickness=2)
-            banner_frame.pack(fill="x", pady=(0, 10))
+            banner_frame = tk.Frame(
+                tab1, bg=c_bg, padx=12, pady=8,
+                highlightbackground=badge_color, highlightthickness=2,
+            )
+            banner_frame.pack(fill="x", pady=(0, 8))
 
             hdr_row = tk.Frame(banner_frame, bg=c_bg)
             hdr_row.pack(fill="x")
-            tk.Label(hdr_row, text=f"MỨC {lvl_num}/5:", bg=c_bg, fg=c_muted, font=(font_family, 9, "bold")).pack(side="left")
-            tk.Label(hdr_row, text=f" {lvl_label} ", bg=badge_color, fg="#ffffff", font=(font_family, 10, "bold"), padx=8, pady=2).pack(side="left", padx=(6, 0))
+            tk.Label(
+                hdr_row, text=f"MỨC {lvl_num}/5:" if not unverified else "CHƯA XÁC THỰC:",
+                bg=c_bg, fg=c_muted, font=(font_family, 9, "bold"),
+            ).pack(side="left")
+            tk.Label(
+                hdr_row, text=f" {lvl_badge_text} ",
+                bg=badge_color, fg="#ffffff", font=(font_family, 10, "bold"), padx=8, pady=2,
+            ).pack(side="left", padx=(6, 8))
+            tk.Label(
+                hdr_row,
+                text=f"Mã: {raw_action}" if not unverified else f"Mã nguồn (chưa xác thực): {raw_action}",
+                bg=c_bg, fg=c_muted if unverified else c_ink, font=(font_family, 9, "bold"),
+            ).pack(side="left")
 
-            act_txt = verdict.get("actionable_text", "")
-            if act_txt:
-                tk.Label(banner_frame, text=act_txt, bg=c_bg, fg=c_ink, font=(font_family, 9), wraplength=720, justify="left").pack(anchor="w", pady=(6, 0))
+            headline_lbl = tk.Label(
+                banner_frame, text=summary["headline"], bg=c_bg, fg=c_ink,
+                font=(font_family, 9, "bold"), wraplength=740, justify="left", anchor="w",
+            )
+            headline_lbl.pack(anchor="w", fill="x", pady=(6, 0))
+            wrap_labels.append(headline_lbl)
 
-            # 4 Dòng chỉ dẫn thực dụng trực tiếp (Bỏ hoàn toàn thuật ngữ học thuật trừu tượng)
-            guide_frame = tk.Frame(tab1, bg=c_bg, padx=14, pady=10)
-            guide_frame.pack(fill="x", pady=(0, 10))
+            # Tally chip strip + wrapped coverage row (separate row avoids starving coverage text at 150% DPI)
+            tally_row = tk.Frame(tab1, bg=c_surface)
+            tally_row.pack(fill="x", pady=(0, 4))
+            chip_specs = [
+                (f"Đạt: {tally['PASS']}", c_ok),
+                (f"Đạt chậm: {tally['PASS_SLOW']}", c_accent),
+                (f"Cảnh báo: {tally['WARN']}", c_warn),
+                (f"Lỗi: {tally['FAIL']}", c_bad),
+                (f"Vi phạm: {tally['CRITICAL_FAIL']}", "#dc2626"),
+                (f"Chưa KL: {tally['INCONCLUSIVE']}", c_muted),
+            ]
+            for chip_txt, chip_fg in chip_specs:
+                tk.Label(
+                    tally_row, text=f" {chip_txt} ", bg=c_bg, fg=chip_fg,
+                    font=(font_family, 8, "bold"), padx=6, pady=2,
+                ).pack(side="left", padx=(0, 5))
+            cov_lbl = tk.Label(
+                tab1, text=summary["coverage_text"], bg=c_surface, fg=c_muted,
+                font=(font_family, 8), wraplength=740, justify="left", anchor="w",
+            )
+            cov_lbl.pack(anchor="w", fill="x", pady=(0, 4))
+            wrap_labels.append(cov_lbl)
 
-            tk.Label(guide_frame, text="CHỈ DẪN VẬN HÀNH THỰC TẾ", bg=c_bg, fg=c_muted, font=(font_family, 8, "bold")).pack(anchor="w", pady=(0, 8))
+            # Metrics summary strip (formatted 2 decimals + wrapped)
+            metrics_lbl = tk.Label(
+                tab1, text=metrics["numeric_line"], bg=c_surface, fg=c_muted,
+                font=(font_family, 8, "bold"), wraplength=740, justify="left", anchor="w",
+            )
+            metrics_lbl.pack(anchor="w", fill="x", pady=(0, 6))
+            wrap_labels.append(metrics_lbl)
 
-            # Dòng 1: Dùng để làm gì
-            r1 = tk.Frame(guide_frame, bg=c_bg)
-            r1.pack(fill="x", pady=3)
-            tk.Label(r1, text="✔ Dùng cho việc gì:", bg=c_bg, fg=c_ok, font=(font_family, 9, "bold"), width=22, anchor="w").pack(side="left")
-            tk.Label(r1, text=verdict.get("use_for", "Chưa xác định"), bg=c_bg, fg=c_ink, font=(font_family, 9), wraplength=550, justify="left").pack(side="left", fill="x", expand=True)
+            # Pin limitation disclaimer below exec guide so it never gets sliced mid-glyph at 820x600@1.5
+            disclaimer_lbl = tk.Label(
+                tab1, text=f"Lưu ý giới hạn: {summary['disclaimer']}", bg=c_surface, fg=c_muted,
+                font=(font_family, 8), wraplength=740, justify="left", anchor="w",
+            )
+            disclaimer_lbl.pack(side="bottom", anchor="w", fill="x", pady=(6, 0))
+            wrap_labels.append(disclaimer_lbl)
 
-            # Dòng 2: Không nên dùng cho
-            r2 = tk.Frame(guide_frame, bg=c_bg)
-            r2.pack(fill="x", pady=3)
-            tk.Label(r2, text="✖ KHÔNG nên dùng cho:", bg=c_bg, fg=c_bad, font=(font_family, 9, "bold"), width=22, anchor="w").pack(side="left")
-            tk.Label(r2, text=verdict.get("avoid_for", "Chưa xác định"), bg=c_bg, fg=c_ink, font=(font_family, 9), wraplength=550, justify="left").pack(side="left", fill="x", expand=True)
+            # Scrollable executive guide
+            sb_cls = getattr(ttk, "Scrollbar", None)
+            exec_wrap = tk.Frame(tab1, bg=c_bg)
+            exec_wrap.pack(fill="both", expand=True)
+            exec_txt = tk.Text(
+                exec_wrap, width=1, height=9, bg=c_bg, fg=c_ink,
+                font=(font_family, 9), wrap="word", relief="flat", padx=10, pady=8,
+            )
+            if sb_cls is not None:
+                exec_scroll = sb_cls(exec_wrap, orient="vertical", command=exec_txt.yview, **vsb_style_kw)
+                exec_txt.configure(yscrollcommand=exec_scroll.set)
+                exec_txt.pack(side="left", fill="both", expand=True)
+                exec_scroll.pack(side="right", fill="y")
+            else:
+                exec_txt.pack(fill="both", expand=True)
 
-            # Dòng 3: Nguyên nhân kỹ thuật
-            r3 = tk.Frame(guide_frame, bg=c_bg)
-            r3.pack(fill="x", pady=3)
-            tk.Label(r3, text="ℹ Vì sao / Nguyên nhân:", bg=c_bg, fg=c_accent, font=(font_family, 9, "bold"), width=22, anchor="w").pack(side="left")
-            tk.Label(r3, text=verdict.get("why", "Chưa có dữ liệu"), bg=c_bg, fg=c_muted, font=(font_family, 9), wraplength=550, justify="left").pack(side="left", fill="x", expand=True)
+            exec_lines_ui = [
+                "CHỈ DẪN VẬN HÀNH THỰC TẾ",
+                f"✔ Dùng cho việc gì: {summary['use_for']}",
+                f"{summary['avoid_prefix']}: {summary['avoid_for']}",
+                f"ℹ Nguyên nhân & hạng mục liên quan: {summary['why']}",
+                f"➤ Bước tiếp theo: {summary['next_step']}",
+                "",
+                f"Trạng thái vận hành: {metrics['operational_text']}",
+            ]
+            if view["diagnostics"]:
+                exec_lines_ui.append("Chẩn đoán trình bày: " + " | ".join(view["diagnostics"]))
+            exec_body = "\n".join(exec_lines_ui)
+            exec_txt.insert("1.0", _presentation_sanitize_text(exec_body, api_key=api_key))
+            exec_txt.configure(state="disabled")
 
-            # Dòng 4: Bước tiếp theo đề xuất
-            r4 = tk.Frame(guide_frame, bg=c_bg)
-            r4.pack(fill="x", pady=3)
-            tk.Label(r4, text="➤ Bước tiếp theo:", bg=c_bg, fg=c_ink, font=(font_family, 9, "bold"), width=22, anchor="w").pack(side="left")
-            tk.Label(r4, text=verdict.get("next_step", "Kiểm tra lại"), bg=c_bg, fg=c_ink, font=(font_family, 9), wraplength=550, justify="left").pack(side="left", fill="x", expand=True)
-
-            # Dải tóm tắt kỹ thuật & độ trễ
-            meta_frame = tk.Frame(tab1, bg=c_surface, padx=4, pady=4)
-            meta_frame.pack(fill="x", pady=(4, 0))
-            tprof = verdict.get("timeout_profile") or {}
-            prof_txt = f"Baseline: {tprof.get('baseline_s', 'N/A')}s · Timeout: {tprof.get('t_base', 'N/A')}s (Rescue: {tprof.get('t_rescue', 'N/A')}s)" if tprof else "Profile: Standard"
-            tk.Label(meta_frame, text=f"Chỉ số: {verdict.get('operational_status', 'N/A')} · {prof_txt} · Tổng thời gian: {verdict.get('total_duration_s', 0)}s", bg=c_surface, fg=c_muted, font=(font_family, 8)).pack(anchor="w")
-
-            disclaimer = verdict.get("disclaimer", "")
-            tk.Label(tab1, text=f"Lưu ý: {disclaimer}", bg=c_surface, fg=c_muted, font=(font_family, 8), wraplength=720, justify="left").pack(anchor="w", pady=(8, 0))
-
-            # Tab 2: Chi tiết các bài test kèm Tier
+            # Tab 2: Chi tiết Hạng mục (Master-Detail)
             tab2 = tk.Frame(notebook, bg=c_surface, padx=12, pady=10)
             notebook.add(tab2, text="2. Chi tiết Hạng mục (Tier 0/1/2)")
+            tab2.rowconfigure(0, weight=2)
+            tab2.rowconfigure(1, weight=0)
+            tab2.rowconfigure(2, weight=3)
+            tab2.columnconfigure(0, weight=1)
 
-            cols = ("id", "name", "tier", "risk", "status")
+            cols = ("name", "tier", "risk", "status", "reason")
             tree_wrap = tk.Frame(tab2, bg=c_surface)
-            tree_wrap.pack(fill="both", expand=True)
-            tree = ttk.Treeview(tree_wrap, columns=cols, show="headings", height=8)
-            tree.heading("id", text="Mã")
+            tree_wrap.grid(row=0, column=0, sticky="nsew")
+            tree_wrap.rowconfigure(0, weight=1)
+            tree_wrap.columnconfigure(0, weight=1)
+
+            tree = ttk.Treeview(tree_wrap, columns=cols, show="headings", height=5, **tree_style_kw)
             tree.heading("name", text="Hạng mục kiểm định")
-            tree.heading("tier", text="Phân tầng")
-            tree.heading("risk", text="Mức rủi ro")
+            tree.heading("tier", text="Tầng")
+            tree.heading("risk", text="Rủi ro")
             tree.heading("status", text="Kết quả")
-            tree.column("id", width=130)
-            tree.column("name", width=340)
-            tree.column("tier", width=80, anchor="center")
-            tree.column("risk", width=90, anchor="center")
-            tree.column("status", width=110, anchor="center")
+            tree.heading("reason", text="Mã / Tín hiệu")
+            # Fixed base sum (660 <= min 780 inner width) with stretch on name & reason prevents horizontal overflow
+            tree.column("name", width=185, minwidth=130, stretch=True)
+            tree.column("tier", width=50, minwidth=44, anchor="center", stretch=False)
+            tree.column("risk", width=62, minwidth=54, anchor="center", stretch=False)
+            tree.column("status", width=118, minwidth=95, anchor="center", stretch=False)
+            tree.column("reason", width=245, minwidth=140, stretch=True)
             tree.tag_configure("st_pass", foreground=c_ok)
             tree.tag_configure("st_fail", foreground=c_bad)
             tree.tag_configure("st_inc", foreground=c_warn)
-            sb_cls = getattr(ttk, "Scrollbar", None)
             if sb_cls is not None:
-                t2_scroll = sb_cls(tree_wrap, orient="vertical", command=tree.yview)
-                tree.configure(yscrollcommand=t2_scroll.set)
-                tree.pack(side="left", fill="both", expand=True)
-                t2_scroll.pack(side="right", fill="y")
+                t2_vscroll = sb_cls(tree_wrap, orient="vertical", command=tree.yview, **vsb_style_kw)
+                t2_hscroll = sb_cls(tree_wrap, orient="horizontal", command=tree.xview, **hsb_style_kw)
+                tree.configure(yscrollcommand=t2_vscroll.set, xscrollcommand=t2_hscroll.set)
+                tree.grid(row=0, column=0, sticky="nsew")
+                t2_vscroll.grid(row=0, column=1, sticky="ns")
+                t2_hscroll.grid(row=1, column=0, sticky="ew")
             else:
                 tree.pack(fill="both", expand=True)
 
-            for r in results:
-                t_val = f"Tier {r.get('tier', 1)}"
-                st_str = str(r.get("status") or "")
-                st_tag = "st_pass" if st_str == "PASS" else ("st_fail" if st_str == "FAIL" else "st_inc")
-                tree.insert("", "end", values=(r.get("id"), r.get("name"), t_val, r.get("risk_level"), st_str), tags=(st_tag,))
+            rows_by_iid: Dict[str, Dict[str, Any]] = {}
+            default_row: Optional[Dict[str, Any]] = None
+            for r in rows:
+                iid = r["iid"]
+                rows_by_iid[iid] = r
+                st_str = r["status"]
+                if st_str in ("PASS", "PASS_SLOW"):
+                    st_tag = "st_pass" if st_str == "PASS" else "st_inc"
+                elif st_str in ("FAIL", "CRITICAL_FAIL"):
+                    st_tag = "st_fail"
+                else:
+                    st_tag = "st_inc"
+                rc = r["reason_code"]
+                signal_col = rc or ("OK" if st_str in ("PASS", "PASS_SLOW") else "—")
+                tree.insert(
+                    "",
+                    "end",
+                    iid=iid,
+                    values=(r["name"], r["tier_text"], r["risk_level"], r["status_text"], signal_col),
+                    tags=(st_tag,),
+                )
+                if default_row is None and r["valid_row"] and st_str not in ("PASS", "PASS_SLOW"):
+                    default_row = r
+            if default_row is None and rows:
+                default_row = rows[0]
 
-            # Tab 3: Bằng chứng thô & Raw Logs
+            t2_bar = tk.Frame(tab2, bg=c_surface, pady=6)
+            t2_bar.grid(row=1, column=0, sticky="ew")
+            tk.Label(
+                t2_bar,
+                text="Chi tiết phát hiện & bằng chứng đã làm sạch (chọn dòng hoặc bấm nút):",
+                bg=c_surface, fg=c_muted, font=(font_family, 8, "bold"),
+            ).pack(side="left")
+
+            insp_wrap = tk.Frame(tab2, bg=c_bg)
+            insp_wrap.grid(row=2, column=0, sticky="nsew")
+            insp_txt = tk.Text(
+                insp_wrap, width=1, height=8, bg=c_bg, fg=c_ink,
+                font=(font_family, 9), wrap="word", relief="flat", padx=10, pady=8,
+            )
+            if sb_cls is not None:
+                insp_scroll = sb_cls(insp_wrap, orient="vertical", command=insp_txt.yview, **vsb_style_kw)
+                insp_txt.configure(yscrollcommand=insp_scroll.set)
+                insp_txt.pack(side="left", fill="both", expand=True)
+                insp_scroll.pack(side="right", fill="y")
+            else:
+                insp_txt.pack(fill="both", expand=True)
+
+            current_iid = default_row["iid"] if default_row is not None else None
+
+            def _write_inspector(text_value: str) -> None:
+                if closed.is_set():
+                    return
+                safe_detail = _presentation_sanitize_text(text_value, api_key=api_key)
+                insp_txt.configure(state="normal")
+                insp_txt.delete("1.0", "end")
+                insp_txt.insert("1.0", safe_detail)
+                insp_txt.configure(state="disabled")
+
+            def show_selected_row(_event=None) -> None:
+                nonlocal current_iid
+                if closed.is_set():
+                    return
+                sel = tree.selection()
+                chosen: Optional[Dict[str, Any]] = None
+                if isinstance(sel, (list, tuple)) and sel:
+                    cand = sel[0]
+                    if isinstance(cand, str) and cand in rows_by_iid:
+                        chosen = rows_by_iid[cand]
+                        current_iid = cand
+                if chosen is None and current_iid is not None and current_iid in rows_by_iid:
+                    chosen = rows_by_iid[current_iid]
+                if chosen is None:
+                    chosen = default_row
+                _write_inspector(chosen["detail_text"] if chosen is not None else "Chưa có dữ liệu probe.")
+
+            tk.Button(
+                t2_bar, text="Xem chi tiết", command=show_selected_row,
+                bg=c_btn, fg=c_accent, relief="flat", font=(font_family, 9), padx=10, pady=3,
+            ).pack(side="right")
+            tree.bind("<<TreeviewSelect>>", show_selected_row, add="+")
+
+            # Populate inspector directly on render without calling tree.selection()
+            if default_row is not None:
+                _write_inspector(default_row["detail_text"])
+                try:
+                    tree.selection_set(default_row["iid"])
+                except Exception:
+                    pass
+            else:
+                _write_inspector("Chưa có dữ liệu probe.")
+
+            # Tab 3: Báo cáo tổng hợp & JSON (Redacted)
             tab3 = tk.Frame(notebook, bg=c_surface, padx=12, pady=10)
-            notebook.add(tab3, text="3. Bằng chứng thô (Redacted)")
+            notebook.add(tab3, text="3. Báo cáo tổng hợp & JSON")
+
+            t3_bar = tk.Frame(tab3, bg=c_surface, pady=4)
+            t3_bar.pack(fill="x", side="top", pady=(0, 6))
+            tcl_err = getattr(tk, "TclError", Exception)
+
+            def copy_report() -> None:
+                nonlocal copying_clipboard
+                if closed.is_set() or copying_clipboard:
+                    return
+                cur_view = view_holder.get("view")
+                if not isinstance(cur_view, dict):
+                    return
+                copying_clipboard = True
+                try:
+                    safe_exec = _presentation_sanitize_text(cur_view["executive_text"], api_key=api_key)
+                    safe_payload = safe_exec + "\n\n" + cur_view["json_text"]
+                    win.clipboard_clear()
+                    win.clipboard_append(safe_payload)
+                    if not closed.is_set():
+                        copy_status_lbl.configure(text="Đã sao chép báo cáo đã làm sạch.", fg=c_ok)
+                except tcl_err:
+                    if not closed.is_set():
+                        copy_status_lbl.configure(text="Không thể sao chép báo cáo", fg=c_bad)
+                except Exception:
+                    if not closed.is_set():
+                        copy_status_lbl.configure(text="Không thể sao chép báo cáo", fg=c_bad)
+                finally:
+                    copying_clipboard = False
+
+            tk.Button(
+                t3_bar, text="Sao chép báo cáo", command=copy_report,
+                bg=c_btn, fg=c_accent, relief="flat", font=(font_family, 9), padx=12, pady=4,
+            ).pack(side="right", padx=(8, 0))
+            copy_status_lbl = tk.Label(
+                t3_bar,
+                text="Đã che [REDACTED] / cắt [OMITTED:LIMIT] ở tầng trình bày.",
+                bg=c_surface, fg=c_muted, font=(font_family, 8),
+                wraplength=420, justify="left", anchor="w",
+            )
+            copy_status_lbl.pack(side="left", fill="x", expand=True)
+
+            def _safe_t3_wrap(event=None):
+                if closed.is_set():
+                    return
+                w = getattr(event, "width", None)
+                if isinstance(w, bool) or not isinstance(w, (int, float)) or not math.isfinite(w) or w <= 260:
+                    return
+                try:
+                    copy_status_lbl.configure(wraplength=max(220, int(w) - 210))
+                except Exception:
+                    pass
+
+            t3_bar.bind("<Configure>", _safe_t3_wrap, add="+")
 
             raw_wrap = tk.Frame(tab3, bg=c_bg)
             raw_wrap.pack(fill="both", expand=True)
-            raw_txt = tk.Text(raw_wrap, bg=c_bg, fg=c_ink, font=("Consolas", 9), relief="flat", padx=8, pady=8)
+            raw_txt = tk.Text(raw_wrap, name="t3_raw", width=1, bg=c_bg, fg=c_ink, font=("Consolas", 9), wrap="word", relief="flat", padx=8, pady=8)
             if sb_cls is not None:
-                raw_scroll = sb_cls(raw_wrap, orient="vertical", command=raw_txt.yview)
+                raw_scroll = sb_cls(raw_wrap, orient="vertical", command=raw_txt.yview, **vsb_style_kw)
                 raw_txt.configure(yscrollcommand=raw_scroll.set)
                 raw_txt.pack(side="left", fill="both", expand=True)
                 raw_scroll.pack(side="right", fill="y")
             else:
                 raw_txt.pack(fill="both", expand=True)
-            raw_content = json.dumps(report, indent=2, ensure_ascii=False)
-            raw_txt.insert("1.0", raw_content)
+            raw_txt.insert("1.0", _presentation_sanitize_text(view["executive_text"], api_key=api_key) + "\n\n" + view["json_text"])
             raw_txt.configure(state="disabled")
 
-            # Footer
-            footer = tk.Frame(win, bg=c_surface, padx=16, pady=10)
-            footer.pack(fill="x", side="bottom")
-
             saved_path = report.get("saved_report_file")
-            if saved_path:
+            if saved_path and not open_dir_added:
+                open_dir_added = True
+                footer_err_lbl = tk.Label(footer_left, text="", bg=c_surface, fg=c_bad, font=(font_family, 8))
+
                 def open_dir():
                     import subprocess
-                    subprocess.Popen(["explorer", f"/select,{saved_path}"])
-                tk.Button(footer, text="Mở thư mục báo cáo", command=open_dir, bg=c_btn, fg=c_ink, relief="flat", font=(font_family, 9), padx=10, pady=4).pack(side="left")
+                    try:
+                        subprocess.Popen(["explorer", f"/select,{saved_path}"])
+                    except Exception as ex:
+                        if not closed.is_set():
+                            footer_err_lbl.configure(text=f"Không mở được thư mục: {type(ex).__name__}")
+                            if not footer_err_lbl.winfo_ismapped():
+                                footer_err_lbl.pack(side="right", padx=(8, 0))
 
-            tk.Button(footer, text="Đóng", command=close_dialog, bg=c_btn, fg=c_accent, relief="flat", font=(font_family, 9), padx=14, pady=4).pack(side="right")
+                tk.Button(
+                    footer_left, text="Mở thư mục báo cáo", command=open_dir,
+                    bg=c_btn, fg=c_ink, relief="flat", font=(font_family, 9), padx=10, pady=4,
+                ).pack(side="left")
+            view_holder["view"] = view
         except Exception as ex:
+            try:
+                prog_frame.pack_forget()
+                notebook_frame.pack(fill="both", expand=True)
+            except Exception:
+                pass
             err_box = tk.Label(notebook_frame, text=f"REPORT_RENDER_FAILED: {type(ex).__name__}", bg=c_surface, fg=c_bad, font=(font_family, 10))
             err_box.pack(padx=20, pady=20)
 
