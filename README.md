@@ -132,7 +132,7 @@ Hoặc trên Command Prompt (CMD):
 # Chạy từ thư mục gốc repository:
 & "$env:LOCALAPPDATA\Programs\Python\Python311\pythonw.exe" monitor\openviking-monitor.pyw
 ```
-*(Lưu ý: Khởi chạy từ repo vẫn sử dụng dữ liệu cấu hình live tại `%USERPROFILE%\.openviking\`. Cơ chế Win32 Mutex trong ứng dụng sẽ tự động kích hoạt cửa sổ hiện có nếu Monitor đang chạy nền).*
+*(Lưu ý: Khởi chạy từ repo vẫn sử dụng dữ liệu cấu hình live tại `%USERPROFILE%\.openviking\`. Cơ chế Win32 Mutex trong ứng dụng sẽ tự động kích hoạt cửa sổ hiện có nếu Monitor đang chạy nền. Nếu chưa có Monitor nào chạy, việc mở từ repo sẽ cập nhật lối tắt Desktop/Start Menu trỏ về tệp mã nguồn repo thay vì thư mục live; đồng thời tiến trình này nằm ngoài phạm vi phát hiện của `scripts/monitor_sync.py deploy`).*
 
 ### Vận hành & Phục hồi (Ops Runbooks):
 - [Disaster Recovery Runbook](docs/ops/recovery-runbook.md): Phục hồi `monitor/monitor.json` (`backups/monitor-state/<sha256>/`), `ov.conf` (`ov.conf-before-*`), xử lý `.REJECTED[-N].json`, siết ACL cũ bằng `scripts/retrofit_ov_conf_backup_acl.py` (`--plan-file`), và rollback mã nguồn qua `scripts/monitor_sync.py`.
