@@ -4,6 +4,14 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 
 ## [Unreleased]
 
+### Watch Panel Model Combobox & Async Fetch Refresh
+- Upgraded the test model field in "Thêm/Sửa key theo dõi" from a plain Entry to a `ttk.Combobox` (`state='normal'`), allowing both dropdown selection and free-form typing.
+- Added a dedicated "Lấy list" refresh button calling `list_chat_models` asynchronously in a daemon worker thread, with main-thread polling and window lifetime safety.
+- Prepopulated the Combobox with known models from cache (`model_lists`) and active sources upon opening the dialog.
+- Secured credentials during fetch: requires base URL and non-empty key, rejects attempts to use DPAPI-locked placeholders, guards against stale inputs if base/key changes mid-fetch, and redacts raw error messages.
+- Key-hashed cache keys via `model_cache_key` ensure raw secrets are never written into `model_lists` or `monitor.json`.
+- Updated test suites `test_watch_dialogs.py` and `test_watch_transfer.py`; verified 79/79 PASS on full test runner.
+
 ### Provider Safety Audit Presentation Layer & 3-Tab Dialog
 - Separated presentation modeling into a pure `build_audit_report_view()` contract with zero mutations to `_sanitize_report()`, `evaluate_v31_decision()`, or raw cache parity.
 - Implemented `_presentation_sanitize_text()` with fail-closed bearer masking, JSON embed inspection preserving numeric parameters (e.g. `max_tokens: 2048`), key collision protection, and 1 MiB truncation via `[OMITTED:LIMIT]`.

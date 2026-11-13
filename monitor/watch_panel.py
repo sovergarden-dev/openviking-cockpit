@@ -1,20 +1,23 @@
 """Independent, bounded credential watchlist. All persistence stays in monitor.json."""
 import copy
+import threading
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from conf_gate import model_cache_key
 from watch_keys import MAX_WATCHES, WatchBatch, apply_watch_result, upsert_watch
 
 
 class WatchPanel(tk.Frame):
-    def __init__(self, parent, *, state, save, probe, emit, status, sources, colors, font, style_dialog=None):
+    def __init__(self, parent, *, state, save, probe, emit, status, sources, colors, font, style_dialog=None, list_models=None):
         self.colors, self.font = colors, font
         super().__init__(parent, name='watch_panel', bg=colors['surface'],
                          highlightbackground=colors['line'], highlightthickness=1)
         self.state, self.save, self.probe = state, save, probe
         self.emit, self.status, self.sources = emit, status, sources
         self.style_dialog = style_dialog
+        self.list_models = list_models
         self.last_error = ''
         self.batch = WatchBatch()
         self.closed = False
@@ -315,13 +318,112 @@ class WatchPanel(tk.Frame):
         win.grab_set()
         win.bind('<Escape>', lambda _: win.destroy())
         fields = {}
+        model_box = None
         for name, label in (('alias', 'Tên gợi nhớ'), ('model', 'Model dùng để thử'),
                             ('api_base', 'Base URL (kết thúc bằng /v1)'), ('api_key', 'API key')):
             tk.Label(win, text=label, bg=self.colors['surface'], fg=self.colors['muted'],
                      font=(self.font, 9), anchor='w').pack(fill='x', padx=16, pady=(9, 3))
             fields[name] = tk.StringVar(value=initial.get(name) or '')
-            ttk.Entry(win, name='watch_' + name, textvariable=fields[name], width=52,
-                      show='•' if name == 'api_key' else '').pack(fill='x', padx=16)
+            if name == 'model':
+                model_row = tk.Frame(win, bg=self.colors['surface'])
+                model_row.pack(fill='x', padx=16)
+                model_box = ttk.Combobox(model_row, name='watch_model', textvariable=fields['model'],
+                                         style='Ov.TCombobox', state='normal')
+                model_box.pack(side='left', fill='x', expand=True, ipady=2)
+                initial_models = []
+                curr_model = (initial.get('model') or '').strip()
+                if curr_model:
+                    initial_models.append(curr_model)
+                init_base = (initial.get('api_base') or '').strip()
+                init_key = (initial.get('api_key') or '').strip()
+                if init_base and init_key:
+                    init_ck = model_cache_key(init_base, init_key)
+                    cached_ids = (self.state.get('model_lists') or {}).get(init_ck) or []
+                    for mid in cached_ids:
+                        if mid and mid not in initial_models:
+                            initial_models.append(str(mid))
+                for _, s_item in self.sources():
+                    sm = (s_item.get('model') or '').strip()
+                    if sm and sm not in initial_models:
+                        initial_models.append(sm)
+                model_box['values'] = tuple(initial_models)
+                model_box.configure(height=min(8, max(4, len(initial_models))))
+
+                def fetch_models():
+                    base = fields['api_base'].get().strip()
+                    key = fields['api_key'].get().strip()
+                    if not base:
+                        error.set('Thiếu Base URL để lấy danh sách model.')
+                        return
+                    if not key:
+                        error.set('Thiếu API key (hoặc key bị khóa DPAPI). Hãy nhập key để lấy danh sách.')
+                        return
+                    error.set('Đang lấy danh sách model…')
+                    refresh_btn.configure(state='disabled')
+                    box = {}
+                    deadline = time.monotonic() + 25.0
+
+                    def work():
+                        try:
+                            if callable(self.list_models):
+                                res = self.list_models(base, key)
+                            else:
+                                res = {'ok': False, 'ids': [], 'text': 'Chưa kết nối list_models'}
+                        except Exception:
+                            res = {'ok': False, 'ids': [], 'text': 'Lỗi kết nối tới endpoint'}
+                        box['res'] = res
+
+                    def poll():
+                        try:
+                            if not win.winfo_exists() or getattr(self, 'closed', False):
+                                return
+                        except Exception:
+                            return
+                        if 'res' not in box:
+                            if time.monotonic() > deadline:
+                                refresh_btn.configure(state='normal')
+                                error.set('Hết thời gian lấy danh sách model')
+                                return
+                            win.after(40, poll)
+                            return
+                        refresh_btn.configure(state='normal')
+                        current_base = fields['api_base'].get().strip()
+                        current_key = fields['api_key'].get().strip()
+                        is_stale = (current_base != base or current_key != key)
+                        res = box.get('res') or {}
+                        ids = res.get('ids') or []
+                        if ids:
+                            cache_k = model_cache_key(base, key)
+                            updated = dict(self.state.get('model_lists') or {}, **{cache_k: list(ids)})
+                            self.state['model_lists'] = updated
+                            if callable(self.save):
+                                try:
+                                    self.save(dict(self.state, model_lists=updated))
+                                except Exception:
+                                    self.status('Không lưu được cache model_lists')
+                            if is_stale:
+                                error.set('Base URL hoặc API key đã đổi trong khi tải; bấm Lấy list lại')
+                                return
+                            current_val = fields['model'].get().strip()
+                            combo_vals = list(ids)
+                            if current_val and current_val not in combo_vals:
+                                combo_vals.insert(0, current_val)
+                            model_box['values'] = tuple(combo_vals)
+                            model_box.configure(height=min(8, max(4, len(combo_vals))))
+                            error.set(f"Đã lấy {len(ids)} model · chọn trong danh sách sổ xuống")
+                        else:
+                            if is_stale:
+                                error.set('Base URL hoặc API key đã đổi trong khi tải; bấm Lấy list lại')
+                            else:
+                                error.set(res.get('text') or 'Không lấy được danh sách model')
+
+                    threading.Thread(target=work, daemon=True).start()
+                    win.after(40, poll)
+
+                refresh_btn = self.button(model_row, 'Lấy list', fetch_models, right=True)
+            else:
+                ttk.Entry(win, name='watch_' + name, textvariable=fields[name], width=52,
+                          show='•' if name == 'api_key' else '').pack(fill='x', padx=16)
         error = tk.StringVar(value='Key được mã hóa DPAPI. Không kế thừa key từ endpoint khác.')
         tk.Label(win, textvariable=error, bg=self.colors['surface'], fg=self.colors['warn'],
                  font=(self.font, 8), wraplength=440, justify='left').pack(fill='x', padx=16, pady=10)

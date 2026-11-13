@@ -3479,6 +3479,7 @@ def run_gui(start_hidden: bool) -> None:
         colors=dict(surface=C_SURFACE, line=C_LINE, accent=C_ACCENT, muted=C_MUTED,
                     ink=C_INK, btn=C_BTN, hover=C_BTN_HOVER, ok=C_OK, bad=C_BAD, warn=C_WARN), font=FONT,
         style_dialog=apply_dark_titlebar,
+        list_models=list_chat_models,
     )
     watch_panel.pack(fill="both", expand=True, pady=(0, 2))
 

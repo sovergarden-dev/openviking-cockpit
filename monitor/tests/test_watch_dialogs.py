@@ -59,6 +59,21 @@ try:
     root.update()
     editor = next(w for w in walk(root) if w.winfo_class() == 'Toplevel')
     model = next(w for w in walk(editor) if w.winfo_name() == 'watch_model')
+    assert model.winfo_class() == 'TCombobox', 'watch_model must be a Combobox for dropdown model selection'
+
+    # Test "Lấy list" refresh button with mock list_models
+    refresh_btn = next(w for w in walk(editor) if w.winfo_class() == 'Button' and w.cget('text') == 'Lấy list')
+    panel.list_models = lambda b, k: {'ok': True, 'ids': ['ac/zaicoding_glm-5.3', 'qwen/qwen3-72b'], 'text': '2 model'}
+    refresh_btn.invoke()
+    import time
+    for _ in range(50):
+        root.update()
+        if 'ac/zaicoding_glm-5.3' in list(model['values']):
+            break
+        time.sleep(0.02)
+    assert 'ac/zaicoding_glm-5.3' in list(model['values']), f'fetched models not populated in Combobox: {model["values"]}'
+    assert 'qwen/qwen3-72b' in list(model['values']), f'fetched models not populated in Combobox: {model["values"]}'
+
     model.delete(0, 'end')
     next(w for w in walk(editor) if w.winfo_class() == 'Button' and w.cget('text') == 'Lưu').invoke()
     assert any('Thiếu model dùng để thử' in text for text in label_texts(editor)), 'editor lacks specific inline error'

@@ -53,7 +53,8 @@ def loop(root, *args):
         root.update()
         assert book.index(book.select()) == 0, 'transfer did not reveal watch editor'
         editor = next(w for w in walk(root) if w.winfo_class() == 'Toplevel')
-        fields = {w.winfo_name(): w for w in walk(editor) if w.winfo_class() == 'TEntry'}
+        fields = {w.winfo_name(): w for w in walk(editor) if w.winfo_class() in ('TEntry', 'TCombobox')}
+        assert fields['watch_model'].winfo_class() == 'TCombobox', 'watch_model must be a Combobox'
         assert fields['watch_model'].get() == source['model']
         assert fields['watch_api_key'].get() == 'synthetic-transfer'
         assert fields['watch_api_key'].cget('show') == '•'
