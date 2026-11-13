@@ -129,6 +129,27 @@ class DeploymentSafetyTests(unittest.TestCase):
                     module.apply_plan(module.make_plan(source,dest),base/'backups')
             self.assertFalse((base/'backups').exists())
 
+    def test_running_source_monitor_blocks_before_backup(self):
+        from unittest.mock import patch
+        module=self.load_sync()
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as directory:
+            base=Path(directory);source,dest=self.fixture(base,module)
+            with patch.object(module,'running_monitors',return_value=[{'CommandLine':'pythonw.exe "'+str(source/'openviking-monitor.pyw')+'"'}]):
+                with self.assertRaisesRegex(RuntimeError,'still running'):
+                    module.apply_plan(module.make_plan(source,dest),base/'backups')
+            self.assertFalse((base/'backups').exists())
+
+    def test_unrelated_pythonw_does_not_block(self):
+        from unittest.mock import patch
+        module=self.load_sync()
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as directory:
+            base=Path(directory);source,dest=self.fixture(base,module)
+            plan = module.make_plan(source,dest)
+            with patch.object(module,'running_monitors',return_value=[{'CommandLine':'pythonw.exe "C:/other/unrelated.pyw"'}]):
+                receipt = module.apply_plan(plan,base/'backups')
+            self.assertEqual(receipt['status'],'applied')
+            self.assertTrue((base/'backups').exists())
+
 
 if __name__ == '__main__':
     unittest.main()

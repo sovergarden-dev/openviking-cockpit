@@ -119,7 +119,7 @@ $env:PYTHONPATH = ""
 `monitor_sync.py` synchronizes only Monitor application code (`CORE_FILES` + `monitor/tests/*.py`) between the repository and `%USERPROFILE%\.openviking\monitor\`. It never reads or writes `ov.conf` or `monitor.json`, and `docs/` / `scripts/` are **not** part of the sync manifest.
 
 - **Default is plan-only:** Run `deploy` or `pull` without `--apply` to inspect SHA-256 differences first (`pull` refuses a dirty repository `monitor/` tree).
-- **GUI guard:** `deploy --apply` runs `assert_monitor_stopped()` before staging and again before publishing; close Monitor GUI first, then re-run `scripts/monitor_sync.py deploy --apply`.
+- **GUI guard:** `deploy --apply` runs `assert_monitor_stopped()` against both the target live directory and the repository source directory before staging and again before publishing; close all Monitor GUI instances first, then re-run `scripts/monitor_sync.py deploy --apply`.
 - **Relaunch Monitor GUI after deploy:** Always launch using the canonical Python 3.11 path to prevent Windows PATH from resolving to a virtualenv lacking Tkinter:
   ```powershell
   Start-Process -FilePath "$env:LOCALAPPDATA\Programs\Python\Python311\pythonw.exe" -ArgumentList "`"$env:USERPROFILE\.openviking\monitor\openviking-monitor.pyw`"" -WorkingDirectory "$env:USERPROFILE\.openviking"

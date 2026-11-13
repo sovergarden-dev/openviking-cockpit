@@ -1920,26 +1920,48 @@ def set_shortcut_app_id(path: Path) -> None:
             ole32.CoUninitialize()
 
 
+def is_live_installation() -> bool:
+    try:
+        live = (APP_DIR / "openviking-monitor.pyw").resolve()
+        running = Path(__file__).resolve()
+        return os.path.normcase(str(running)) == os.path.normcase(str(live))
+    except Exception:
+        return False
+
+
 def make_shortcut(path: Path, args: str, window_style: int = 1) -> bool:
     pythonw = PYTHONW if PYTHONW.exists() else Path(sys.executable)
     if pythonw.name.lower() == "python.exe":
         cand = pythonw.with_name("pythonw.exe")
         if cand.exists():
             pythonw = cand
-    script = Path(__file__).resolve()
+    running = Path(__file__).resolve()
+    live = (APP_DIR / "openviking-monitor.pyw").resolve()
+    if is_live_installation():
+        script = running
+    elif live.is_file():
+        script = live
+    else:
+        script = running
     path.parent.mkdir(parents=True, exist_ok=True)
     target = str(pythonw)
     work = str(script.parent)
-    icon = shortcut_icon().replace("'", "''")
+    icon = shortcut_icon()
+    escaped_path = str(path).replace("'", "''")
+    escaped_target = target.replace("'", "''")
+    escaped_script = str(script).replace("'", "''")
+    escaped_args = str(args).replace("'", "''")
+    escaped_work = work.replace("'", "''")
+    escaped_icon = icon.replace("'", "''")
     ps = f"""
 $ErrorActionPreference = 'Stop'
 $ws = New-Object -ComObject WScript.Shell
-$s = $ws.CreateShortcut('{str(path).replace("'", "''")}')
-$s.TargetPath = '{target.replace("'", "''")}'
-$s.Arguments = '"{script}" {args}'.Trim()
-$s.WorkingDirectory = '{work.replace("'", "''")}'
+$s = $ws.CreateShortcut('{escaped_path}')
+$s.TargetPath = '{escaped_target}'
+$s.Arguments = '"{escaped_script}" {escaped_args}'.Trim()
+$s.WorkingDirectory = '{escaped_work}'
 $s.WindowStyle = {int(window_style)}
-$s.IconLocation = '{icon},0'
+$s.IconLocation = '{escaped_icon},0'
 $s.Description = 'OpenViking Monitor'
 $s.Save()
 """
@@ -5167,9 +5189,12 @@ def main() -> int:
             return 0
         activate_existing()
         return 0
-    make_shortcut(start_menu_shortcut_path(), "")
-    make_shortcut(APP_DIR / "OpenViking Monitor.lnk", "")
-    make_shortcut(desktop_shortcut_path(), "")
+    if is_live_installation():
+        make_shortcut(start_menu_shortcut_path(), "")
+        make_shortcut(APP_DIR / "OpenViking Monitor.lnk", "")
+        make_shortcut(desktop_shortcut_path(), "")
+    else:
+        log_app("shortcut refresh skipped: running outside APP_DIR")
     try:
         run_gui(start_hidden="--tray" in args)
     except Exception as e:

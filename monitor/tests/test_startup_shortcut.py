@@ -58,4 +58,27 @@ code, text = glob['run_hidden'](['powershell', '-NoProfile', '-Command',
 assert code == 0 and '--tray' in text, 'scratch startup shortcut has wrong arguments'
 assert glob['set_run_with_windows'](False) is True
 assert not path.exists()
+
+# Verify is_live_installation helper handles both live and external locations
+is_live = glob.get('is_live_installation')
+assert callable(is_live), 'is_live_installation helper missing'
+# In test environment, running script is in repo (ROOT), outside isolated APP_DIR
+assert is_live() is False, 'running from repo must not be recognized as live install'
+with patch.dict(glob, {'APP_DIR': ROOT}):
+    assert glob['is_live_installation']() is True, 'matching APP_DIR must be recognized as live install'
+
+# Verify make_shortcut handles paths with apostrophes and reads back valid arguments
+apo_path = path.with_name("synthetic-o'connor-test.lnk")
+assert 'ov-suite-' in str(apo_path), 'apostrophe test path must be in isolated sandbox'
+try:
+    assert glob['make_shortcut'](apo_path, "--tray", window_style=7) is True, 'apostrophe shortcut path failed'
+    assert apo_path.is_file() and apo_path.stat().st_size > 0
+    apo_quoted = str(apo_path).replace("'", "''")
+    code, text = glob['run_hidden'](['powershell', '-NoProfile', '-Command',
+                                   f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{apo_quoted}'); "
+                                   "$s.Arguments"], timeout=15)
+    assert code == 0 and '--tray' in text, 'apostrophe shortcut readback failed'
+finally:
+    apo_path.unlink(missing_ok=True)
+
 print('STARTUP_SHORTCUT_OK')

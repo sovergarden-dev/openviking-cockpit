@@ -16,6 +16,11 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 - Indexed `docs/ops/recovery-runbook.md`, `docs/ops/windowless-startup.md`, and repo-only `scripts/` utilities in `README.md`.
 - Standardized canonical Python 3.11 launcher paths and process verification in `README.md` and `docs/ops/recovery-runbook.md`; updated suite count to 79 (74 Monitor + 5 scripts).
 
+### Shortcut & Deploy Guard Hardening
+- Locked shortcut creation in `monitor/openviking-monitor.pyw` via `is_live_installation()`: skips Start Menu/Desktop/APP_DIR shortcut overwriting when running outside `APP_DIR` (e.g. from git repo), and targets the live script if invoked from external instances. Escaped all interpolated values in PowerShell shortcut generation scripts against apostrophes.
+- Hardened `scripts/monitor_sync.py` to assert that no Monitor instances are running from either the target live directory or the source repository directory before staging/publishing.
+- Added regression tests in `test_startup_shortcut.py` and `test_deploy_safety.py`; full suite runner verified 79/79 PASS.
+
 ### Separate Reserve Tab and Independent Key Watchlist
 - Moved DỰ TRỮ into its own full-width tab. Its controls use two rows and keep manual probes/audits; the previous slot Auto loop is removed.
 - Added THEO DÕI to Tổng quan: at most 7 independent credentials, no search, global Auto switch plus per-row Auto. Both default off; migration does not reuse the old Auto setting.

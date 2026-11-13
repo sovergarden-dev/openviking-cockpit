@@ -95,11 +95,23 @@ def running_monitors() -> list[dict]:
     return value if isinstance(value, list) else [value]
 
 
-def assert_monitor_stopped(directory: Path) -> None:
-    needle = str(directory/'openviking-monitor.pyw').replace('\\','/').casefold()
+def assert_monitor_stopped(directory: Path, *, source_directory: Path | None = None) -> None:
+    needles = set()
+    for d in (directory, source_directory):
+        if d is not None:
+            p = d / 'openviking-monitor.pyw'
+            needles.add(str(p).replace('\\', '/').casefold())
+            try:
+                needles.add(str(p.resolve()).replace('\\', '/').casefold())
+            except OSError:
+                pass
     for process in running_monitors():
-        if needle in (process.get('CommandLine') or '').replace('\\','/').casefold():
-            raise RuntimeError('Monitor still running; close only that GUI before applying source changes')
+        cmd = (process.get('CommandLine') or '').replace('\\', '/').casefold()
+        for needle in needles:
+            if needle in cmd:
+                pid = process.get('ProcessId')
+                pid_info = f" (PID {pid})" if pid else ""
+                raise RuntimeError(f"Monitor still running{pid_info}; close only that GUI before applying source changes")
 
 
 def apply_plan(plan: dict, backup_root: Path, *, check_running: bool = True) -> dict:
@@ -110,7 +122,7 @@ def apply_plan(plan: dict, backup_root: Path, *, check_running: bool = True) -> 
     if not plan['changed_count']:
         return {'status':'unchanged', 'changed_count':0, 'files':plan['files']}
     if check_running:
-        assert_monitor_stopped(dest)
+        assert_monitor_stopped(dest, source_directory=source)
     backup = backup_root / ('monitor-sync-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:8])
     backup.mkdir(parents=True, exist_ok=False)
     changed = [row for row in plan['files'] if row['changed']]
@@ -130,7 +142,7 @@ def apply_plan(plan: dict, backup_root: Path, *, check_running: bool = True) -> 
     applied=[]
     try:
         if check_running:
-            assert_monitor_stopped(dest)
+            assert_monitor_stopped(dest, source_directory=source)
         for row in changed:
             name=row['path'];target=safe_child(dest,name)
             if sha(target) != row['destination_sha256']:
