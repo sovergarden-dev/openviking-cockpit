@@ -1,0 +1,20 @@
+{
+  "status": "ok",
+  "result": {
+    "name": "vikingdb",
+    "is_healthy": true,
+    "has_errors": false,
+    "status": {
+      "backend": "local",
+      "collection": "context",
+      "index": "default",
+      "dimension": 1024,
+      "vector_count": 1000,
+      "distance_metric": "cosine",
+      "pure_dense_score_scale": "cosine_affine_0_1"
+    }
+  },
+  "error": null,
+  "telemetry": null,
+  "profile": null
+}

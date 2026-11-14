@@ -14,6 +14,8 @@ ov.conf
 app.log
 
 # Temporary and local state
+target/
+cockpit_rs/target/
 monitor/monitor.json
 monitor/app.log
 monitor/security_reports/

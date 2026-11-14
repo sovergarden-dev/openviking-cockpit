@@ -1,0 +1,50 @@
+{
+  "": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenViking Runtime VLM Active Response",
+  "type": "object",
+  "required": [
+    "status",
+    "result"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok"
+      ]
+    },
+    "result": {
+      "type": "object",
+      "required": [
+        "kind",
+        "index",
+        "n",
+        "manual_hold"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "n": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "manual_hold": {
+          "type": "boolean"
+        },
+        "credential_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

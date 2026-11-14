@@ -1,0 +1,45 @@
+{
+  "": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenViking Long-Term Memory Stats Response",
+  "type": "object",
+  "required": [
+    "status",
+    "result"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok"
+      ]
+    },
+    "result": {
+      "type": "object",
+      "required": [
+        "total_memories",
+        "by_category"
+      ],
+      "properties": {
+        "total_memories": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "by_category": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "hotness_distribution": {
+          "type": "object"
+        },
+        "staleness": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

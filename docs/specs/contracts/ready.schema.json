@@ -1,0 +1,40 @@
+{
+  "": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenViking Ready Response",
+  "type": "object",
+  "required": [
+    "status",
+    "checks"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "ready",
+        "not_ready"
+      ]
+    },
+    "checks": {
+      "type": "object",
+      "properties": {
+        "agfs": {
+          "type": "object"
+        },
+        "vectordb": {
+          "type": "string"
+        },
+        "embedding": {
+          "type": "string"
+        },
+        "ollama": {
+          "type": "string"
+        },
+        "api_key_manager": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

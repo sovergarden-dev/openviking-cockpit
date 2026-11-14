@@ -1,0 +1,68 @@
+{
+  "": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenViking VikingDB Observer Telemetry Response",
+  "type": "object",
+  "required": [
+    "status",
+    "result"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok"
+      ]
+    },
+    "result": {
+      "type": "object",
+      "required": [
+        "name",
+        "is_healthy",
+        "status"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "is_healthy": {
+          "type": "boolean"
+        },
+        "has_errors": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "object",
+          "required": [
+            "backend",
+            "dimension",
+            "vector_count"
+          ],
+          "properties": {
+            "backend": {
+              "type": "string"
+            },
+            "collection": {
+              "type": "string"
+            },
+            "index": {
+              "type": "string"
+            },
+            "dimension": {
+              "type": "integer"
+            },
+            "vector_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "distance_metric": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

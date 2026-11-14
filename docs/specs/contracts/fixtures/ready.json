@@ -1,0 +1,15 @@
+{
+  "status": "ready",
+  "checks": {
+    "agfs": {
+      "status": "ok",
+      "checks": {
+        "filesystem": "ok"
+      }
+    },
+    "vectordb": "ok",
+    "api_key_manager": "not_configured",
+    "embedding": "ok",
+    "ollama": "ok"
+  }
+}

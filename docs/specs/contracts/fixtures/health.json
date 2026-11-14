@@ -1,0 +1,6 @@
+{
+  "status": "ok",
+  "healthy": true,
+  "version": "0.5.3",
+  "auth_mode": "dev"
+}

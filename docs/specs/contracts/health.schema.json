@@ -1,0 +1,28 @@
+{
+  "": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenViking Health Response",
+  "type": "object",
+  "required": [
+    "status",
+    "healthy",
+    "version"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok"
+      ]
+    },
+    "healthy": {
+      "type": "boolean"
+    },
+    "version": {
+      "type": "string"
+    },
+    "auth_mode": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

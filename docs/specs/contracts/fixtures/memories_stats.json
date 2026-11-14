@@ -1,0 +1,29 @@
+{
+  "status": "ok",
+  "result": {
+    "total_memories": 1000,
+    "by_category": {
+      "profile": 0,
+      "preferences": 100,
+      "entities": 100,
+      "events": 800,
+      "cases": 0,
+      "patterns": 0,
+      "tools": 0,
+      "skills": 0
+    },
+    "hotness_distribution": {
+      "cold": 800,
+      "warm": 200,
+      "hot": 0
+    },
+    "staleness": {
+      "not_accessed_7d": 800,
+      "not_accessed_30d": 600,
+      "oldest_memory_age_days": 30.0
+    }
+  },
+  "error": null,
+  "telemetry": null,
+  "profile": null
+}

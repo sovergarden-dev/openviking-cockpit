@@ -1,0 +1,18 @@
+{
+  "status": "ok",
+  "result": {
+    "kind": "MultiCredentialVLM",
+    "index": 0,
+    "n": 4,
+    "manual_hold": false,
+    "credential_ids": [
+      "primary-0",
+      "backup-1",
+      "backup-2",
+      "backup-3"
+    ]
+  },
+  "error": null,
+  "telemetry": null,
+  "profile": null
+}
