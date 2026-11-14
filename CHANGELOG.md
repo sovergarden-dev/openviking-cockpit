@@ -4,6 +4,13 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 
 ## [Unreleased]
 
+### Watch Panel Security Audit & Auto-Disable Toast Notifications
+- Added "Kiểm định" action button to the THEO DÕI watchlist toolbar (`watch_panel.py`), allowing direct execution of the 3-tab security audit modal for any selected watch key.
+- Integrated `audit_watch_key` in `openviking-monitor.pyw` reusing `launch_security_audit_ui`, checking 24h cached reports with user confirmation, and updating audit badge status on completion without modifying `ov.conf` or slots.
+- Implemented `notify_watch_auto_disabled` notification hook in `openviking-monitor.pyw` connected to `watch_panel.py`, dispatching a Windows tray balloon notification when a watch key is auto-disabled due to two consecutive HTTP 401/403 authentication failures.
+- Guarded `on_auto_disabled` callback execution against `sys.stderr is None` under windowless `pythonw.exe`.
+- Extended `test_watch_transfer.py` with test assertions for "Kiểm định" button invocation and the consecutive 401/403 auto-disable notification hook; reconciled `test_monitor_recovery_integration.py` for the 2 new audit launch sites (total 6 sites); verified 79/79 PASS on full test runner.
+
 ### Failover Slot Override & Streamlined Audit Presentation
 - Allowed failover slots (index >= 1) to be saved conditionally without forcing automated inline audits (`allow_unaudited=True`), respecting manual operator testing while strictly requiring audit for primary slot 0.
 - Clarified HTTP 400 parameter and endpoint rejection labels in reason code mappings (`_REASON_CODE_VI` and `_REASON_CODE_SHORT_VI`).

@@ -1,5 +1,6 @@
 """Independent, bounded credential watchlist. All persistence stays in monitor.json."""
 import copy
+import sys
 import threading
 import time
 import tkinter as tk
@@ -10,7 +11,8 @@ from watch_keys import MAX_WATCHES, WatchBatch, apply_watch_result, upsert_watch
 
 
 class WatchPanel(tk.Frame):
-    def __init__(self, parent, *, state, save, probe, emit, status, sources, colors, font, style_dialog=None, list_models=None, to_spare=None):
+    def __init__(self, parent, *, state, save, probe, emit, status, sources, colors, font,
+                 style_dialog=None, list_models=None, to_spare=None, to_audit=None, on_auto_disabled=None):
         self.colors, self.font = colors, font
         super().__init__(parent, name='watch_panel', bg=colors['surface'],
                          highlightbackground=colors['line'], highlightthickness=1)
@@ -19,6 +21,8 @@ class WatchPanel(tk.Frame):
         self.style_dialog = style_dialog
         self.list_models = list_models
         self.to_spare = to_spare
+        self.to_audit = to_audit
+        self.on_auto_disabled = on_auto_disabled
         self.last_error = ''
         self.batch = WatchBatch()
         self.closed = False
@@ -94,6 +98,7 @@ class WatchPanel(tk.Frame):
         self.button(actions, '→ Dự trữ', self.copy_to_spare)
         self.button(actions, 'Sửa', self.edit)
         self.button(actions, 'Thử ngay', self.probe_selected)
+        self.button(actions, 'Kiểm định', self.audit_selected)
         self.button(actions, 'Bật/tắt Auto', self.toggle_auto)
         self.button(actions, 'Dừng', self.cancel)
         self.button(actions, 'Xóa', self.delete, right=True)
@@ -140,6 +145,25 @@ class WatchPanel(tk.Frame):
                 self.status('Không thể lưu vào Dự trữ')
         else:
             self.status('Chưa kết nối chức năng lưu vào Dự trữ.')
+
+    def audit_selected(self):
+        record = self.selected()
+        if not record:
+            self.status('Chọn một dòng trong THEO DÕI để kiểm định.')
+            return
+        if record.get('_dpapi_locked') or not (record.get('api_key') or '').strip():
+            self.status('Key đang bị khóa DPAPI hoặc trống. Hãy mở khóa hoặc nhập key trước khi kiểm định.')
+            return
+        if not (record.get('model') or '').strip() or not (record.get('api_base') or '').strip():
+            self.status('Dòng được chọn thiếu model hoặc Base URL.')
+            return
+        if callable(self.to_audit):
+            try:
+                self.to_audit(record)
+            except Exception:
+                self.status('Không thể khởi động kiểm định')
+        else:
+            self.status('Chưa kết nối chức năng kiểm định.')
 
     def persist(self, records, **settings):
         candidate = dict(self.state, watch_keys=records, **settings)
@@ -307,8 +331,21 @@ class WatchPanel(tk.Frame):
                 self.show_detail()
                 old = record.get('last_probe') or {}
                 latest = updated['last_probe']
-                if (old.get('ok'), old.get('text')) != (latest['ok'], latest['text']):
+                status_changed = (old.get('ok'), old.get('text')) != (latest['ok'], latest['text'])
+                auto_disabled_now = not record.get('auto_disabled_reason') and bool(updated.get('auto_disabled_reason'))
+                if status_changed or auto_disabled_now:
                     self.status('THEO DÕI · ' + latest['text'] + (' · Auto tự tắt' if updated['auto_disabled_reason'] else ''))
+                if auto_disabled_now:
+                    cb = getattr(self, 'on_auto_disabled', None)
+                    if callable(cb):
+                        try:
+                            cb(updated)
+                        except Exception as exc:
+                            if getattr(sys, 'stderr', None):
+                                try:
+                                    sys.stderr.write(f'watch_panel on_auto_disabled error: {exc}\n')
+                                except Exception:
+                                    pass
             break
 
     def cancel(self):

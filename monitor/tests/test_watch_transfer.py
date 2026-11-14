@@ -147,6 +147,38 @@ def loop(root, *args):
         assert saved_spare['api_key'].startswith('dpapi:'), 'transferred spare was not encrypted with DPAPI on disk'
         assert 'synthetic-watch-key' not in json.dumps(persisted_spares), 'raw key leaked in monitor.json'
 
+        # Verify Kiểm định button exists and invokes audit hook
+        audit_calls = []
+        panel.to_audit = lambda rec: audit_calls.append(rec)
+        panel.tree.selection_set(watch_id)
+        audit_btn = next(w for w in walk(panel) if w.winfo_class() == 'Button' and w.cget('text') == 'Kiểm định')
+        audit_btn.invoke()
+        root.update()
+        assert len(audit_calls) == 1 and audit_calls[0]['id'] == watch_id, f'audit button failed: {audit_calls}'
+
+        # Verify on_auto_disabled hook on 2 consecutive 401/403
+        disabled_calls = []
+        panel.on_auto_disabled = lambda rec: disabled_calls.append(rec)
+        # Ensure watch_key has auto_enabled=True and auth_fail_streak=1
+        rec = next(item for item in panel.items() if item['id'] == watch_id)
+        panel.store(dict(rec, auto_enabled=True, auth_fail_streak=1))
+        root.update()
+        # Fire two consecutive 401 results to reach the streak threshold of 2
+        panel.batch.stop.clear()
+        run_id = panel.batch.run_id
+        curr_rec = next(item for item in panel.items() if item['id'] == watch_id)
+        # 1st 401
+        panel.event(('watch_result', run_id, watch_id, curr_rec['rev'], {'ok': False, 'http_code': 401, 'text': '401 Unauthorized', 'ms': 100}))
+        root.update()
+        assert len(disabled_calls) == 0, 'should not disable on 1st 401'
+        # 2nd 401
+        curr_rec = next(item for item in panel.items() if item['id'] == watch_id)
+        panel.event(('watch_result', run_id, watch_id, curr_rec['rev'], {'ok': False, 'http_code': 401, 'text': '401 Unauthorized', 'ms': 100}))
+        root.update()
+        assert len(disabled_calls) == 1, f'expected 1 on_auto_disabled call, got {len(disabled_calls)}'
+        assert disabled_calls[0]['id'] == watch_id
+        assert disabled_calls[0]['auto_disabled_reason']
+
         assert not calls, 'copy sent a provider request'
         assert hashlib.sha256(conf.read_bytes()).digest() == conf_before
         assert not errors, [type(e[1]).__name__ for e in errors]

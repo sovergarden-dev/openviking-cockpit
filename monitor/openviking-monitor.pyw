@@ -3509,6 +3509,57 @@ def run_gui(start_hidden: bool) -> None:
 
         threading.Thread(target=work, daemon=True).start()
 
+    def audit_watch_key(record: dict):
+        if not record:
+            foot_var.set("Chọn dòng theo dõi để kiểm định")
+            return
+        model = (record.get("model") or "").strip()
+        base = (record.get("api_base") or "").strip()
+        key = (record.get("api_key") or "").strip()
+        if not model or not base:
+            foot_var.set("Model hoặc endpoint rỗng")
+            return
+        if not key or record.get("_dpapi_locked"):
+            foot_var.set("Key bị khóa DPAPI hoặc rỗng; hãy mở khóa trước khi kiểm định")
+            return
+
+        from provider_security_auditor import get_latest_audit_report, launch_security_audit_ui
+        rep = get_latest_audit_report(base, model, max_age_s=86400.0, api_key=key)
+        colors_dict = dict(bg=C_BG, surface=C_SURFACE, ink=C_INK, muted=C_MUTED, line=C_LINE, accent=C_ACCENT, ok=C_OK, bad=C_BAD, warn=C_WARN, btn=C_BTN)
+        if rep and rep.get("saved_report_file"):
+            age_m = int(rep.get("report_age_s", 0) // 60)
+            v = rep.get("verdict", {})
+            lvl = v.get("verdict_level", "?")
+            lbl = v.get("level_label", "")
+            msg = (
+                f"Model {model} đã có kết quả kiểm định {age_m} phút trước:\n\n"
+                f"• Đánh giá: MỨC {lvl} — {lbl}\n"
+                f"• Dùng cho: {v.get('use_for')}\n"
+                f"• Không nên dùng: {v.get('avoid_for')}\n\n"
+                "Bấm 'Yes' để mở xem lại báo cáo này.\n"
+                "Bấm 'No' để chạy bài kiểm định mới từ đầu."
+            )
+            ans = messagebox.askyesno(f"Báo cáo có sẵn — {model}", msg, parent=root)
+            if ans:
+                launch_security_audit_ui(root, base, key, model, colors=colors_dict, font_family=FONT, cached_report=rep, on_complete=audit_completed)
+                return
+
+        launch_security_audit_ui(root, base, key, model, colors=colors_dict, font_family=FONT, on_complete=audit_completed)
+
+    def notify_watch_auto_disabled(record: dict):
+        alias = (record.get("alias") or "").strip() or "Key theo dõi"
+        model = short_model((record.get("model") or "").strip())
+        title = "THEO DÕI: Key bị tắt Auto"
+        body = f"Key '{alias}' ({model}) đã tự tắt Auto do lỗi 401/403 liên tiếp 2 lần."
+        try:
+            ensure_tray()
+            if tray and tray.added:
+                tray.balloon(title, body)
+        except Exception as exc:
+            log_app(f"notify_watch_auto_disabled tray error: {exc}")
+        log_app(f"watch auto_disabled: {alias} ({model})")
+        foot_var.set(f"THEO DÕI: Key '{alias}' đã tự tắt Auto do lỗi xác thực 401/403")
+
     from watch_panel import WatchPanel
     watch_panel = WatchPanel(
         overview_content, state=state, save=save_runtime_state, probe=probe_model, emit=uiq.put,
@@ -3520,6 +3571,8 @@ def run_gui(start_hidden: bool) -> None:
         style_dialog=apply_dark_titlebar,
         list_models=list_chat_models,
         to_spare=save_watch_to_spare,
+        to_audit=audit_watch_key,
+        on_auto_disabled=notify_watch_auto_disabled,
     )
     watch_panel.pack(fill="both", expand=True, pady=(0, 2))
 

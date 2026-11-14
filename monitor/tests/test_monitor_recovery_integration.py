@@ -304,7 +304,8 @@ class BadgeRecoveryTests(unittest.TestCase):
 
     def test_all_audit_launches_refresh_on_completion_and_reader_has_key(self):
         launches = [n for n in ast.walk(TREE) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'launch_security_audit_ui']
-        self.assertEqual(4, len(launches))
+        # 6 call sites: 2 in spare (cached/fresh), 2 in watch (cached/fresh), 1 inline gate (close_on_complete), 1 slot edit
+        self.assertEqual(6, len(launches))
         for launch in launches:
             self.assertIn('on_complete', [kw.arg for kw in launch.keywords])
         inline = [node for node in launches if any(kw.arg == 'close_on_complete' for kw in node.keywords)]
