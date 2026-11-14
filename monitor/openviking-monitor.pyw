@@ -3144,6 +3144,41 @@ def run_gui(start_hidden: bool) -> None:
         foot_var.set(f"Đã lưu dự trữ {short_model(model)}")
         return True
 
+    def save_watch_to_spare(record: dict) -> tuple[bool, str]:
+        model = (record.get("model") or "").strip()
+        api_base = (record.get("api_base") or "").strip()
+        api_key = (record.get("api_key") or "").strip()
+        if not model or not api_base or not api_key:
+            return False, "Bản ghi thiếu model, endpoint hoặc key"
+        if record.get("_dpapi_locked"):
+            return False, "Key đang bị khóa DPAPI; không thể lưu vào Dự trữ"
+        raw_alias = (record.get("alias") or "").strip()
+        clean_alias = "".join(ch for ch in raw_alias if ch.isprintable())[:40]
+        note_suffix = f" (từ theo dõi {clean_alias})" if clean_alias else " (từ theo dõi)"
+        incoming = {
+            "model": model,
+            "api_base": api_base,
+            "api_key": api_key,
+            "note": ((record.get("note") or "").strip() + note_suffix).strip(),
+        }
+        current_spares = spare_items()
+        fp = spare_fingerprint(incoming)
+        existing = next((s for s in current_spares if spare_fingerprint(s) == fp), None)
+        if existing:
+            if (existing.get("api_key") or "").strip() == api_key:
+                return False, f"Model '{model}' với endpoint này đã có trong Dự trữ"
+            if not messagebox.askyesno("Cập nhật Dự trữ",
+                                       f"Model '{model}' đã có trong Dự trữ với key khác.\nBạn có muốn ghi đè?",
+                                       parent=root):
+                return False, "Đã hủy lưu vào Dự trữ"
+        try:
+            new_spares = upsert_spare(current_spares, incoming)
+        except ValueError as err:
+            return False, str(err)
+        if persist_spares(new_spares, select=len(new_spares) - 1):
+            return True, f"Đã lưu '{short_model(model)}' vào Dự trữ"
+        return False, "Không thể lưu vào Dự trữ"
+
     spare_batch = {"busy": False, "stop": threading.Event()}
 
     def probe_selected_spare():
@@ -3480,6 +3515,7 @@ def run_gui(start_hidden: bool) -> None:
                     ink=C_INK, btn=C_BTN, hover=C_BTN_HOVER, ok=C_OK, bad=C_BAD, warn=C_WARN), font=FONT,
         style_dialog=apply_dark_titlebar,
         list_models=list_chat_models,
+        to_spare=save_watch_to_spare,
     )
     watch_panel.pack(fill="both", expand=True, pady=(0, 2))
 

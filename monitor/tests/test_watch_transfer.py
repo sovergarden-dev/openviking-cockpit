@@ -89,6 +89,64 @@ def loop(root, *args):
             root.update()
             assert not any(w.winfo_class() == 'Toplevel' for w in walk(root)), 'unreadable source was accepted'
             assert not state['watch_keys']
+
+        # Test bidirectional transfer: Watch -> Reserve (→ Dự trữ)
+        status_msgs = []
+        orig_status = panel.status
+        panel.status = lambda m: (status_msgs.append(m), orig_status(m))
+
+        watch_rec = dict(model='fixture/watch-model', api_base='https://watch.invalid/v1',
+                         api_key='synthetic-watch-key', alias='Omega')
+        assert panel.store(watch_rec), f"store failed: {panel.last_error}"
+        root.update()
+        watch_id = next(item['id'] for item in state['watch_keys'] if item.get('model') == 'fixture/watch-model')
+        panel.tree.selection_set(watch_id)
+        to_spare_btn = next(w for w in walk(panel) if w.winfo_class() == 'Button' and w.cget('text') == '→ Dự trữ')
+        to_spare_btn.invoke()
+        root.update()
+        new_spare = next((s for s in state['spare_models'] if s.get('model') == 'fixture/watch-model'), None)
+        assert new_spare is not None, 'watch record was not saved to spare_models'
+        assert new_spare['api_key'] == 'synthetic-watch-key'
+        assert '(từ theo dõi Omega)' in new_spare['note']
+        assert not set(new_spare) & {'id', 'rev', 'last_probe', 'fail_streak', 'cooldown_until', '_enc', '_sha', 'auto_enabled'}
+        assert any('Đã lưu' in m and 'watch-model' in m for m in status_msgs), f"success message missing: {status_msgs}"
+
+        # Duplicate detection: saving again with same key must report duplicate and not increase count
+        spares_count_before = len(state['spare_models'])
+        to_spare_btn = next(w for w in walk(panel) if w.winfo_class() == 'Button' and w.cget('text') == '→ Dự trữ')
+        to_spare_btn.invoke()
+        root.update()
+        assert len(state['spare_models']) == spares_count_before, 'duplicate watch-to-spare was created'
+        assert any('đã có trong Dự trữ' in m for m in status_msgs), f'unexpected duplicate status: {status_msgs}'
+
+        # Independence: mutating watch key must not affect the saved spare
+        assert panel.store(dict(id=watch_id, model='fixture/watch-model', api_base='https://watch.invalid/v1',
+                                api_key='synthetic-mutated-watch-key', alias='Omega'))
+        root.update()
+        re_fetched_spare = next(s for s in state['spare_models'] if s.get('model') == 'fixture/watch-model')
+        assert re_fetched_spare['api_key'] == 'synthetic-watch-key', 'mutating watch key leaked into spare'
+
+        # DPAPI-locked / empty key rejection
+        locked_id = 'watch-locked-fixture'
+        locked_rec = dict(id=locked_id, model='fixture/locked-model', api_base='https://watch.invalid/v1',
+                          api_key='', _dpapi_locked=True, alias='Locked', auto_enabled=False)
+        state['watch_keys'].append(locked_rec)
+        panel.render()
+        panel.tree.selection_set(locked_id)
+        to_spare_btn = next(w for w in walk(panel) if w.winfo_class() == 'Button' and w.cget('text') == '→ Dự trữ')
+        to_spare_btn.invoke()
+        root.update()
+        assert not any(s.get('model') == 'fixture/locked-model' for s in state['spare_models']), 'locked watch key was saved to spares'
+        assert any('khóa DPAPI' in m for m in status_msgs), f'unexpected locked status: {status_msgs}'
+        state['watch_keys'].pop()
+        panel.render()
+
+        # Verify disk encryption of the newly transferred spare
+        persisted_spares = json.loads((conf.parent / 'monitor/monitor.json').read_text(encoding='utf-8'))['spare_models']
+        saved_spare = next(s for s in persisted_spares if s.get('model') == 'fixture/watch-model')
+        assert saved_spare['api_key'].startswith('dpapi:'), 'transferred spare was not encrypted with DPAPI on disk'
+        assert 'synthetic-watch-key' not in json.dumps(persisted_spares), 'raw key leaked in monitor.json'
+
         assert not calls, 'copy sent a provider request'
         assert hashlib.sha256(conf.read_bytes()).digest() == conf_before
         assert not errors, [type(e[1]).__name__ for e in errors]

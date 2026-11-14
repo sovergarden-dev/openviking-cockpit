@@ -10,7 +10,7 @@ from watch_keys import MAX_WATCHES, WatchBatch, apply_watch_result, upsert_watch
 
 
 class WatchPanel(tk.Frame):
-    def __init__(self, parent, *, state, save, probe, emit, status, sources, colors, font, style_dialog=None, list_models=None):
+    def __init__(self, parent, *, state, save, probe, emit, status, sources, colors, font, style_dialog=None, list_models=None, to_spare=None):
         self.colors, self.font = colors, font
         super().__init__(parent, name='watch_panel', bg=colors['surface'],
                          highlightbackground=colors['line'], highlightthickness=1)
@@ -18,6 +18,7 @@ class WatchPanel(tk.Frame):
         self.emit, self.status, self.sources = emit, status, sources
         self.style_dialog = style_dialog
         self.list_models = list_models
+        self.to_spare = to_spare
         self.last_error = ''
         self.batch = WatchBatch()
         self.closed = False
@@ -90,6 +91,7 @@ class WatchPanel(tk.Frame):
         table.pack(fill='both', expand=True, padx=8)
         self.add_btn = self.button(actions, '+ Thêm key', lambda: self.edit(new=True), accent=True)
         self.button(actions, 'Lấy từ…', self.pick_source)
+        self.button(actions, '→ Dự trữ', self.copy_to_spare)
         self.button(actions, 'Sửa', self.edit)
         self.button(actions, 'Thử ngay', self.probe_selected)
         self.button(actions, 'Bật/tắt Auto', self.toggle_auto)
@@ -118,6 +120,26 @@ class WatchPanel(tk.Frame):
     def selected(self):
         selected = self.tree.selection()
         return next((item for item in self.items() if selected and item['id'] == selected[0]), None)
+
+    def copy_to_spare(self):
+        record = self.selected()
+        if not record:
+            self.status('Chọn một dòng trong THEO DÕI để lưu vào Dự trữ.')
+            return
+        if record.get('_dpapi_locked') or not (record.get('api_key') or '').strip():
+            self.status('Key đang bị khóa DPAPI hoặc trống. Hãy mở khóa hoặc nhập key trước khi lưu.')
+            return
+        if not (record.get('model') or '').strip():
+            self.status('Dòng được chọn thiếu tên model.')
+            return
+        if callable(self.to_spare):
+            try:
+                _, msg = self.to_spare(record)
+                self.status(msg)
+            except Exception:
+                self.status('Không thể lưu vào Dự trữ')
+        else:
+            self.status('Chưa kết nối chức năng lưu vào Dự trữ.')
 
     def persist(self, records, **settings):
         candidate = dict(self.state, watch_keys=records, **settings)
