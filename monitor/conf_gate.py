@@ -292,7 +292,7 @@ def classify_conf_targets(before: dict, after: dict) -> dict:
     }
 
 
-def validate_conf_targets(before: dict, after: dict) -> list[dict]:
+def validate_conf_targets(before: dict, after: dict, *, allow_unaudited: bool = False) -> list[dict]:
     """Validate targets against admission criteria.
 
     Raises:
@@ -305,6 +305,7 @@ def validate_conf_targets(before: dict, after: dict) -> list[dict]:
     plan = classify_conf_targets(before, after)
     blocked = plan.get("blocked") or []
     needs_audit = plan.get("needs_audit") or []
+    conditional = list(plan.get("conditional") or [])
 
     if blocked:
         first = blocked[0]
@@ -315,27 +316,39 @@ def validate_conf_targets(before: dict, after: dict) -> list[dict]:
         )
 
     if needs_audit:
-        first = needs_audit[0]
-        slot_name = "slot chính" if first["slot"] == 0 else f"slot dự phòng {first['slot']}"
-        targets = [{k: v for k, v in item.items() if k != "api_key"} for item in needs_audit]
-        vlm_after = after.get("vlm") or {}
-        all_credentials = effective_credentials(after)
-        audit_credentials = []
-        for target in needs_audit:
-            index = target["slot"]
-            item = all_credentials[index]
-            resolved_key = _resolved_key(item.get("api_key"))
-            if not resolved_key:
-                raise ValueError(f"API key thiếu hoặc chưa giải mã được cho slot {index}; chưa ghi ov.conf.")
-            audit_credentials.append({"slot": index, "model": item.get("model"), "api_base": item.get("api_base"), "api_key": resolved_key})
-        err = AuditRequired(
-            f"Chạy kiểm định an toàn trước cho đúng Base URL, model và API key ({slot_name}). Cần báo cáo còn hạn, hợp lệ và cho phép memory; chưa ghi ov.conf.",
-            targets=targets,
-            credentials=audit_credentials,
-        )
-        raise err
+        unaudited_primaries = [t for t in needs_audit if t["slot"] == 0]
+        if allow_unaudited and not unaudited_primaries:
+            for t in needs_audit:
+                conditional.append({
+                    "slot": t["slot"],
+                    "model": t["model"],
+                    "api_base": t["api_base"],
+                    "level": 0,
+                    "why": "Chưa qua kiểm định an toàn (người dùng chủ động tự kiểm sau)",
+                })
+        else:
+            first = unaudited_primaries[0] if unaudited_primaries else needs_audit[0]
+            slot_name = "slot chính" if first["slot"] == 0 else f"slot dự phòng {first['slot']}"
+            targets = [{k: v for k, v in item.items() if k != "api_key"} for item in needs_audit]
+            all_credentials = effective_credentials(after)
+            audit_credentials = []
+            for target in needs_audit:
+                index = target["slot"]
+                if index < 0 or index >= len(all_credentials):
+                    raise ValueError(f"Slot {index} nằm ngoài danh sách cấu hình; chưa ghi ov.conf.")
+                item = all_credentials[index]
+                resolved_key = _resolved_key(item.get("api_key"))
+                if not resolved_key:
+                    raise ValueError(f"API key thiếu hoặc chưa giải mã được cho slot {index}; chưa ghi ov.conf.")
+                audit_credentials.append({"slot": index, "model": item.get("model"), "api_base": item.get("api_base"), "api_key": resolved_key})
+            err = AuditRequired(
+                f"Chạy kiểm định an toàn trước cho đúng Base URL, model và API key ({slot_name}). Cần báo cáo còn hạn, hợp lệ và cho phép memory; chưa ghi ov.conf.",
+                targets=targets,
+                credentials=audit_credentials,
+            )
+            raise err
 
-    return plan.get("conditional") or []
+    return conditional
 
 
 def compute_conf_drift(conf_slots: list[dict], live_vlm: dict | None, live_models: dict | None = None) -> dict:

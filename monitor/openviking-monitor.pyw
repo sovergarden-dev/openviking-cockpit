@@ -1520,6 +1520,7 @@ def write_ov_conf_checked(
     *,
     before: dict | None = None,
     expected_advisories: list[dict] | None = None,
+    allow_unaudited: bool = False,
 ) -> Path:
     """Atomically write only if the config and admission result still match."""
     vlm = raw.get("vlm") or {}
@@ -1540,7 +1541,10 @@ def write_ov_conf_checked(
         if before is not None:
             if _conf_digest(before) != expected_digest:
                 raise RuntimeError("Validated baseline does not match audited configuration")
-            conditional = validate_conf_targets(before, raw)
+            if allow_unaudited:
+                conditional = validate_conf_targets(before, raw, allow_unaudited=True)
+            else:
+                conditional = validate_conf_targets(before, raw)
             if conditional != (expected_advisories or []):
                 raise RuntimeError("Admission result changed during final write check")
         backup = backup_ov_conf(reason)
@@ -1634,9 +1638,9 @@ def credential_identity(item: dict) -> tuple:
     return (item.get("model") or "", model_cache_key(item.get("api_base") or "", item.get("api_key") or ""))
 
 
-def validate_conf_targets(before: dict, after: dict) -> list[dict]:
+def validate_conf_targets(before: dict, after: dict, *, allow_unaudited: bool = False) -> list[dict]:
     """Compatibility adapter for the standalone admission policy."""
-    return _validate_conf_targets_policy(before, after)
+    return _validate_conf_targets_policy(before, after, allow_unaudited=allow_unaudited)
 
 
 
@@ -3952,6 +3956,7 @@ def run_gui(start_hidden: bool) -> None:
         finish_action: str = "save",
         expected_digest: str | None = None,
         allow_inline_audit: bool = True,
+        allow_unaudited: bool = False,
     ) -> bool:
         try:
             raw = json.loads(CONF_PATH.read_text(encoding="utf-8"))
@@ -3960,36 +3965,77 @@ def run_gui(start_hidden: bool) -> None:
                 raise RuntimeError("ov.conf changed during audit; no write was made")
             candidate = mutator(copy.deepcopy(raw))
             try:
-                conditional = validate_conf_targets(raw, candidate)
+                if allow_unaudited:
+                    conditional = validate_conf_targets(raw, candidate, allow_unaudited=True)
+                else:
+                    conditional = validate_conf_targets(raw, candidate)
             except AuditRequired as request:
                 if not allow_inline_audit:
                     raise RuntimeError("A fresh audit is required after revalidation; no write was made")
+                unaudited_primaries = [t for t in request.audit_targets if t.get("slot") == 0]
+                if not unaudited_primaries:
+                    targets_str = ", ".join(short_model(t.get("model") or "") for t in request.audit_targets)
+                    prompt = (
+                        f"Model ({targets_str}) chưa có báo cáo kiểm định an toàn.\n\n"
+                        "Bạn có muốn:\n"
+                        "• Bấm 'Yes' để Chạy kiểm định an toàn ngay.\n"
+                        "• Bấm 'No' để Lưu thẳng vào ov.conf (tự kiểm tra sau).\n"
+                        "• Bấm 'Cancel' để Hủy thao tác."
+                    )
+                    try:
+                        parent = root
+                    except NameError:
+                        parent = None
+                    ans = messagebox.askyesnocancel(WINDOW_TITLE, prompt, parent=parent)
+                    if ans is None:
+                        return False
+                    if ans is False:
+                        return apply_conf_edit(
+                            mutator, note, detail,
+                            finish_action=finish_action,
+                            expected_digest=expected_digest,
+                            allow_inline_audit=False,
+                            allow_unaudited=True,
+                        )
                 start_inline_audit(request, mutator, note, detail, observed_digest, finish_action)
                 return False
             if conditional:
-                lines = "\n".join(
-                    f"• Slot dự phòng {item['slot']}: {short_model(item['model'])} — "
-                    f"MỨC {item['level']} (dùng tạm)\n  {item['why'][:180]}"
-                    for item in conditional
+                def _cond_desc(item):
+                    lvl = "Chưa kiểm định an toàn" if item.get("level") == 0 else f"MỨC {item.get('level', '?')}"
+                    why = (item.get("why") or "")[:180]
+                    return f"• Slot {item.get('slot', '?')}: {short_model(item.get('model') or '')} — {lvl}\n  {why}"
+                lines = "\n".join(_cond_desc(item) for item in conditional)
+                has_unaudited = any(item.get("level") == 0 for item in conditional)
+                header = (
+                    "Có model chưa qua kiểm định an toàn (người dùng tự kiểm tra sau):"
+                    if has_unaudited else
+                    "Model dự phòng chưa đạt chuẩn memory (chỉ MỨC 3 — dùng tạm):"
                 )
                 body = (
-                    "Model dự phòng chưa đạt chuẩn memory (chỉ MỨC 3 — dùng tạm):\n\n"
+                    f"{header}\n\n"
                     f"{lines}\n\n"
-                    "Nó sẽ được dùng cho extraction khi slot chính lỗi, nên chất lượng memory "
-                    "có thể thấp hơn chuẩn.\nVẫn lưu vào ov.conf?"
+                    "Lưu ý: Model dự phòng sẽ được dùng cho extraction khi slot chính gặp sự cố, "
+                    "nên chất lượng hoặc độ an toàn có thể chưa được bảo đảm trước.\n"
+                    "Vẫn lưu cấu hình vào ov.conf?"
                 )
-                if not messagebox.askyesno(WINDOW_TITLE, body, parent=root):
-                    log_app(f"slot edit conditional-admission declined slots={[i['slot'] for i in conditional]}")
+                try:
+                    parent = root
+                except NameError:
+                    parent = None
+                if not messagebox.askyesno(WINDOW_TITLE, body, parent=parent):
+                    log_app(f"slot edit conditional-admission declined slots={[i.get('slot') for i in conditional]}")
                     return False
+            allow_unaudited_save = any(item.get("level") == 0 for item in (conditional or []))
             bak = write_ov_conf_checked(
                 candidate,
                 observed_digest,
                 reason="slot-edit",
                 before=raw,
                 expected_advisories=conditional,
+                allow_unaudited=allow_unaudited_save,
             )
             if conditional:
-                log_app(f"slot edit conditional-admission accepted slots={[i['slot'] for i in conditional]}")
+                log_app(f"slot edit conditional-admission accepted slots={[i.get('slot') for i in conditional]}")
             log_app(f"slot edit backup={bak.name} note={note}")
             return True
         except Exception as e:

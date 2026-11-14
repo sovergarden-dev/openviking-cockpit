@@ -4,6 +4,12 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 
 ## [Unreleased]
 
+### Failover Slot Override & Streamlined Audit Presentation
+- Allowed failover slots (index >= 1) to be saved conditionally without forcing automated inline audits (`allow_unaudited=True`), respecting manual operator testing while strictly requiring audit for primary slot 0.
+- Clarified HTTP 400 parameter and endpoint rejection labels in reason code mappings (`_REASON_CODE_VI` and `_REASON_CODE_SHORT_VI`).
+- Streamlined Tab 1 (Kết luận & Hướng dẫn nhanh) in the security audit dialog, removing verbose technical text walls and keeping deep diagnostic details in Tab 2.
+- Added regression test 18 in `test_conf_target_gate.py`; full suite runner verified 79/79 PASS.
+
 ### Watch Panel Model Combobox & Async Fetch Refresh
 - Upgraded the test model field in "Thêm/Sửa key theo dõi" from a plain Entry to a `ttk.Combobox` (`state='normal'`), allowing both dropdown selection and free-form typing.
 - Added a dedicated "Lấy list" refresh button calling `list_chat_models` asynchronously in a daemon worker thread, with main-thread polling and window lifetime safety.

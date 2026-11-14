@@ -238,4 +238,18 @@ out = validate_conf_targets(shadowed, conf([PRIMARY, restored_top]))
 assert out == [], out
 print("PASS shadowed top-level identity is grandfathered for failover")
 
+# 18. Operator override (allow_unaudited=True) allows un-audited failovers conditionally but strictly blocks primary.
+fresh()
+unaudited_failover = ("un-audited-backup", "https://backup.example.com/v1", "key-backup")
+out = validate_conf_targets(conf([PRIMARY]), conf([PRIMARY, unaudited_failover]), allow_unaudited=True)
+assert len(out) == 1, out
+assert out[0]["slot"] == 1 and out[0]["level"] == 0 and "Chưa qua kiểm định an toàn" in out[0]["why"], out
+try:
+    validate_conf_targets(conf([PRIMARY]), conf([unaudited_failover, PRIMARY]), allow_unaudited=True)
+except AuditRequired as exc:
+    assert "slot chính" in str(exc)
+else:
+    raise AssertionError("allow_unaudited=True must strictly require audit for primary slot 0")
+print("PASS allow_unaudited admits failovers conditionally while primary strictly requires audit")
+
 print("CONF_TARGET_GATE_OK")

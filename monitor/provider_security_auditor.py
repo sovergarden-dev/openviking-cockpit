@@ -1574,7 +1574,7 @@ _REASON_CODE_VI = {
     "TIMEOUT_GATEWAY_SLOW": "Cổng kết nối phản hồi chậm",
     "RATE_LIMITED": "Bị giới hạn tần suất (HTTP 429)",
     "AUTH_OR_POLICY_ERROR": "Lỗi xác thực hoặc chính sách (401/403)",
-    "ADAPTER_CONFIG_UNSUPPORTED": "Cấu hình tham số không được hỗ trợ (400)",
+    "ADAPTER_CONFIG_UNSUPPORTED": "Cấu hình tham số hoặc endpoint không hỗ trợ (400)",
     "SERVER_ERROR": "Lỗi máy chủ phía provider (5xx)",
     "TRANSPORT_ERROR": "Lỗi kết nối mạng / TLS",
     "NETWORK_ERROR": "Lỗi mạng khi truyền tải",
@@ -1606,7 +1606,7 @@ _REASON_CODE_SHORT_VI = {
     "TIMEOUT_GATEWAY_SLOW": "Cổng phản hồi chậm",
     "RATE_LIMITED": "Giới hạn 429",
     "AUTH_OR_POLICY_ERROR": "Lỗi xác thực",
-    "ADAPTER_CONFIG_UNSUPPORTED": "Tham số 400",
+    "ADAPTER_CONFIG_UNSUPPORTED": "Sai API/Tham số 400",
     "SERVER_ERROR": "Lỗi máy chủ 5xx",
     "TRANSPORT_ERROR": "Lỗi mạng/TLS",
     "NETWORK_ERROR": "Lỗi truyền tải",
@@ -2879,15 +2879,12 @@ def launch_security_audit_ui(
 
             exec_lines_ui = [
                 "CHỈ DẪN VẬN HÀNH THỰC TẾ",
-                f"✔ Dùng cho việc gì: {summary['use_for']}",
+                f"✔ Dùng cho: {summary['use_for']}",
                 f"{summary['avoid_prefix']}: {summary['avoid_for']}",
-                f"ℹ Nguyên nhân & hạng mục liên quan: {summary['why']}",
-                f"➤ Bước tiếp theo: {summary['next_step']}",
-                "",
-                f"Trạng thái vận hành: {metrics['operational_text']}",
+                f"➤ Khuyến nghị: {summary['next_step']}",
             ]
             if view["diagnostics"]:
-                exec_lines_ui.append("Chẩn đoán trình bày: " + " | ".join(view["diagnostics"]))
+                exec_lines_ui.append("Chẩn đoán: " + " | ".join(view["diagnostics"]))
             exec_body = "\n".join(exec_lines_ui)
             exec_txt.insert("1.0", _presentation_sanitize_text(exec_body, api_key=api_key))
             exec_txt.configure(state="disabled")
