@@ -13,7 +13,7 @@ use crate::state::{CockpitPaths, CockpitState};
 
 /// Emits a native Win32 tray balloon (`Shell_NotifyIconW` `NIF_INFO`) without raw credentials (`COCKPIT_RUST_SPEC` §4.3).
 #[cfg(windows)]
-pub fn dispatch_tray_balloon(title: &str, body: &str) {
+pub fn dispatch_tray_balloon(title: &str, body: &str) -> bool {
     use std::mem::{size_of, zeroed};
     use std::ptr::null;
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
@@ -65,17 +65,20 @@ pub fn dispatch_tray_balloon(title: &str, body: &str) {
                     copy_wide_bounded(title, &mut nid.szInfoTitle);
                     copy_wide_bounded(body, &mut nid.szInfo);
                     if Shell_NotifyIconW(NIM_MODIFY, &nid) != 0 {
-                        return;
+                        return true;
                     }
                 }
             }
             prev_hwnd = hwnd;
         }
     }
+    false
 }
 
 #[cfg(not(windows))]
-pub fn dispatch_tray_balloon(_title: &str, _body: &str) {}
+pub fn dispatch_tray_balloon(_title: &str, _body: &str) -> bool {
+    false
+}
 
 pub fn dispatch_watch_auto_disabled_balloon(alias: &str, model: &str, status_code: u16) {
     let clean_alias = if alias.trim().is_empty() {
@@ -89,13 +92,20 @@ pub fn dispatch_watch_auto_disabled_balloon(alias: &str, model: &str, status_cod
         model.trim(),
         status_code
     );
-    dispatch_tray_balloon("THEO DÕI: Key bị tắt Auto", &body);
+    let _ = dispatch_tray_balloon("THEO DÕI: Key bị tắt Auto", &body);
 }
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let show_item = MenuItem::with_id(app, "show", "Mở OpenViking Cockpit", true, None::<&str>)?;
+    let test_item = MenuItem::with_id(
+        app,
+        "test_balloon",
+        "Thử thông báo khay",
+        true,
+        None::<&str>,
+    )?;
     let quit_item = MenuItem::with_id(app, "quit", "Thoát", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+    let menu = Menu::with_items(app, &[&show_item, &test_item, &quit_item])?;
 
     let mut builder = TrayIconBuilder::new()
         .menu(&menu)
@@ -106,6 +116,14 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                     let _ = win.show();
                     let _ = win.set_focus();
                 }
+            }
+            "test_balloon" => {
+                tauri::async_runtime::spawn_blocking(|| {
+                    let _ = dispatch_tray_balloon(
+                        "OpenViking Cockpit",
+                        "Thông báo khay hệ thống hoạt động bình thường trên Windows.",
+                    );
+                });
             }
             "quit" => {
                 app.exit(0);
@@ -154,6 +172,29 @@ pub fn run() {
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.hide();
                 }
+            }
+
+            if std::env::args().any(|a| a == "--test-balloon") {
+                let log_path = cockpit_state.paths.ov_home.join("monitor").join("app.log");
+                tauri::async_runtime::spawn_blocking(move || {
+                    std::thread::sleep(Duration::from_millis(600));
+                    let ok = dispatch_tray_balloon(
+                        "OpenViking Cockpit",
+                        "Thông báo khay hệ thống hoạt động bình thường trên Windows.",
+                    );
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)
+                    {
+                        use std::io::Write;
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let _ = writeln!(f, "[{}] tray_test_balloon ok={}", ts, ok);
+                    }
+                });
             }
 
             let handle = app.handle().clone();
