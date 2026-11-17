@@ -2,135 +2,30 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
-## [Unreleased]
+## [1.3.0] - 2026-11-18
 
-### Rust / Tauri V2 Standalone Cockpit (`cockpit_rs`)
-- Implemented the standalone Rust & Tauri V2 desktop host (`cockpit_rs/` and `cockpit_rs/src-tauri/`) alongside the legacy Python/Tkinter `monitor/` baseline, compiling to a portable Windows executable (`openviking-cockpit.exe`, ~9.7 MiB private working set idle) with single-instance Win32 mutex, minimize-to-tray window close handling, and native `Shell_NotifyIconW` tray balloon notifications on consecutive HTTP 401/403 watch auto-disable events.
-- Built transactional `ov.conf` and `monitor.json` persistence (`cockpit_rs/src/config/safe_write.rs`, `conf_gate.rs`) with exclusive interprocess file locking, pre-write SHA-256 verified backups, restrictive Windows DACLs (`SYSTEM`, `Administrators`, Owner, Current User SID), `${ENV_VAR}` non-expansion guarantee, default live-path test protection with explicit desktop IPC write authorization, and Primary vs Failover (`allow_unaudited`) Slot Gatekeeper enforcement.
-- Implemented native 64-bit Windows DPAPI (`dpapi:` envelope parity with Python `secret_store.py`), bounded Watchlist (`MAX_WATCHES = 7`, sequential 20s/64-token shared-client prober, 60m exponential backoff, 2x 401/403 auto-disable, corrupted-file preservation, SHA-256 revision conflict guard), Reserve pool CRUD, and runtime VLM slot hot-switching (`/api/v1/observer/vlm/active`).
+### Added
+- Implemented the standalone Rust & Tauri V2 desktop host (`cockpit_rs/` and `cockpit_rs/src-tauri/`) alongside the legacy Python/Tkinter `monitor/` baseline, compiling to a portable Windows executable (`openviking-cockpit.exe`, ~8.5 MiB private working set idle) with single-instance Win32 mutex, `--tray` startup flag, duplicate-launch window restore, minimize-to-tray close handling, and native `Shell_NotifyIconW` tray balloon notifications on consecutive HTTP 401/403 watch auto-disable events.
 - Implemented the active Taxonomy V3.1 Behavioral Security Auditor in Rust (`cockpit_rs/src/services/auditor.rs`, `auditor_cache.rs`) with monotonic `SecurityLatch`, 7 synthetic probes, chunk-bounded 64 KiB response reading, strict RFC 8259 duplicate-key and trailing-root JSON rejection, adaptive `PASS_SLOW` rescue ladder, byte-exact `_scope_id` cache interoperability with Python `provider_security_auditor.py`, and a tokenized 3-Tab Audit Modal UI (`cockpit_rs/ui/`).
+- Built transactional `ov.conf` and `monitor.json` persistence in Rust (`cockpit_rs/src/config/safe_write.rs`, `conf_gate.rs`) with exclusive interprocess file locking, pre-write SHA-256 verified backups, restrictive Windows DACLs (`SYSTEM`, `Administrators`, Owner, Current User SID), `${ENV_VAR}` non-expansion guarantee, default live-path test protection with explicit desktop IPC write authorization, and Primary vs Failover (`allow_unaudited`) Slot Gatekeeper enforcement.
+- Implemented native 64-bit Windows DPAPI (`dpapi:` envelope parity with Python `secret_store.py`), bounded Watchlist (`MAX_WATCHES = 7`, sequential 20s/64-token shared-client prober, 60m exponential backoff, 2x 401/403 auto-disable, corrupted-file preservation, SHA-256 revision conflict guard), Reserve pool CRUD with inline Edit/Cancel draft mode, and runtime VLM slot hot-switching (`/api/v1/observer/vlm/active`).
+- Added THEO DÕI bounded credential watchlist (`watch_keys.py`, `watch_panel.py`, max 7 independent DPAPI credentials, global + per-row Auto switches, "Kiểm định" 3-tab audit action, "Đưa sang Theo dõi" transfer from Reserve, async `list_chat_models` Combobox refresh, and Windows tray balloon hook `notify_watch_auto_disabled`) and moved DỰ TRỮ into its own full-width tab.
+- Added `docs/ops/recovery-runbook.md` and plan-first `scripts/retrofit_ov_conf_backup_acl.py` (`--apply`, `--plan-file`, `--receipt`) covering manual recovery of `monitor.json` and `ov.conf`, `.REJECTED[-N].json` triage, backup retention, and legacy backup DACL retrofitting.
+- Bundled the blue sailboat icon artwork (`16–256` px) with `System.AppUserModel.ID` persistence across shortcuts, windows, and system tray.
 
-### Watch Panel Security Audit & Auto-Disable Toast Notifications
-- Added "Kiểm định" action button to the THEO DÕI watchlist toolbar (`watch_panel.py`), allowing direct execution of the 3-tab security audit modal for any selected watch key.
-- Integrated `audit_watch_key` in `openviking-monitor.pyw` reusing `launch_security_audit_ui`, checking 24h cached reports with user confirmation, and updating audit badge status on completion without modifying `ov.conf` or slots.
-- Implemented `notify_watch_auto_disabled` notification hook in `openviking-monitor.pyw` connected to `watch_panel.py`, dispatching a Windows tray balloon notification when a watch key is auto-disabled due to two consecutive HTTP 401/403 authentication failures.
-- Guarded `on_auto_disabled` callback execution against `sys.stderr is None` under windowless `pythonw.exe`.
-- Extended `test_watch_transfer.py` with test assertions for "Kiểm định" button invocation and the consecutive 401/403 auto-disable notification hook; reconciled `test_monitor_recovery_integration.py` for the 2 new audit launch sites (total 6 sites); verified 79/79 PASS on full test runner.
+### Changed
+- Upgraded the Python security audit dialog (`build_audit_report_view()`) to a 3-tab layout (Executive Summary, Master-Detail Inspector with Vietnamese reason-code mappings, and redacted Raw JSON viewer), and allowed failover slots (`index >= 1`) to save conditionally with `allow_unaudited=True` while keeping primary slot 0 strictly gated.
+- Reworked the Monitor UI palette, slot/editor hierarchy, three-round benchmark cancellation guards, and high-DPI geometry validation across Tk scaling `1.3333` (100%), `1.6667` (125%), `2.0` (150%), and `2.666667` (200% overview scroll).
+- Made `suite_bootstrap.py` provision isolated per-suite home and `TMPDIR` profiles with live `.openviking` filesystem and network audit guards (`79/79` suites PASS).
 
-### Failover Slot Override & Streamlined Audit Presentation
-- Allowed failover slots (index >= 1) to be saved conditionally without forcing automated inline audits (`allow_unaudited=True`), respecting manual operator testing while strictly requiring audit for primary slot 0.
-- Clarified HTTP 400 parameter and endpoint rejection labels in reason code mappings (`_REASON_CODE_VI` and `_REASON_CODE_SHORT_VI`).
-- Streamlined Tab 1 (Kết luận & Hướng dẫn nhanh) in the security audit dialog, removing verbose technical text walls and keeping deep diagnostic details in Tab 2.
-- Added regression test 18 in `test_conf_target_gate.py`; full suite runner verified 79/79 PASS.
+### Fixed
+- Preserved unreadable or corrupted `monitor.json` files fail-closed instead of overwriting with empty defaults, enforced SHA-256 state revision conflict guards across concurrent writers, and archived verified pre-change `monitor.json` snapshots under `backups/monitor-state/<sha256>/`.
+- Locked shortcut generation in `monitor/openviking-monitor.pyw` via `is_live_installation()`, checked PowerShell exit status on Windows startup integration, and hardened `scripts/monitor_sync.py` to assert no live or repo Monitor instances run during staging/publishing.
+- Guarded `on_auto_disabled` callback execution against `sys.stderr is None` under windowless `pythonw.exe` and prevented Watch edit-modal saves from re-enabling Auto after background auth failures.
 
-### Watch Panel Model Combobox & Async Fetch Refresh
-- Upgraded the test model field in "Thêm/Sửa key theo dõi" from a plain Entry to a `ttk.Combobox` (`state='normal'`), allowing both dropdown selection and free-form typing.
-- Added a dedicated "Lấy list" refresh button calling `list_chat_models` asynchronously in a daemon worker thread, with main-thread polling and window lifetime safety.
-- Prepopulated the Combobox with known models from cache (`model_lists`) and active sources upon opening the dialog.
-- Secured credentials during fetch: requires base URL and non-empty key, rejects attempts to use DPAPI-locked placeholders, guards against stale inputs if base/key changes mid-fetch, and redacts raw error messages.
-- Key-hashed cache keys via `model_cache_key` ensure raw secrets are never written into `model_lists` or `monitor.json`.
-- Updated test suites `test_watch_dialogs.py` and `test_watch_transfer.py`; verified 79/79 PASS on full test runner.
-
-### Provider Safety Audit Presentation Layer & 3-Tab Dialog
-- Separated presentation modeling into a pure `build_audit_report_view()` contract with zero mutations to `_sanitize_report()`, `evaluate_v31_decision()`, or raw cache parity.
-- Implemented `_presentation_sanitize_text()` with fail-closed bearer masking, JSON embed inspection preserving numeric parameters (e.g. `max_tokens: 2048`), key collision protection, and 1 MiB truncation via `[OMITTED:LIMIT]`.
-- Upgraded the audit dialog to a 3-tab layout: Tab 1 Executive Summary with status badges, tally chips, and latency profile; Tab 2 Master-Detail Inspector with Vietnamese reason code mappings, concise signal column labels, and precomputed `signal_label` in row schema; Tab 3 Raw JSON viewer with clipboard redaction.
-- Hardened presentation sanitization: secret redaction on unmapped reason codes, empty-after-sanitize fallbacks, and control character stripping before length bounding.
-- Added `test_audit_report_view.py` and `test_audit_report_ui.py`; verified 155 tests across 5 pytest suites (audit view/UI, provider auditor, auditor recovery, reference core v31) and 79/79 PASS on the full Monitor suite (`--runtime-helpers`).
-
-### Operations Recovery Runbook
-- Added `docs/ops/recovery-runbook.md` covering manual recovery of `monitor/monitor.json` and `ov.conf`, `.REJECTED[-N].json` triage and checked-write asymmetry, `scripts/retrofit_ov_conf_backup_acl.py` (`--plan-file`), `scripts/backup_retention.py`, `scripts/monitor_sync.py` rollback, standalone `suite_bootstrap.py` `TMPDIR` isolation, and the 2026-11-12 verification provenance caveat.
-- Indexed `docs/ops/recovery-runbook.md`, `docs/ops/windowless-startup.md`, and repo-only `scripts/` utilities in `README.md`.
-- Standardized canonical Python 3.11 launcher paths and process verification in `README.md` and `docs/ops/recovery-runbook.md`; updated suite count to 79 (74 Monitor + 5 scripts).
-
-### Shortcut & Deploy Guard Hardening
-- Locked shortcut creation in `monitor/openviking-monitor.pyw` via `is_live_installation()`: skips Start Menu/Desktop/APP_DIR shortcut overwriting when running outside `APP_DIR` (e.g. from git repo), and targets the live script if invoked from external instances. Escaped all interpolated values in PowerShell shortcut generation scripts against apostrophes.
-- Hardened `scripts/monitor_sync.py` to assert that no Monitor instances are running from either the target live directory or the source repository directory before staging/publishing.
-- Added regression tests in `test_startup_shortcut.py` and `test_deploy_safety.py`; full suite runner verified 79/79 PASS.
-
-### Separate Reserve Tab and Independent Key Watchlist
-- Moved DỰ TRỮ into its own full-width tab. Its controls use two rows and keep manual probes/audits; the previous slot Auto loop is removed.
-- Added THEO DÕI to Tổng quan: at most 7 independent credentials, no search, global Auto switch plus per-row Auto. Both default off; migration does not reuse the old Auto setting.
-- Added DPAPI-protected watch persistence, strict endpoint/key validation, stable IDs/revisions and stale-response rejection. Watch edits, probes and imports never apply slots or write `ov.conf`.
-- Sequential watch probes use 20-second timeouts and a 64-output-token budget. Backoff caps at 60 minutes; two consecutive 401/403 responses disable that row's Auto.
-- Provider response bodies and raw exception messages are excluded from saved probe failures. Authenticated requests reject unsafe URLs and redirects.
-- Strengthened high-DPI geometry assertions to require 3 fully visible watch rows, not merely a nonempty partial-row bounding box, and scrolling to row 7.
-- Added `watch_keys.py` and `watch_panel.py` to the transactional source deployment manifest.
-- Fixed the edit-modal race that could re-enable Auto after background auth failures; editor saves merge only current user fields against the latest record.
-- Rejected user-entered `dpapi:` envelopes. Null watch lists normalize to empty; malformed nonempty watch data disables Auto and state writes, shows a warning, and preserves original bytes instead of silently discarding credentials.
-
-### Watch Transfer and Reliability
-- Added **Đưa sang Theo dõi** to the Reserve context menu and action row. It opens a prefilled, masked editor; Save makes an independent DPAPI watch with Auto off and keeps the reserve unchanged. Missing/locked keys, ambiguous selections and capacity overflow do not copy or probe.
-- Made settings saves transactional: persistence succeeds before shared state and Windows startup/tray/window effects change. Failures remain inline without Tk tracebacks.
-- Double-clicking the Auto cell toggles once and does not open Edit. Row Auto waiting on the master switch reads **Chờ tổng**; manual-only auth failures no longer claim an Auto shutdown.
-- Watch modal validation is inline, the source picker owns a modal grab and both dialogs use the existing dark-titlebar helper.
-- Old results display **Cũ** after the greater of 10 minutes or two configured intervals. This is a presentation warning, not a credential/provider verdict.
-- Added seven-record DPAPI save/reopen/restore tests, failed atomic-save preservation and synthetic network/timeout/429/locked-key tests.
-- Extended layout validation to Tk scaling 2.666667 (Windows 200% font factor). At high DPI, the overview scrolls vertically and minimum width scales within screen bounds; the slot editor reduces its scrollable model-list height to keep actions reachable.
-
-### Settings Application and Interaction Guards
-- Reopening Cài đặt reuses and raises its current window, preserving unsaved edits instead of allowing stale parallel forms to overwrite newer settings.
-- Windows startup integration now checks PowerShell exit status and shortcut creation/removal. A saved preference is not reported as applied when integration fails; the inline error keeps Settings open and Lưu retries the operation.
-- Startup integration failures exclude raw shell/exception output from app logs. Regression tests cover shell failure, missing output, deletion denied, retry, and real COM shortcut creation/readback/removal under a guarded scratch profile.
-- Double-clicking watch headings or empty space no longer opens the selected record. Data-cell editing and the one-toggle Auto gesture remain intact.
-- Centered the watch source picker relative to Monitor and clamped it within primary-screen bounds. High-DPI Fit measures the Overview content plus its scrollbar instead of the Canvas request width.
-
-### Unreadable State Preservation
-- Existing `monitor.json` files that fail UTF-8 decoding, JSON parsing, object-root validation or reading no longer become writable empty defaults. Missing files retain normal first-run creation; unverified absence fails closed.
-- A damaged/unreadable state disables Auto and blocks all state saves, including startup auto-fit, Settings, Watch edits and exit geometry. Original bytes remain untouched; restoring a valid file and reopening Monitor is required to resume saving.
-- Added a persistent, wrapping recovery warning independent of transient status messages, with the same instructions in Settings. Logs record only a fixed diagnostic, not raw file contents or exception messages.
-- Added isolated regression tests for damaged documents, read/stat failures, save-gate ordering, explicit restore/reopen and the actual startup/Settings/Watch/exit callbacks.
-
-### State Revision Conflict Guard
-- State loading records SHA-256 of the exact UTF-8 file bytes; a verified first-run absence has a distinct empty baseline. Revision metadata remains in memory, not in `monitor.json`.
-- State saves compare that expected revision under the existing interprocess lock immediately before atomic publication. External edits, damage, deletion, unexpected creation and unverifiable reads refuse the save and preserve the current file.
-- Own successful saves advance the shared GUI revision across Watch, Reserve, probe cache, Settings, auto-fit and exit. Stale candidates cannot inherit a newer revision implicitly.
-- A detected conflict stops Watch Auto, cancels queued work and keeps a wrapping recovery banner plus Settings instructions until Monitor is reopened. Failed saves do not apply candidate settings or Windows startup changes.
-- Added synthetic revision/GUI regressions for first-run conflicts, raw newline changes, read/stat failures, stale candidates, lock ordering, failed publication/retry and sequential own saves. The lock coordinates participating writers; arbitrary writers that ignore it are not a filesystem compare-and-swap transaction.
-
-### Verified Monitor State Backups
-- Changed saves preserve the valid pre-change `monitor.json` bytes under `backups/monitor-state/<sha256>/`, with a SHA-256/byte-count/UTC manifest, fsync, readback and atomic directory publication. DPAPI ciphertext is copied without decryption or normalization.
-- Backup failure, corruption, unsafe reparse paths or access-control failure blocks state publication. Existing snapshots are verified before reuse; unchanged state is not rewritten or archived again.
-- Restricted ACLs now replace the DACL with SYSTEM, Administrators and the actual current Windows SID, removing explicit extra grants as well as inheritance, with exact access-section readback. Repeated application does not require SACL privileges.
-- Successful saves retain new ciphertext metadata in memory so an unchanged credential is not re-encrypted on each later save. Failed saves do not advance that metadata.
-- Added isolated fault, deduplication, DPAPI-lock, raw-newline, junction, restore/reopen and GUI transaction tests. Restore remains explicit; no automatic unlock, cross-machine DPAPI guarantee or automatic snapshot deletion.
-
-### Verified ov.conf Pre-Write Backups
-- Hardened `backup_ov_conf()` to enforce a protected, restricted DACL (`SYSTEM`, `Administrators`, current Windows SID) via PowerShell/.NET on staging before any `ov.conf` bytes are written, `fsync`, read back staging bytes, publish without clobbering via Windows `os.rename` (`ov.conf-before-<reason>-<stamp>-<sha8>[ -N ].json`), and verify published bytes and final DACL. Any ACL/staging failure blocks the write fail-closed.
-- Sanitized `reason`, rejected reparse points on `OV_HOME`, `backups/`, `CONF_PATH` and target candidates, rejected empty configs, and swept stale `.ov-conf-bak-*.tmp` staging files older than 1 hour under `.ov-writer.lock`.
-- Verified inside `.ov-writer.lock` that the published backup parses to `expected_digest` and `CONF_PATH` remains at `expected_digest` before writing `ov.conf`; drift or unverifiable backup artifacts are quarantined on disk via `.REJECTED[-N].json` rename as forensic evidence even when byte-valid so the write path cannot replay from them (logging `quarantined=` on quarantine or `quarantine_failed=` if rename fails; note an un-renamed artifact keeps its original `ov.conf-before-*` name) and block the `ov.conf` write. `backup_retention.py` permanently exempts `.REJECTED` artifacts from automatic quarantine (0 pre-existing undotted live entries observed at hardening time); operators inspect and manually retire `.REJECTED[-N].json` files after resolving the aborted write. Staging/ACL failures clean up incomplete artifacts. Note: `<sha8>` in filename is the raw-byte SHA-256 prefix, distinct from canonical `_conf_digest()`.
-- Added plan-first `scripts/retrofit_ov_conf_backup_acl.py` (`--apply`, `--plan-file` strict drift assertion, `--receipt` opt-in) to harden legacy top-level `ov.conf-before-*` backup DACLs in place with reparse-point refusal, pre-apply hash-drift abort, post-apply SHA-256/size/`mtime_ns`/SDDL invariance checks, mandatory `sddl_sha256`/`sddl_after_sha256` digest redaction (omitting raw SDDL/SID strings from newly emitted plans and receipts; legacy unredacted plans lacking `sddl_sha256` fail closed with `APPLY_ABORTED` and require regenerating a fresh plan), `APPLY_ABORTED`/`APPLY_PARTIAL` audit receipts (including `plan_sha256` when `--plan-file` is supplied), chunked `hashlib.file_digest`, PowerShell `UTF8` ACL parsing with echoed path-alignment verification under `CREATE_NO_WINDOW`, and idempotent re-runs.
-- Consolidated `run_gui` `conf_digest()` to delegate to `_conf_digest()`. Added isolated unit, ACL, collision, reparse, retention-classification, ACL-retrofit and checked-writer fault tests.
-
-### Windows Taskbar Identity and Icon
-- Monitor shortcuts now persist `System.AppUserModel.ID` matching the process identity, which is set before Tk creates any windows.
-- Bundled the existing blue sailboat artwork at 16–256 pixels and made shortcuts, windows and tray prefer it over the legacy Helper resource.
-- Added isolated real COM shortcut identity readback, failure handling, icon resolution and pre-Tk process identity regressions.
-
-### Test Isolation
-- Made `suite_bootstrap.py` create its own per-suite scratch profile before executing test code, including standalone invocations outside the full runner.
-- Added a subprocess sentinel regression that proves writes stay in the isolated profile and leave the caller's Monitor state untouched.
-- Added a filesystem audit guard against live `.openviking` access, including direct absolute paths.
-- Updated `suite_bootstrap.py` to provision and restore an isolated `TMPDIR` when unset or pointing at `%LOCALAPPDATA%\Temp` (ignoring transient Windows handle-cleanup errors during teardown, which can leave locked `ov-suite-*` scratch dirs behind if a child hangs onto a handle) while preserving explicit non-Temp caller `TMPDIR` overrides; kept the four state/watch suites fail-closed if invoked without the bootstrapper, with three-branch coverage in `test_suite_isolation.py`.
-- Drained pending Tk theme events before destroying the note-field test root to avoid callbacks targeting a destroyed interpreter.
-
-### Monitor UI Recovery & DPI Validation — 2026-11-11
-- Reworked the Monitor palette, slot/editor hierarchy, reserve table sizing, audit result styling, and modal dark titlebars.
-- Restored the three-round benchmark action alongside protocol verification and security audit controls.
-- Kept probe failures visibly failed regardless of a prior provider audit level.
-- Guarded benchmark completion/failure events after Escape or dialog closure.
-- Scaling validation uses Tk's Windows DPI factors: **1.3333 (100%)**, **1.6667 (125%)**, and **2.0 (150%)**, with four live and four spare fixture rows plus seven watch rows, populated queue/vector/usage/retrieval telemetry, long endpoints, and failed-probe details.
-- Dashboard regression checks run at 880×560, 996×960, 1020×640, and 880/1100/1400×800. Startup fit grows a default 1020×640 window to the measured overview content height within screen bounds; hidden reserve content cannot inflate its bounds.
-- Reduced MODEL control padding, wrapped model names and retained complete role labels at high DPI. Long reserve cells have per-column fit checks and a tested horizontal scrollbar.
-- Reserve-table column-width persistence survives hiding/showing the note column and restarting the table.
-- Added four-slot split-boundary and minimum-window event-loop regression coverage.
-- Added regression coverage for benchmark modal cancellation, stale completion events, add/edit/spare geometry, and high-DPI endpoint fit.
-
-### Scaling Limits
-
-- Startup sizing cannot exceed the usable screen height (screen height minus 120 px); when the measured content is taller, vertical controls require scrolling or a taller display.
-- High-DPI content uses an outer overview scrollbar above 150%; it is not forced into one 960px-tall view. A low-resolution display can still require a smaller desktop scale.
-- Benchmark cancellation stops queued probes but does not interrupt a currently executing HTTP request; timeout bounds remain the in-flight stop limit.
+### Security
+- Hardened `backup_ov_conf()` to apply protected, restricted Windows DACLs (`SYSTEM`, `Administrators`, current Windows SID) on staging before writing `ov.conf` bytes, reject reparse points, verify `_conf_digest()` inside `.ov-writer.lock`, and quarantine drifted artifacts as `.REJECTED[-N].json`.
+- Enforced fail-closed bearer/token masking, control-character stripping, 1 MiB `[OMITTED:LIMIT]` bounding in `_presentation_sanitize_text()`, key-hashed `model_cache_key` lookups, and strict rejection of unsafe URLs, HTTP redirects, and user-entered `dpapi:` envelopes.
 
 ## [v1.2.0-hardening] — 2026-10-26
 

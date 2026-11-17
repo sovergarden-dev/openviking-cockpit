@@ -1,6 +1,6 @@
 {
   "name": "openviking-cockpit-ui",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.3.0",
   "description": "WebView2 frontend for OpenViking Cockpit (Tauri V2)"
 }
