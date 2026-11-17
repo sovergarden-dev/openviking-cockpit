@@ -160,7 +160,18 @@
         </article>
 
         <article class="c-card">
-          <span class="c-card-title">DỰ TRỮ (Spare Models Pool — DPAPI)</span>
+          <div class="c-actions">
+            <span class="c-card-title">DỰ TRỮ (Spare Models Pool — DPAPI)</span>
+            <label class="c-card-meta" for="reserve-target-slot">Slot đích:</label>
+            <select id="reserve-target-slot" class="c-input">
+              <option value="0">Slot #0 (Chính)</option>
+              <option value="1" selected>Slot #1 (Dự phòng)</option>
+            </select>
+            <label class="c-card-meta">
+              <input id="reserve-allow-unaudited" type="checkbox" />
+              Cho phép chưa kiểm định (Slot ≥ 1)
+            </label>
+          </div>
           <div class="c-table-wrap">
             <table class="c-table">
               <thead>

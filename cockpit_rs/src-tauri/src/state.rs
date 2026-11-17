@@ -2,10 +2,32 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::SystemTime;
 use tauri::ipc::Channel;
 use tokio::sync::watch;
 
 use cockpit_rs::services::telemetry::{IncidentTracker, TelemetryClient, TelemetrySnapshot};
+
+#[derive(Debug, Clone)]
+pub struct TelemetryPollMetaCache {
+    pub conf_stamp: Option<(SystemTime, u64)>,
+    pub expected_embedding_model: Option<String>,
+    pub monitor_stamp: Option<(SystemTime, u64)>,
+    pub notify_on_down: bool,
+    pub notify_on_failover: bool,
+}
+
+impl Default for TelemetryPollMetaCache {
+    fn default() -> Self {
+        Self {
+            conf_stamp: None,
+            expected_embedding_model: None,
+            monitor_stamp: None,
+            notify_on_down: true,
+            notify_on_failover: true,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CockpitPaths {
@@ -42,6 +64,7 @@ pub struct CockpitState {
     pub telemetry_client: TelemetryClient,
     pub latest_snapshot: RwLock<Option<TelemetrySnapshot>>,
     pub incident_tracker: Mutex<IncidentTracker>,
+    pub poll_meta_cache: Mutex<TelemetryPollMetaCache>,
     pub subscribers: Mutex<Vec<Channel<TelemetrySnapshot>>>,
     pub shutdown_tx: watch::Sender<bool>,
 }
@@ -61,10 +84,18 @@ impl CockpitState {
             telemetry_client,
             latest_snapshot: RwLock::new(None),
             incident_tracker: Mutex::new(IncidentTracker::default()),
+            poll_meta_cache: Mutex::new(TelemetryPollMetaCache::default()),
             subscribers: Mutex::new(Vec::new()),
             shutdown_tx,
         });
         (state, shutdown_rx)
+    }
+
+    pub fn invalidate_poll_meta_cache(&self) {
+        if let Ok(mut guard) = self.poll_meta_cache.lock() {
+            guard.conf_stamp = None;
+            guard.monitor_stamp = None;
+        }
     }
 
     pub fn broadcast_snapshot(&self, snapshot: &TelemetrySnapshot) {

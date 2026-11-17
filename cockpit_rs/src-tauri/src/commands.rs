@@ -32,26 +32,82 @@ pub struct SlotListResponse {
     pub slots: Vec<SlotSummary>,
 }
 
+fn file_stamp(path: &std::path::Path) -> Option<(SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    Some((modified, meta.len()))
+}
+
+async fn read_cached_poll_meta(state: &Arc<CockpitState>) -> (Option<String>, bool, bool) {
+    let state_ref = Arc::clone(state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let cur_conf_stamp = file_stamp(&state_ref.paths.conf_path);
+        let cur_mon_stamp = file_stamp(&state_ref.paths.monitor_json_path);
+
+        let prev = state_ref
+            .poll_meta_cache
+            .lock()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+
+        let conf_dirty = cur_conf_stamp != prev.conf_stamp;
+        let mon_dirty = cur_mon_stamp != prev.monitor_stamp;
+        if !conf_dirty && !mon_dirty && (cur_conf_stamp.is_some() || cur_mon_stamp.is_some()) {
+            return (
+                prev.expected_embedding_model,
+                prev.notify_on_down,
+                prev.notify_on_failover,
+            );
+        }
+
+        let expected_emb = if conf_dirty {
+            if cur_conf_stamp.is_some() {
+                load_raw_config(&state_ref.paths.conf_path)
+                    .ok()
+                    .and_then(|(cfg, _, _)| {
+                        cfg.embedding
+                            .as_ref()
+                            .and_then(|e| e.get("dense").or(Some(e)))
+                            .and_then(|d| d.get("model"))
+                            .and_then(|m| m.as_str())
+                            .map(|s| s.to_string())
+                    })
+            } else {
+                None
+            }
+        } else {
+            prev.expected_embedding_model
+        };
+
+        let (notify_on_down, notify_on_failover) = if mon_dirty {
+            if cur_mon_stamp.is_some() {
+                load_monitor_state(&state_ref.paths.monitor_json_path)
+                    .map(|(st, _)| (st.notify_on_down, st.notify_on_failover))
+                    .unwrap_or((true, true))
+            } else {
+                (true, true)
+            }
+        } else {
+            (prev.notify_on_down, prev.notify_on_failover)
+        };
+
+        if let Ok(mut guard) = state_ref.poll_meta_cache.lock() {
+            guard.conf_stamp = cur_conf_stamp;
+            guard.expected_embedding_model = expected_emb.clone();
+            guard.monitor_stamp = cur_mon_stamp;
+            guard.notify_on_down = notify_on_down;
+            guard.notify_on_failover = notify_on_failover;
+        }
+
+        (expected_emb, notify_on_down, notify_on_failover)
+    })
+    .await
+    .unwrap_or((None, true, true))
+}
+
 pub async fn collect_telemetry_once(state: &Arc<CockpitState>) -> TelemetrySnapshot {
-    let conf_path = state.paths.conf_path.clone();
-    let mon_path = state.paths.monitor_json_path.clone();
-    let (expected_emb, notify_on_down, notify_on_failover) =
-        tauri::async_runtime::spawn_blocking(move || {
-            let emb = load_raw_config(&conf_path).ok().and_then(|(cfg, _, _)| {
-                cfg.embedding
-                    .as_ref()
-                    .and_then(|e| e.get("dense").or(Some(e)))
-                    .and_then(|d| d.get("model"))
-                    .and_then(|m| m.as_str())
-                    .map(|s| s.to_string())
-            });
-            let (n_down, n_fail) = load_monitor_state(&mon_path)
-                .map(|(st, _)| (st.notify_on_down, st.notify_on_failover))
-                .unwrap_or((true, true));
-            (emb, n_down, n_fail)
-        })
-        .await
-        .unwrap_or((None, true, true));
+    let (expected_emb, notify_on_down, notify_on_failover) = read_cached_poll_meta(state).await;
 
     let snapshot = state
         .telemetry_client
@@ -231,7 +287,7 @@ pub async fn apply_slot(
     input: SlotUpdateInput,
 ) -> Result<ApplySlotOutcome, String> {
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let res = tauri::async_runtime::spawn_blocking(move || {
         apply_slot_update_with_live_policy(
             &paths.conf_path,
             &paths.backups_dir,
@@ -252,7 +308,9 @@ pub async fn apply_slot(
         .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("spawn_blocking panicked: {}", e))?
+    .map_err(|e| format!("spawn_blocking panicked: {}", e))??;
+    state.invalidate_poll_meta_cache();
+    Ok(res)
 }
 
 #[tauri::command]
@@ -411,7 +469,7 @@ pub async fn promote_reserve_to_slot(
     allow_unaudited: bool,
 ) -> Result<ApplySlotOutcome, String> {
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let res = tauri::async_runtime::spawn_blocking(move || {
         let (st, _) = load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
         let rec = st
             .spare_models
@@ -458,7 +516,11 @@ pub async fn promote_reserve_to_slot(
         .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("spawn_blocking panicked: {}", e))?
+    .map_err(|e| format!("spawn_blocking panicked: {}", e))?;
+    if res.is_ok() {
+        state.invalidate_poll_meta_cache();
+    }
+    res
 }
 
 #[tauri::command]

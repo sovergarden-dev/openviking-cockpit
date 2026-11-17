@@ -597,12 +597,6 @@ pub fn copy_reserve_into_watchlist(
     alias_override: Option<&str>,
     env_map: Option<&HashMap<String, String>>,
 ) -> Result<String, WatchError> {
-    if state.watch_keys.len() >= MAX_WATCHES {
-        return Err(WatchError::Validation(format!(
-            "Maximum {} watch credentials reached",
-            MAX_WATCHES
-        )));
-    }
     let reserve = state
         .spare_models
         .get(reserve_index)
@@ -615,6 +609,39 @@ pub fn copy_reserve_into_watchlist(
         return Err(WatchError::Validation(format!(
             "Reserve credential is not ready ({:?})",
             resolved.status
+        )));
+    }
+
+    let target_model = reserve.model.trim();
+    if let Some(existing) = state.watch_keys.iter().find(|w| {
+        let same_model = w.model.trim() == target_model;
+        let same_base = validate_watch_base_url(&w.api_base)
+            .map(|b| b == api_base)
+            .unwrap_or_else(|_| w.api_base.trim().trim_end_matches('/') == api_base);
+        if !same_model || !same_base {
+            return false;
+        }
+        if w.api_key.trim() == reserve.api_key.trim() {
+            return true;
+        }
+        let w_resolved = resolve_secret(&w.api_key, env_map);
+        w_resolved.status == SecretStatus::SecretReady && w_resolved.value == resolved.value
+    }) {
+        let label = if existing.alias.trim().is_empty() {
+            existing.id.as_str()
+        } else {
+            existing.alias.trim()
+        };
+        return Err(WatchError::Validation(format!(
+            "Reserve credential already exists in watchlist ('{}')",
+            label
+        )));
+    }
+
+    if state.watch_keys.len() >= MAX_WATCHES {
+        return Err(WatchError::Validation(format!(
+            "Maximum {} watch credentials reached",
+            MAX_WATCHES
         )));
     }
 
@@ -1032,5 +1059,26 @@ mod tests {
         assert_eq!(copied.alias, "Fallback pool");
         assert!(!copied.auto_enabled);
         assert_eq!(copied.api_key, state.spare_models[0].api_key);
+
+        let dup_err = copy_reserve_into_watchlist(&mut state, 0, None, None)
+            .expect_err("duplicate copy must be rejected");
+        assert!(dup_err.to_string().contains("already exists in watchlist"));
+        assert!(!dup_err.to_string().contains("SYNTHETIC_SPARE_SECRET_42"));
+
+        state.watch_keys.retain(|w| w.id != copied_id);
+        upsert_watch_record(
+            &mut state,
+            &UpsertWatchInput {
+                id: None,
+                alias: "Manual same key".to_string(),
+                model: "spare-v1".to_string(),
+                api_base: "https://api.example.com/v1/".to_string(),
+                api_key: Some("SYNTHETIC_SPARE_SECRET_42".to_string()),
+            },
+        )
+        .expect("insert manual watch with distinct DPAPI salt");
+        let cross_salt_dup = copy_reserve_into_watchlist(&mut state, 0, None, None)
+            .expect_err("cross-salt identical secret must also be rejected");
+        assert!(cross_salt_dup.to_string().contains("Manual same key"));
     }
 }

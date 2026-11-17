@@ -131,6 +131,27 @@ function renderConfig(cfg) {
   state.confSha = cfg.sha256;
   state.slots = cfg.slots || [];
 
+  const targetSlotSel = document.getElementById("reserve-target-slot");
+  if (targetSlotSel) {
+    const prevVal = targetSlotSel.value || "1";
+    targetSlotSel.replaceChildren();
+    for (const s of state.slots) {
+      const opt = document.createElement("option");
+      opt.value = String(s.slot_index);
+      const roleTxt = s.role === "primary" ? "Chính" : "Dự phòng";
+      opt.textContent = `Slot #${s.slot_index} (${roleTxt} · ${s.model || "?"})`;
+      targetSlotSel.appendChild(opt);
+    }
+    const nextIdx = Math.max(state.slots.length, 1);
+    const appendOpt = document.createElement("option");
+    appendOpt.value = String(nextIdx);
+    appendOpt.textContent = `Slot #${nextIdx} (+ Thêm dự phòng mới)`;
+    targetSlotSel.appendChild(appendOpt);
+
+    const hasPrev = Array.from(targetSlotSel.options).some((o) => o.value === prevVal);
+    targetSlotSel.value = hasPrev ? prevVal : state.slots.length > 1 ? "1" : String(nextIdx);
+  }
+
   setBanner("drift-banner", cfg.drift?.drift ? cfg.drift.reason : "");
 
   const tbody = document.getElementById("slots-tbody");
@@ -418,8 +439,8 @@ async function deleteReserve(index) {
 
 async function promoteReserveToSlot(reserveIndex) {
   const statusEl = document.getElementById("reserve-status");
-  const slotIndex = Number(document.getElementById("slot-index")?.value || 0);
-  const allowUnaudited = Boolean(document.getElementById("slot-allow-unaudited")?.checked);
+  const slotIndex = Number(document.getElementById("reserve-target-slot")?.value ?? 1);
+  const allowUnaudited = Boolean(document.getElementById("reserve-allow-unaudited")?.checked);
   statusEl.textContent = `Đang chuyển trực tiếp sang Slot #${slotIndex} (giải mã nội bộ Rust)…`;
   try {
     const out = await tauriApi.core.invoke("promote_reserve_to_slot", {
