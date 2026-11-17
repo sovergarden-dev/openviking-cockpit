@@ -140,6 +140,16 @@ function renderConfig(cfg) {
 
     actTd.appendChild(switchBtn);
     actTd.appendChild(editBtn);
+
+    const auditSlotBtn = document.createElement("button");
+    auditSlotBtn.type = "button";
+    auditSlotBtn.className = "c-btn";
+    auditSlotBtn.textContent = "Kiểm định";
+    auditSlotBtn.addEventListener("click", () =>
+      launchSecurityAudit({ source: "slot", slot_index: slot.slot_index })
+    );
+    actTd.appendChild(auditSlotBtn);
+
     tr.appendChild(actTd);
     tbody.appendChild(tr);
   }
@@ -191,6 +201,16 @@ function renderMonitorState(summary) {
 
     actTd.appendChild(probeBtn);
     actTd.appendChild(autoBtn);
+
+    const auditWatchBtn = document.createElement("button");
+    auditWatchBtn.type = "button";
+    auditWatchBtn.className = "c-btn";
+    auditWatchBtn.textContent = "Kiểm định";
+    auditWatchBtn.addEventListener("click", () =>
+      launchSecurityAudit({ source: "watch", watch_id: row.id })
+    );
+    actTd.appendChild(auditWatchBtn);
+
     actTd.appendChild(delBtn);
     tr.appendChild(actTd);
     wBody.appendChild(tr);
@@ -225,6 +245,16 @@ function renderMonitorState(summary) {
     delResBtn.addEventListener("click", () => deleteReserve(res.index));
 
     actTd.appendChild(toSlotBtn);
+
+    const auditResBtn = document.createElement("button");
+    auditResBtn.type = "button";
+    auditResBtn.className = "c-btn";
+    auditResBtn.textContent = "Kiểm định";
+    auditResBtn.addEventListener("click", () =>
+      launchSecurityAudit({ source: "reserve", index: res.index })
+    );
+    actTd.appendChild(auditResBtn);
+
     actTd.appendChild(delResBtn);
     tr.appendChild(actTd);
     rBody.appendChild(tr);
@@ -312,7 +342,7 @@ async function deleteReserve(index) {
 }
 
 function setupTabs() {
-  const tabs = document.querySelectorAll(".c-tab");
+  const tabs = document.querySelectorAll(".c-tab[data-tab]");
   tabs.forEach((btn) => {
     btn.addEventListener("click", () => {
       const target = btn.dataset.tab;
@@ -322,6 +352,79 @@ function setupTabs() {
       document.getElementById("panel-watch").hidden = target !== "watch";
     });
   });
+
+  const auditTabs = document.querySelectorAll(".c-tab[data-audit-tab]");
+  auditTabs.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const target = btn.dataset.auditTab;
+      auditTabs.forEach((b) => b.setAttribute("aria-selected", String(b === btn)));
+      document.getElementById("audit-tab-summary").hidden = target !== "summary";
+      document.getElementById("audit-tab-inspector").hidden = target !== "inspector";
+      document.getElementById("audit-tab-raw").hidden = target !== "raw";
+    });
+  });
+
+  document.getElementById("audit-modal-close").addEventListener("click", () => {
+    document.getElementById("audit-modal-backdrop").hidden = true;
+  });
+}
+
+async function launchSecurityAudit(target) {
+  const backdrop = document.getElementById("audit-modal-backdrop");
+  const badge = document.getElementById("audit-verdict-badge");
+  const sumEl = document.getElementById("audit-summary-content");
+  const inspBody = document.getElementById("audit-inspector-tbody");
+  const rawEl = document.getElementById("audit-raw-json");
+
+  backdrop.hidden = false;
+  badge.className = "c-badge c-badge--warn";
+  badge.textContent = "Đang chạy 7 probe V3.1…";
+  sumEl.textContent = "Đang thực thi bộ kiểm định ranh giới an toàn và tương thích VLM…";
+  inspBody.replaceChildren();
+  rawEl.textContent = "";
+
+  try {
+    const doc = await tauriApi.core.invoke("run_security_audit", { target });
+    const v = doc.verdict || {};
+    const lvl = Number(v.verdict_level || 2);
+    badge.className = `c-badge ${
+      lvl >= 4 ? "c-badge--ok" : lvl === 3 ? "c-badge--warn" : "c-badge--danger"
+    }`;
+    badge.textContent = `Mức ${lvl} · ${v.level_label || "?"}`;
+
+    sumEl.replaceChildren();
+    const lines = [
+      `Mục tiêu: ${doc.target?.model || "?"} @ ${doc.target?.api_base || "?"}`,
+      `✔ Dùng cho: ${v.use_for || "—"}`,
+      `⚠ Cảnh báo / Tránh: ${v.avoid_for || "—"}`,
+      `➤ Khuyến nghị: ${v.next_step || "—"} (${v.v31_decision_reason || ""})`,
+      `Thời gian đo: ${v.total_duration_s ?? "?"}s · Tệp lưu: ${doc.saved_report_file || "chưa lưu"}`,
+    ];
+    for (const ln of lines) {
+      const div = document.createElement("div");
+      div.textContent = ln;
+      sumEl.appendChild(div);
+    }
+
+    for (const row of doc.results || []) {
+      const tr = document.createElement("tr");
+      tr.appendChild(createCell(`T${row.tier}`, true));
+      tr.appendChild(createCell(row.name));
+      tr.appendChild(createCell(row.status, true));
+      tr.appendChild(createCell(row.reason_code, true));
+      tr.appendChild(
+        createCell(row.latency_ms != null ? `${Math.round(row.latency_ms)} ms` : "—", true)
+      );
+      tr.appendChild(createCell(row.summary));
+      inspBody.appendChild(tr);
+    }
+
+    rawEl.textContent = JSON.stringify(doc, null, 2);
+  } catch (err) {
+    badge.className = "c-badge c-badge--danger";
+    badge.textContent = "Lỗi kiểm định";
+    sumEl.textContent = `Không thể chạy kiểm định: ${err}`;
+  }
 }
 
 function setupForms() {

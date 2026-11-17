@@ -116,6 +116,7 @@ pub fn run() {
             commands::upsert_reserve_entry,
             commands::delete_reserve_entry,
             commands::probe_watch_entry,
+            commands::run_security_audit,
         ])
         .build(tauri::generate_context!())
         .expect("error while building OpenViking Cockpit Tauri application");

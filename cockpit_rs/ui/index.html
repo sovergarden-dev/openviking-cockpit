@@ -201,6 +201,49 @@
         </article>
       </section>
     </main>
+
+    <div id="audit-modal-backdrop" class="c-modal-backdrop" hidden>
+      <div class="c-modal" role="dialog" aria-modal="true" aria-labelledby="audit-modal-title">
+        <div class="c-topbar">
+          <div class="c-brand">
+            <span id="audit-modal-title">Kiểm định An toàn Provider (Taxonomy V3.1)</span>
+            <span id="audit-verdict-badge" class="c-badge c-badge--warn">Đang chạy…</span>
+          </div>
+          <nav class="c-tabs" role="tablist">
+            <button class="c-tab" type="button" data-audit-tab="summary" aria-selected="true">1. Kết luận &amp; Hướng dẫn</button>
+            <button class="c-tab" type="button" data-audit-tab="inspector" aria-selected="false">2. Chi tiết Hạng mục</button>
+            <button class="c-tab" type="button" data-audit-tab="raw" aria-selected="false">3. Dữ liệu thô JSON</button>
+          </nav>
+          <button id="audit-modal-close" type="button" class="c-btn">Đóng</button>
+        </div>
+
+        <section id="audit-tab-summary" class="c-panel">
+          <div id="audit-summary-content" class="c-card"></div>
+        </section>
+
+        <section id="audit-tab-inspector" class="c-panel" hidden>
+          <div class="c-table-wrap">
+            <table class="c-table">
+              <thead>
+                <tr>
+                  <th>Tier</th>
+                  <th>Hạng mục</th>
+                  <th>Trạng thái</th>
+                  <th>Mã lý do</th>
+                  <th>Độ trễ</th>
+                  <th>Tóm tắt</th>
+                </tr>
+              </thead>
+              <tbody id="audit-inspector-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="audit-tab-raw" class="c-panel" hidden>
+          <pre id="audit-raw-json" class="c-pre"></pre>
+        </section>
+      </div>
+    </div>
   </div>
   <script type="module" src="src/main.js"></script>
 </body>

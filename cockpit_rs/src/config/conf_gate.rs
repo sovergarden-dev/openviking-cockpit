@@ -398,6 +398,26 @@ pub fn summarize_slots(
         .collect()
 }
 
+/// Resolves `(model, api_base, ResolvedSecret)` for an existing slot internally on the Rust backend.
+pub fn resolve_slot_audit_target(
+    config: &OpenVikingConfig,
+    slot_index: usize,
+    env_map: Option<&HashMap<String, String>>,
+) -> Result<(String, String, crate::secrets::secret_store::ResolvedSecret), ConfGateError> {
+    let slots = extract_effective_slots(config, env_map);
+    let slot = slots
+        .get(slot_index)
+        .ok_or_else(|| ConfGateError::Validation(format!("Slot {} out of range", slot_index)))?;
+    let resolved = resolve_secret(&slot.raw_key, env_map);
+    if resolved.status != SecretStatus::SecretReady {
+        return Err(ConfGateError::Validation(format!(
+            "Slot {} credential is not ready ({:?})",
+            slot_index, resolved.status
+        )));
+    }
+    Ok((slot.model.clone(), slot.api_base.clone(), resolved))
+}
+
 pub fn compute_slot_drift(
     slots: &[SlotSummary],
     live_vlm: Option<&VlmActiveResult>,

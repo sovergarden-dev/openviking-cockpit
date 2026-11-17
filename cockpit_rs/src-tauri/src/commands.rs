@@ -7,9 +7,12 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, State};
 
 use cockpit_rs::config::conf_gate::{
-    apply_slot_update, load_raw_config, summarize_config, summarize_slots, ApplySlotOutcome,
-    ConfigSummary, SlotSummary, SlotUpdateInput, AUDIT_TTL_FAILOVER_S,
+    apply_slot_update, load_raw_config, resolve_slot_audit_target, summarize_config,
+    summarize_slots, ApplySlotOutcome, ConfigSummary, SlotSummary, SlotUpdateInput,
+    AUDIT_TTL_FAILOVER_S,
 };
+use cockpit_rs::secrets::secret_store::{resolve_secret, SecretStatus};
+use cockpit_rs::services::auditor::{run_provider_audit, AuditReportDocument};
 use cockpit_rs::services::auditor_cache::load_cached_audit_verdict;
 use cockpit_rs::services::telemetry::{TelemetrySnapshot, VlmActiveResponse};
 use cockpit_rs::services::watchlist::{
@@ -421,4 +424,71 @@ pub async fn probe_watch_entry(
     }
 
     Ok(summary)
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum AuditTargetRequest {
+    Slot { slot_index: usize },
+    Watch { watch_id: String },
+    Reserve { index: usize },
+}
+
+#[tauri::command]
+pub async fn run_security_audit(
+    state: State<'_, Arc<CockpitState>>,
+    target: AuditTargetRequest,
+) -> Result<AuditReportDocument, String> {
+    let paths = state.paths.clone();
+    let (model, api_base, resolved_key) = tauri::async_runtime::spawn_blocking({
+        let paths = paths.clone();
+        move || -> Result<(String, String, String), String> {
+            match target {
+                AuditTargetRequest::Slot { slot_index } => {
+                    let (cfg, _, _) =
+                        load_raw_config(&paths.conf_path).map_err(|e| e.to_string())?;
+                    let (m, b, sec) = resolve_slot_audit_target(&cfg, slot_index, None)
+                        .map_err(|e| e.to_string())?;
+                    Ok((m, b, sec.value))
+                }
+                AuditTargetRequest::Watch { watch_id } => {
+                    let (st, _) =
+                        load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
+                    let rec = st
+                        .watch_keys
+                        .iter()
+                        .find(|w| w.id == watch_id)
+                        .ok_or_else(|| format!("Watch '{}' not found", watch_id))?;
+                    let sec = resolve_secret(&rec.api_key, None);
+                    if sec.status != SecretStatus::SecretReady {
+                        return Err(format!("Watch credential not ready: {:?}", sec.status));
+                    }
+                    Ok((rec.model.clone(), rec.api_base.clone(), sec.value))
+                }
+                AuditTargetRequest::Reserve { index } => {
+                    let (st, _) =
+                        load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
+                    let rec = st
+                        .spare_models
+                        .get(index)
+                        .ok_or_else(|| format!("Reserve index {} out of range", index))?;
+                    let sec = resolve_secret(&rec.api_key, None);
+                    if sec.status != SecretStatus::SecretReady {
+                        return Err(format!("Reserve credential not ready: {:?}", sec.status));
+                    }
+                    Ok((rec.model.clone(), rec.api_base.clone(), sec.value))
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking panicked: {}", e))??;
+
+    Ok(run_provider_audit(
+        &paths.security_reports_dir,
+        &api_base,
+        &model,
+        &resolved_key,
+    )
+    .await)
 }
