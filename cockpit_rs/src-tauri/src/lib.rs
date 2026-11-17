@@ -1,4 +1,4 @@
-//! Tauri V2 application bootstrap, system tray setup, and background telemetry streaming worker.
+//! Tauri V2 application bootstrap, system tray setup, and background telemetry & watchlist workers.
 
 pub mod commands;
 pub mod state;
@@ -8,7 +8,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
 
-use crate::commands::collect_telemetry_once;
+use crate::commands::{collect_telemetry_once, run_due_watch_auto_pass};
 use crate::state::{CockpitPaths, CockpitState};
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -56,6 +56,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 pub fn run() {
     let paths = CockpitPaths::resolve().expect("Failed to resolve OpenViking directory paths");
     let (cockpit_state, mut shutdown_rx) = CockpitState::new(paths);
+    let mut watch_shutdown_rx = shutdown_rx.clone();
 
     let app = tauri::Builder::default()
         .manage(cockpit_state.clone())
@@ -81,17 +82,39 @@ pub fn run() {
                 }
             });
 
+            let watch_handle = app.handle().clone();
+            let watch_state = cockpit_state.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(15));
+                loop {
+                    tokio::select! {
+                        _ = ticker.tick() => {
+                            run_due_watch_auto_pass(&watch_handle, &watch_state).await;
+                        }
+                        _ = watch_shutdown_rx.changed() => {
+                            if *watch_shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_telemetry_status,
             commands::subscribe_telemetry_channel,
+            commands::switch_active_slot,
             commands::read_config,
             commands::list_slots,
             commands::apply_slot,
             commands::read_monitor_state,
             commands::upsert_watch_entry,
+            commands::set_watch_auto_state,
             commands::delete_watch_entry,
+            commands::upsert_reserve_entry,
+            commands::delete_reserve_entry,
             commands::probe_watch_entry,
         ])
         .build(tauri::generate_context!())

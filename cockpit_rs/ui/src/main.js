@@ -52,7 +52,7 @@ function renderTelemetry(snap) {
   const embReady = snap.embedding_model_ready;
   document.getElementById("metric-ollama").textContent =
     embReady === false
-      ? `THIẾU MODEL`
+      ? "THIẾU MODEL"
       : `${formatEndpointStatus(snap.ollama_status)} (${snap.ollama_models?.length || 0} model)`;
   document.getElementById("meta-ollama").textContent =
     `Model yêu cầu: ${expectedEmb} · ${snap.ollama_latency_ms} ms`;
@@ -68,7 +68,7 @@ function renderTelemetry(snap) {
 
   const vlmRes = snap.vlm?.result;
   document.getElementById("metric-vlm").textContent = vlmRes
-    ? `Slot ${(vlmRes.index ?? 0)} / ${(vlmRes.n ?? 1)}`
+    ? `Slot ${vlmRes.index ?? 0} / ${vlmRes.n ?? 1}`
     : formatEndpointStatus(snap.vlm_status);
   document.getElementById("meta-vlm").textContent = vlmRes
     ? `Hold: ${vlmRes.manual_hold ? "Bật" : "Tắt"} · ${snap.vlm_latency_ms} ms`
@@ -119,6 +119,14 @@ function renderConfig(cfg) {
     tr.appendChild(createCell(keyDesc, true));
 
     const actTd = document.createElement("td");
+    actTd.className = "c-actions";
+
+    const switchBtn = document.createElement("button");
+    switchBtn.type = "button";
+    switchBtn.className = "c-btn";
+    switchBtn.textContent = "Chuyển nóng";
+    switchBtn.addEventListener("click", () => hotSwitchSlot(slot.slot_index));
+
     const editBtn = document.createElement("button");
     editBtn.type = "button";
     editBtn.className = "c-btn";
@@ -129,6 +137,8 @@ function renderConfig(cfg) {
       document.getElementById("slot-base").value = slot.api_base;
       document.getElementById("slot-key").value = "";
     });
+
+    actTd.appendChild(switchBtn);
     actTd.appendChild(editBtn);
     tr.appendChild(actTd);
     tbody.appendChild(tr);
@@ -138,6 +148,7 @@ function renderConfig(cfg) {
 function renderMonitorState(summary) {
   if (!summary) return;
   state.monitorSha = summary.sha256;
+  document.getElementById("watch-master-auto").checked = Boolean(summary.watch_auto_enabled);
 
   const wBody = document.getElementById("watch-tbody");
   wBody.replaceChildren();
@@ -147,7 +158,12 @@ function renderMonitorState(summary) {
     tr.appendChild(createCell(row.model, true));
     tr.appendChild(createCell(row.api_base, true));
     tr.appendChild(createCell(row.secret_status, true));
-    tr.appendChild(createCell(row.auto_enabled ? "Bật" : row.auto_disabled_reason || "Tắt"));
+    const autoLabel = row.auto_enabled
+      ? summary.watch_auto_enabled
+        ? "Bật"
+        : "Chờ tổng"
+      : row.auto_disabled_reason || "Tắt";
+    tr.appendChild(createCell(autoLabel));
     const probeText = row.last_probe
       ? `${row.last_probe.category} (${row.last_probe.ms ?? "?"} ms)`
       : "Chưa thử";
@@ -161,6 +177,12 @@ function renderMonitorState(summary) {
     probeBtn.textContent = "Thử ngay";
     probeBtn.addEventListener("click", () => probeWatch(row.id));
 
+    const autoBtn = document.createElement("button");
+    autoBtn.type = "button";
+    autoBtn.className = "c-btn";
+    autoBtn.textContent = row.auto_enabled ? "Tắt Auto" : "Bật Auto";
+    autoBtn.addEventListener("click", () => toggleWatchRowAuto(row.id, !row.auto_enabled));
+
     const delBtn = document.createElement("button");
     delBtn.type = "button";
     delBtn.className = "c-btn";
@@ -168,6 +190,7 @@ function renderMonitorState(summary) {
     delBtn.addEventListener("click", () => deleteWatch(row.id));
 
     actTd.appendChild(probeBtn);
+    actTd.appendChild(autoBtn);
     actTd.appendChild(delBtn);
     tr.appendChild(actTd);
     wBody.appendChild(tr);
@@ -182,6 +205,28 @@ function renderMonitorState(summary) {
     tr.appendChild(createCell(res.api_base, true));
     tr.appendChild(createCell(res.secret_status, true));
     tr.appendChild(createCell(res.note || "—"));
+
+    const actTd = document.createElement("td");
+    actTd.className = "c-actions";
+    const toSlotBtn = document.createElement("button");
+    toSlotBtn.type = "button";
+    toSlotBtn.className = "c-btn";
+    toSlotBtn.textContent = "Đưa sang Slot";
+    toSlotBtn.addEventListener("click", () => {
+      document.getElementById("slot-model").value = res.model;
+      document.getElementById("slot-base").value = res.api_base;
+      document.querySelector('[data-tab="slots"]').click();
+    });
+
+    const delResBtn = document.createElement("button");
+    delResBtn.type = "button";
+    delResBtn.className = "c-btn";
+    delResBtn.textContent = "Xóa";
+    delResBtn.addEventListener("click", () => deleteReserve(res.index));
+
+    actTd.appendChild(toSlotBtn);
+    actTd.appendChild(delResBtn);
+    tr.appendChild(actTd);
     rBody.appendChild(tr);
   }
 }
@@ -196,6 +241,34 @@ async function refreshAll() {
   if (snap.status === "fulfilled") renderTelemetry(snap.value);
   if (cfg.status === "fulfilled") renderConfig(cfg.value);
   if (mon.status === "fulfilled") renderMonitorState(mon.value);
+}
+
+async function hotSwitchSlot(slotIndex) {
+  const statusEl = document.getElementById("slot-status");
+  statusEl.textContent = `Đang chuyển nóng sang Slot #${slotIndex}…`;
+  try {
+    const res = await tauriApi.core.invoke("switch_active_slot", { slotIndex });
+    const hold = res.result?.manual_hold ? "đã khóa failback" : "tự động failback";
+    statusEl.textContent = `Đã chuyển nóng sang Slot #${res.result?.index ?? slotIndex} (${hold}).`;
+    await refreshAll();
+  } catch (err) {
+    statusEl.textContent = `Lỗi chuyển nóng: ${err}`;
+  }
+}
+
+async function toggleWatchRowAuto(watchId, enabled) {
+  const statusEl = document.getElementById("watch-status");
+  try {
+    const res = await tauriApi.core.invoke("set_watch_auto_state", {
+      expectedSha: state.monitorSha,
+      masterEnabled: null,
+      watchId,
+      rowEnabled: enabled,
+    });
+    renderMonitorState(res);
+  } catch (err) {
+    statusEl.textContent = `Lỗi: ${err}`;
+  }
 }
 
 async function probeWatch(watchId) {
@@ -224,6 +297,20 @@ async function deleteWatch(watchId) {
   }
 }
 
+async function deleteReserve(index) {
+  const statusEl = document.getElementById("reserve-status");
+  try {
+    const res = await tauriApi.core.invoke("delete_reserve_entry", {
+      expectedSha: state.monitorSha,
+      index,
+    });
+    renderMonitorState(res);
+    statusEl.textContent = "Đã xóa model dự trữ.";
+  } catch (err) {
+    statusEl.textContent = `Lỗi: ${err}`;
+  }
+}
+
 function setupTabs() {
   const tabs = document.querySelectorAll(".c-tab");
   tabs.forEach((btn) => {
@@ -239,6 +326,21 @@ function setupTabs() {
 
 function setupForms() {
   document.getElementById("btn-refresh").addEventListener("click", refreshAll);
+
+  document.getElementById("watch-master-auto").addEventListener("change", async (ev) => {
+    const statusEl = document.getElementById("watch-status");
+    try {
+      const res = await tauriApi.core.invoke("set_watch_auto_state", {
+        expectedSha: state.monitorSha,
+        masterEnabled: ev.target.checked,
+        watchId: null,
+        rowEnabled: null,
+      });
+      renderMonitorState(res);
+    } catch (err) {
+      statusEl.textContent = `Lỗi: ${err}`;
+    }
+  });
 
   document.getElementById("slot-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
@@ -285,6 +387,29 @@ function setupForms() {
       document.getElementById("watch-key").value = "";
       renderMonitorState(summary);
       statusEl.textContent = "Đã lưu key theo dõi (mã hóa DPAPI).";
+    } catch (err) {
+      statusEl.textContent = `Lỗi: ${err}`;
+    }
+  });
+
+  document.getElementById("reserve-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const statusEl = document.getElementById("reserve-status");
+    const input = {
+      index: null,
+      model: document.getElementById("reserve-model").value.trim(),
+      api_base: document.getElementById("reserve-base").value.trim(),
+      api_key: document.getElementById("reserve-key").value.trim(),
+      note: document.getElementById("reserve-note").value.trim(),
+    };
+    try {
+      const summary = await tauriApi.core.invoke("upsert_reserve_entry", {
+        expectedSha: state.monitorSha,
+        input,
+      });
+      document.getElementById("reserve-key").value = "";
+      renderMonitorState(summary);
+      statusEl.textContent = "Đã lưu model dự trữ (mã hóa DPAPI).";
     } catch (err) {
       statusEl.textContent = `Lỗi: ${err}`;
     }

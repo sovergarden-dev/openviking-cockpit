@@ -366,6 +366,39 @@ impl TelemetryClient {
         self.probe("/api/v1/observer/vlm/active").await
     }
 
+    /// Runtime VLM slot hot-switch (`POST /api/v1/observer/vlm/active` with `{"index": slot_index}`).
+    /// Index `> 0` engages `manual_hold`; index `0` releases `manual_hold` without touching `ov.conf`.
+    pub async fn switch_active_vlm_slot(
+        &self,
+        slot_index: usize,
+    ) -> Result<VlmActiveResponse, String> {
+        let url = format!("{}/api/v1/observer/vlm/active", self.base_url);
+        let mut req = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({ "index": slot_index }));
+        if let Some(ref key) = self.api_key {
+            req = req.header("X-API-Key", &key.0).bearer_auth(&key.0);
+        }
+        let resp = req.send().await.map_err(|e| {
+            if e.is_timeout() {
+                "VLM hot-switch request timed out".to_string()
+            } else {
+                "VLM hot-switch endpoint unreachable".to_string()
+            }
+        })?;
+        let code = resp.status();
+        if !code.is_success() {
+            return Err(format!(
+                "VLM hot-switch rejected with HTTP {}",
+                code.as_u16()
+            ));
+        }
+        resp.json::<VlmActiveResponse>()
+            .await
+            .map_err(|_| "Failed to decode VLM hot-switch response".to_string())
+    }
+
     pub async fn fetch_vikingdb(&self) -> (EndpointStatus, Option<VikingDbResponse>, u64) {
         self.probe("/api/v1/observer/vikingdb?format=json").await
     }
@@ -678,5 +711,49 @@ mod tests {
             status7,
             EndpointStatus::Unreachable | EndpointStatus::Timeout
         ));
+    }
+
+    #[tokio::test]
+    async fn test_switch_active_vlm_slot_posts_index() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let base_url = format!("http://127.0.0.1:{}", port);
+
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 2048];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                let req_str = String::from_utf8_lossy(&buf[..n]).to_string();
+                let ok_post = req_str.starts_with("POST /api/v1/observer/vlm/active HTTP/1.1")
+                    && req_str.contains(r#"{"index":2}"#);
+                let (status_line, body) = if ok_post {
+                    (
+                        "HTTP/1.1 200 OK",
+                        r#"{"status":"ok","result":{"kind":"MultiCredentialVLM","index":2,"n":4,"manual_hold":true}}"#,
+                    )
+                } else {
+                    ("HTTP/1.1 400 Bad Request", r#"{"status":"error"}"#)
+                };
+                let resp = format!(
+                    "{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status_line,
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let client = TelemetryClient::new(&base_url);
+        let switched = client
+            .switch_active_vlm_slot(2)
+            .await
+            .expect("switch slot 2");
+        let res = switched.result.expect("result");
+        assert_eq!(res.index, Some(2));
+        assert_eq!(res.manual_hold, Some(true));
     }
 }

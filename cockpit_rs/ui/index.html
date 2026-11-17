@@ -110,7 +110,13 @@
 
       <section id="panel-watch" class="c-panel" hidden>
         <article class="c-card">
-          <span class="c-card-title">THEO DÕI (Tối đa 7 key độc lập — DPAPI)</span>
+          <div class="c-actions">
+            <span class="c-card-title">THEO DÕI (Tối đa 7 key độc lập — DPAPI)</span>
+            <label class="c-card-meta">
+              <input id="watch-master-auto" type="checkbox" />
+              Công tắc Auto tổng
+            </label>
+          </div>
           <div class="c-table-wrap">
             <table class="c-table">
               <thead>
@@ -153,7 +159,7 @@
         </article>
 
         <article class="c-card">
-          <span class="c-card-title">DỰ TRỮ (Spare Models Pool)</span>
+          <span class="c-card-title">DỰ TRỮ (Spare Models Pool — DPAPI)</span>
           <div class="c-table-wrap">
             <table class="c-table">
               <thead>
@@ -163,11 +169,35 @@
                   <th>Endpoint</th>
                   <th>Trạng thái Key</th>
                   <th>Ghi chú</th>
+                  <th>Thao tác</th>
                 </tr>
               </thead>
               <tbody id="reserve-tbody"></tbody>
             </table>
           </div>
+
+          <form id="reserve-form" class="c-form">
+            <div class="c-field">
+              <label for="reserve-model">Model dự trữ</label>
+              <input id="reserve-model" class="c-input" type="text" required />
+            </div>
+            <div class="c-field">
+              <label for="reserve-base">Base URL (/v1)</label>
+              <input id="reserve-base" class="c-input" type="url" placeholder="https://api.example.com/v1" required />
+            </div>
+            <div class="c-field">
+              <label for="reserve-key">API Key / ${ENV_VAR}</label>
+              <input id="reserve-key" class="c-input" type="password" autocomplete="off" required />
+            </div>
+            <div class="c-field">
+              <label for="reserve-note">Ghi chú</label>
+              <input id="reserve-note" class="c-input" type="text" />
+            </div>
+            <div class="c-actions">
+              <button type="submit" class="c-btn c-btn--primary">+ Thêm Dự trữ</button>
+            </div>
+          </form>
+          <div id="reserve-status" class="c-card-meta"></div>
         </article>
       </section>
     </main>

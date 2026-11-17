@@ -514,6 +514,98 @@ pub fn upsert_watch_record(
     Ok(new_id)
 }
 
+#[derive(Clone, Deserialize)]
+pub struct UpsertReserveInput {
+    #[serde(default)]
+    pub index: Option<usize>,
+    pub model: String,
+    pub api_base: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub note: String,
+}
+
+impl fmt::Debug for UpsertReserveInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UpsertReserveInput")
+            .field("index", &self.index)
+            .field("model", &self.model)
+            .field("api_base", &self.api_base)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("note", &self.note)
+            .finish()
+    }
+}
+
+pub fn upsert_reserve_record(
+    state: &mut MonitorState,
+    input: &UpsertReserveInput,
+) -> Result<usize, WatchError> {
+    let model = input.model.trim().to_string();
+    let note = input.note.trim().to_string();
+    if model.is_empty() {
+        return Err(WatchError::Validation(
+            "Reserve model cannot be empty".to_string(),
+        ));
+    }
+    let api_base = validate_watch_base_url(&input.api_base)?;
+
+    if let Some(idx) = input.index {
+        let rec = state.spare_models.get_mut(idx).ok_or_else(|| {
+            WatchError::Validation("Reserve entry index out of range".to_string())
+        })?;
+        rec.model = model;
+        rec.api_base = api_base;
+        rec.note = note;
+        if let Some(raw_k) = input
+            .api_key
+            .as_ref()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+        {
+            rec.api_key = encrypt_for_monitor_storage(&raw_k)?;
+        }
+        return Ok(idx);
+    }
+
+    let raw_key = input
+        .api_key
+        .as_ref()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| {
+            WatchError::Validation("API key is required for a new reserve model".to_string())
+        })?;
+    let stored_key = encrypt_for_monitor_storage(&raw_key)?;
+    state.spare_models.push(SpareModelRecord {
+        model,
+        api_base,
+        api_key: stored_key,
+        note,
+        extra: BTreeMap::new(),
+    });
+    Ok(state.spare_models.len() - 1)
+}
+
+pub fn set_watch_row_auto(
+    state: &mut MonitorState,
+    watch_id: &str,
+    enabled: bool,
+) -> Result<(), WatchError> {
+    let rec = state
+        .watch_keys
+        .iter_mut()
+        .find(|w| w.id == watch_id)
+        .ok_or_else(|| WatchError::Validation(format!("Watch '{}' not found", watch_id)))?;
+    rec.auto_enabled = enabled;
+    if enabled {
+        rec.auto_disabled_reason.clear();
+        rec.auth_fail_streak = 0;
+    }
+    Ok(())
+}
+
 /// Applies a probe result to a `WatchRecord`, enforcing exponential backoff (cap 60m) and 2x 401/403 auto-disable.
 pub fn record_watch_probe_outcome(
     record: &mut WatchRecord,
@@ -806,5 +898,43 @@ mod tests {
         let err = load_monitor_state(&mon_path);
         assert!(matches!(err, Err(WatchError::CorruptedState(_))));
         assert_eq!(fs::read(&mon_path).unwrap(), corrupted);
+    }
+
+    #[test]
+    fn test_reserve_crud_and_watch_auto_toggle_roundtrip() {
+        let mut state = MonitorState::default();
+        let idx = upsert_reserve_record(
+            &mut state,
+            &UpsertReserveInput {
+                index: None,
+                model: "spare-v1".to_string(),
+                api_base: "https://api.example.com/v1".to_string(),
+                api_key: Some("SYNTHETIC_SPARE_SECRET_42".to_string()),
+                note: "Fallback pool".to_string(),
+            },
+        )
+        .expect("insert reserve");
+        assert_eq!(idx, 0);
+
+        let wid = upsert_watch_record(
+            &mut state,
+            &UpsertWatchInput {
+                id: None,
+                alias: "row1".to_string(),
+                model: "m1".to_string(),
+                api_base: "https://api.example.com/v1".to_string(),
+                api_key: Some("SYNTHETIC_WATCH_KEY_42".to_string()),
+            },
+        )
+        .expect("insert watch");
+
+        set_watch_row_auto(&mut state, &wid, true).expect("enable auto");
+        assert!(state.watch_keys[0].auto_enabled);
+
+        let summary = summarize_monitor_state(&state, "sha-r", None);
+        assert_eq!(summary.reserves.len(), 1);
+        assert_eq!(summary.reserves[0].model, "spare-v1");
+        let serialized = serde_json::to_string(&summary).unwrap();
+        assert!(!serialized.contains("SYNTHETIC_SPARE_SECRET_42"));
     }
 }
