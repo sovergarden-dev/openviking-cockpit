@@ -14,12 +14,16 @@ set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
 set "PYTHONUNBUFFERED=1"
 set "OLLAMA_HOST=127.0.0.1:21434"
-set "HOME_DIR=C:/Users/rurus/.openviking"
+rem Keep the embedding model resident so recall never pays a 4s cold load.
+rem 30m covers a working session and still frees ~1.2 GB VRAM after idle.
+set "OLLAMA_KEEP_ALIVE=30m"
+set "HOME_DIR=%USERPROFILE%/.openviking"
 set "SERVER=%HOME_DIR%/venv/Scripts/openviking-server.exe"
-set "OLLAMA=C:/Users/rurus/AppData/Local/Programs/Ollama/ollama.exe"
+set "OLLAMA=%LOCALAPPDATA%/Programs/Ollama/ollama.exe"
 set "LOG_DIR=%HOME_DIR%/logs"
 set "LOG=%LOG_DIR%/server.log"
 set "OLLAMA_LOG=%LOG_DIR%/ollama.log"
+set "LIFECYCLE_LOG=%LOG_DIR%/lifecycle.jsonl"
 set "HEALTH=http://127.0.0.1:19330/health"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 
@@ -49,7 +53,11 @@ rem Clear a data-dir lock left by a recycled PID after reboot (crash-loop guard)
 "%HOME_DIR%/venv/Scripts/python.exe" "%HOME_DIR%/ov_stale_lock_clean.py" >nul 2>&1
 
 echo [%date% %time%] Starting OpenViking watchdog instance.>>"%LOG%"
-"%SERVER%" >>"%LOG%" 2>&1
+rem One run through the lifecycle wrapper: real child PID, exact exit code and
+rem monotonic uptime land in lifecycle.jsonl (metadata only, no server output).
+rem --entry-point runs the installed console script with python -u -X faulthandler,
+rem so the server process (not just this wrapper) gets those flags.
+"%HOME_DIR%/venv/Scripts/python.exe" -u -X faulthandler "%HOME_DIR%/ov_lifecycle.py" --log "%LIFECYCLE_LOG%" --entry-point openviking-server >>"%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 echo [%date% %time%] OpenViking exited with code %RC%; restarting in 10 seconds.>>"%LOG%"
 ping -n 11 127.0.0.1 >nul

@@ -7,6 +7,7 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 ### Added
 - Wired incident-debounced Windows tray balloon notifications (`notify_on_down` and `notify_on_failover` in `cockpit_rs`) for OpenViking port 19330 outages, missing Ollama embedding models (`qwen3-embedding:0.6b`), and automatic VLM backup slot failovers without false-alarming on manual operator holds, backed by `(mtime, size)` metadata caching on background telemetry ticks.
 - Added one-click backend-side DPAPI Reserve promotion (`promote_reserve_to_slot`) with an inline target-slot selector on the Reserve card and duplicate-guarded Watchlist cloning (`copy_reserve_to_watch`) across distinct DPAPI salts in `cockpit_rs` so encrypted credentials move without exposing raw API keys across WebView IPC.
+- Added sanitized child-process lifecycle instrumentation (`ops/ov_lifecycle.py` and `ops/start-openviking-hidden.cmd`) recording per-run PIDs, hex crash codes, and monotonic uptime to `logs/lifecycle.jsonl` while launching `openviking-server` with `-u -X faulthandler` and `OLLAMA_KEEP_ALIVE=30m`.
 
 ### Security
 - Added `docs/recovery-*/` and `monitor/_*.py` exclusion patterns to `.gitignore` to prevent accidental staging of local diagnostic artifacts containing workspace memory URIs.

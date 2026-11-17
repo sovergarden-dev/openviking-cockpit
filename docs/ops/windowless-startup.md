@@ -13,10 +13,10 @@ entirely, and `logs/server.log` / `logs/ollama.log` are the only log surfaces.
 
 ```
 Scheduled Task "OpenViking Autostart"
-  └─ wscript.exe //B  C:\Users\rurus\.openviking\start-openviking-hidden.vbs    (style 0)
-       └─ cmd.exe /d /c  C:\Users\rurus\.openviking\start-openviking-hidden.cmd  (no window)
-            ├─ ollama.exe serve      → logs/ollama.log
-            └─ openviking-server.exe → logs/server.log
+  └─ wscript.exe //B  %USERPROFILE%\.openviking\start-openviking-hidden.vbs    (style 0)
+       └─ cmd.exe /d /c  %USERPROFILE%\.openviking\start-openviking-hidden.cmd  (no window)
+            ├─ ollama.exe serve      → logs/ollama.log (OLLAMA_KEEP_ALIVE=30m)
+            └─ ov_lifecycle.py       → logs/lifecycle.jsonl (metadata) + logs/server.log (openviking-server -u -X faulthandler)
 ```
 
 Files:
@@ -24,7 +24,8 @@ Files:
 | Path | Role |
 |---|---|
 | `start-openviking-hidden.vbs` | Window-style-0 launcher invoked by the task |
-| `start-openviking-hidden.cmd` | Authoritative watchdog (windowless-safe waits) |
+| `start-openviking-hidden.cmd` | Authoritative watchdog (windowless-safe waits + `OLLAMA_KEEP_ALIVE=30m`) |
+| `ov_lifecycle.py` | Sanitized one-run child wrapper recording PID, hex exit code, and monotonic uptime to `logs/lifecycle.jsonl` |
 | `start-openviking.cmd` | Legacy visible-console watchdog; not referenced by the task |
 | `backups/task-xml/` | Pre-change task XML and legacy cmd snapshot |
 
