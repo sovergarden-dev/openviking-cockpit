@@ -35,11 +35,34 @@ impl Drop for SingleInstanceMutex {
     }
 }
 
+#[cfg(windows)]
+fn activate_existing_window() {
+    use std::ptr::null;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+    };
+
+    let title: Vec<u16> = "OpenViking Cockpit\0".encode_utf16().collect();
+    unsafe {
+        let hwnd = FindWindowW(null(), title.as_ptr());
+        if !hwnd.is_null() {
+            ShowWindow(hwnd, SW_SHOW);
+            if IsIconic(hwnd) != 0 {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+            SetForegroundWindow(hwnd);
+        }
+    }
+}
+
 fn main() {
     #[cfg(windows)]
     let _instance_guard = match SingleInstanceMutex::acquire() {
         Some(g) => g,
-        None => return,
+        None => {
+            activate_existing_window();
+            return;
+        }
     };
 
     openviking_cockpit_lib::run();

@@ -386,6 +386,9 @@ async function deleteWatch(watchId) {
       expectedSha: state.monitorSha,
       watchId,
     });
+    if (state.editingWatchId === watchId) {
+      resetWatchDraft();
+    }
     renderMonitorState(res);
     statusEl.textContent = "Đã xóa bản ghi theo dõi.";
   } catch (err) {
@@ -400,6 +403,9 @@ async function deleteReserve(index) {
       expectedSha: state.monitorSha,
       index,
     });
+    if (state.editingReserveIndex !== null) {
+      resetReserveDraft();
+    }
     renderMonitorState(res);
     statusEl.textContent = "Đã xóa model dự trữ.";
   } catch (err) {

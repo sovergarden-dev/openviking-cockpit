@@ -148,6 +148,12 @@ pub fn run() {
         .setup(move |app| {
             setup_tray(app.handle())?;
 
+            if std::env::args().any(|a| a == "--tray") {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.hide();
+                }
+            }
+
             let handle = app.handle().clone();
             let worker_state = cockpit_state.clone();
             tauri::async_runtime::spawn(async move {
