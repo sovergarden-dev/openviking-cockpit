@@ -26,6 +26,7 @@ def http(url, **kwargs):
 glob['http_json'] = http
 result = ns['probe_model']('fixture/model', 'https://fixture.invalid/v1', 'synthetic-credential', timeout=20, max_tokens=64)
 assert result['http_code'] == 401
+assert 'probe fail model · auth-or-quota HTTP 401' in logs[0], f'failure log must name the model: {logs[0]}'
 assert 'synthetic-provider-secret' not in str(result) + str(logs)
 assert 'synthetic-query-secret' not in str(result) + str(logs)
 assert calls[0][1]['timeout'] == 20

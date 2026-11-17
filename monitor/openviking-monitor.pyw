@@ -1521,6 +1521,7 @@ def write_ov_conf_checked(
     before: dict | None = None,
     expected_advisories: list[dict] | None = None,
     allow_unaudited: bool = False,
+    manual_save: bool = False,
 ) -> Path:
     """Atomically write only if the config and admission result still match."""
     vlm = raw.get("vlm") or {}
@@ -1541,7 +1542,9 @@ def write_ov_conf_checked(
         if before is not None:
             if _conf_digest(before) != expected_digest:
                 raise RuntimeError("Validated baseline does not match audited configuration")
-            if allow_unaudited:
+            if manual_save:
+                conditional = validate_conf_targets(before, raw, manual_save=True)
+            elif allow_unaudited:
                 conditional = validate_conf_targets(before, raw, allow_unaudited=True)
             else:
                 conditional = validate_conf_targets(before, raw)
@@ -1638,8 +1641,10 @@ def credential_identity(item: dict) -> tuple:
     return (item.get("model") or "", model_cache_key(item.get("api_base") or "", item.get("api_key") or ""))
 
 
-def validate_conf_targets(before: dict, after: dict, *, allow_unaudited: bool = False) -> list[dict]:
-    """Compatibility adapter for the standalone admission policy."""
+def validate_conf_targets(before: dict, after: dict, *, allow_unaudited: bool = False, manual_save: bool = False) -> list[dict]:
+    """Compatibility adapter for strict admission and explicit manual saves."""
+    if manual_save:
+        return _validate_conf_targets_policy(before, after, manual_save=True)
     return _validate_conf_targets_policy(before, after, allow_unaudited=allow_unaudited)
 
 
@@ -2266,7 +2271,8 @@ def probe_model(model: str | None, api_base: str | None, api_key: str | None, ti
             category = "upstream"
         elif not code:
             category = "timeout" if "timeout" in str(body).casefold() else "network"
-        log_app(f"probe fail {category} HTTP {code}")
+        label = (model or "").strip().split("/")[-1] or "—"
+        log_app(f"probe fail {label} · {category} HTTP {code}")
         detail = f"{category} · HTTP {code}" if code else category
         return {"ok": False, "text": detail, "ms": ms, "at": time.time(), "category": category, "http_code": code}
     choice = (body.get("choices") or [{}])[0]
@@ -4010,6 +4016,7 @@ def run_gui(start_hidden: bool) -> None:
         expected_digest: str | None = None,
         allow_inline_audit: bool = True,
         allow_unaudited: bool = False,
+        manual_save: bool = False,
     ) -> bool:
         try:
             raw = json.loads(CONF_PATH.read_text(encoding="utf-8"))
@@ -4018,7 +4025,9 @@ def run_gui(start_hidden: bool) -> None:
                 raise RuntimeError("ov.conf changed during audit; no write was made")
             candidate = mutator(copy.deepcopy(raw))
             try:
-                if allow_unaudited:
+                if manual_save:
+                    conditional = validate_conf_targets(raw, candidate, manual_save=True)
+                elif allow_unaudited:
                     conditional = validate_conf_targets(raw, candidate, allow_unaudited=True)
                 else:
                     conditional = validate_conf_targets(raw, candidate)
@@ -4086,6 +4095,7 @@ def run_gui(start_hidden: bool) -> None:
                 before=raw,
                 expected_advisories=conditional,
                 allow_unaudited=allow_unaudited_save,
+                manual_save=manual_save,
             )
             if conditional:
                 log_app(f"slot edit conditional-admission accepted slots={[i.get('slot') for i in conditional]}")
@@ -4148,7 +4158,7 @@ def run_gui(start_hidden: bool) -> None:
             return
         if parent:
             parent.destroy()
-        if not apply_conf_edit(mutator, note, detail=detail, finish_action=choice):
+        if not apply_conf_edit(mutator, note, detail=detail, finish_action=choice, manual_save=True):
             return
         if choice == "save":
             mark_pending(note)

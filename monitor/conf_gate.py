@@ -292,8 +292,8 @@ def classify_conf_targets(before: dict, after: dict) -> dict:
     }
 
 
-def validate_conf_targets(before: dict, after: dict, *, allow_unaudited: bool = False) -> list[dict]:
-    """Validate targets against admission criteria.
+def validate_conf_targets(before: dict, after: dict, *, allow_unaudited: bool = False, manual_save: bool = False) -> list[dict]:
+    """Validate targets; explicit manual saves check structure/secrets, never audit reports.
 
     Raises:
       - AuditRequired (subclass of ValueError) with .audit_targets if retriable by running audit.
@@ -302,6 +302,35 @@ def validate_conf_targets(before: dict, after: dict, *, allow_unaudited: bool = 
     Returns:
       - List of conditional failover targets requiring operator confirmation.
     """
+    if manual_save:
+        vlm = after.get("vlm")
+        if not isinstance(vlm, dict):
+            raise ValueError("Thiếu cấu hình VLM; chưa ghi ov.conf.")
+        credentials = vlm.get("credentials")
+        if credentials is not None and (not isinstance(credentials, list) or not credentials
+                                        or not all(isinstance(item, dict) for item in credentials)):
+            raise ValueError("Danh sách slot không hợp lệ; chưa ghi ov.conf.")
+        for index, item in enumerate(effective_credentials(after)):
+            model = item.get("model")
+            base = item.get("api_base")
+            if not isinstance(model, str) or not model.strip():
+                raise ValueError(f"Thiếu model cho slot {index}; chưa ghi ov.conf.")
+            if not isinstance(base, str):
+                raise ValueError(f"Base URL không hợp lệ cho slot {index}; chưa ghi ov.conf.")
+            try:
+                endpoint = urlsplit(base.strip())
+                valid_endpoint = (endpoint.scheme in ("http", "https") and endpoint.hostname
+                                  and endpoint.username is None and endpoint.password is None
+                                  and not endpoint.query and not endpoint.fragment)
+                endpoint.port
+            except ValueError:
+                valid_endpoint = False
+            if not valid_endpoint:
+                raise ValueError(f"Base URL không hợp lệ cho slot {index}; chưa ghi ov.conf.")
+            if not _resolved_key(item.get("api_key")):
+                raise ValueError(f"API key thiếu hoặc chưa giải mã được cho slot {index}; chưa ghi ov.conf.")
+        return []
+
     plan = classify_conf_targets(before, after)
     blocked = plan.get("blocked") or []
     needs_audit = plan.get("needs_audit") or []
