@@ -589,6 +589,81 @@ pub fn upsert_reserve_record(
     Ok(state.spare_models.len() - 1)
 }
 
+/// Clones an existing Reserve model into the bounded Watchlist (`auto_enabled: false`) in Rust memory
+/// so raw DPAPI credentials never cross IPC to the frontend WebView.
+pub fn copy_reserve_into_watchlist(
+    state: &mut MonitorState,
+    reserve_index: usize,
+    alias_override: Option<&str>,
+    env_map: Option<&HashMap<String, String>>,
+) -> Result<String, WatchError> {
+    if state.watch_keys.len() >= MAX_WATCHES {
+        return Err(WatchError::Validation(format!(
+            "Maximum {} watch credentials reached",
+            MAX_WATCHES
+        )));
+    }
+    let reserve = state
+        .spare_models
+        .get(reserve_index)
+        .ok_or_else(|| WatchError::Validation("Reserve entry index out of range".to_string()))?
+        .clone();
+
+    let api_base = validate_watch_base_url(&reserve.api_base)?;
+    let resolved = resolve_secret(&reserve.api_key, env_map);
+    if resolved.status != SecretStatus::SecretReady {
+        return Err(WatchError::Validation(format!(
+            "Reserve credential is not ready ({:?})",
+            resolved.status
+        )));
+    }
+
+    let raw_alias = alias_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let n = reserve.note.trim();
+            if n.is_empty() {
+                reserve.model.trim()
+            } else {
+                n
+            }
+        });
+    let alias: String = raw_alias
+        .chars()
+        .filter(|&c| (c as u32) >= 32 && (c as u32) != 127)
+        .take(120)
+        .collect();
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let new_id = format!(
+        "watch-{}",
+        &sha256_hex(format!("{}:{}:{}", reserve.model, api_base, nanos).as_bytes())[..16]
+    );
+
+    state.watch_keys.push(WatchRecord {
+        id: new_id.clone(),
+        alias,
+        model: reserve.model,
+        api_base,
+        api_key: reserve.api_key,
+        auto_enabled: false,
+        auto_disabled_reason: String::new(),
+        rev: 1,
+        fail_streak: 0,
+        auth_fail_streak: 0,
+        next_probe_at: 0.0,
+        cooldown_until: 0.0,
+        last_probe: None,
+        extra: BTreeMap::new(),
+    });
+
+    Ok(new_id)
+}
+
 pub fn set_watch_row_auto(
     state: &mut MonitorState,
     watch_id: &str,
@@ -945,5 +1020,17 @@ mod tests {
         assert_eq!(summary.reserves[0].model, "spare-v1");
         let serialized = serde_json::to_string(&summary).unwrap();
         assert!(!serialized.contains("SYNTHETIC_SPARE_SECRET_42"));
+
+        let copied_id = copy_reserve_into_watchlist(&mut state, 0, None, None)
+            .expect("copy reserve into watchlist");
+        let copied = state
+            .watch_keys
+            .iter()
+            .find(|w| w.id == copied_id)
+            .expect("copied watch record");
+        assert_eq!(copied.model, "spare-v1");
+        assert_eq!(copied.alias, "Fallback pool");
+        assert!(!copied.auto_enabled);
+        assert_eq!(copied.api_key, state.spare_models[0].api_key);
     }
 }

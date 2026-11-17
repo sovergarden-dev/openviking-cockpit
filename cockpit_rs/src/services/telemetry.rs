@@ -481,6 +481,86 @@ impl TelemetryClient {
     }
 }
 
+/// Stateful per-incident tracker preventing repeat tray notification storms during sustained outages.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IncidentTracker {
+    pub server_down_notified: bool,
+    pub embedding_missing_notified: bool,
+    pub failover_slot_notified: Option<usize>,
+}
+
+/// Evaluates `snapshot` against `notify_on_down` / `notify_on_failover` preferences and updates `tracker`,
+/// returning newly triggered `(title, body)` OS tray notifications (at most once per distinct incident).
+pub fn evaluate_telemetry_incidents(
+    tracker: &mut IncidentTracker,
+    snapshot: &TelemetrySnapshot,
+    notify_on_down: bool,
+    notify_on_failover: bool,
+) -> Vec<(String, String)> {
+    let mut alerts = Vec::new();
+
+    let server_healthy = snapshot.health_status == EndpointStatus::Ok
+        && snapshot.health.as_ref().is_some_and(|h| h.healthy)
+        && snapshot.ready_status == EndpointStatus::Ok
+        && snapshot.ready.as_ref().is_some_and(|r| r.status == "ready");
+
+    if !server_healthy {
+        if notify_on_down && !tracker.server_down_notified {
+            tracker.server_down_notified = true;
+            alerts.push((
+                "CẢNH BÁO: OpenViking ngắt kết nối".to_string(),
+                "Dịch vụ trên cổng 19330 không phản hồi hoặc chưa sẵn sàng.".to_string(),
+            ));
+        }
+    } else {
+        tracker.server_down_notified = false;
+    }
+
+    match snapshot.embedding_model_ready {
+        Some(false) => {
+            if notify_on_down && !tracker.embedding_missing_notified {
+                tracker.embedding_missing_notified = true;
+                let model = snapshot
+                    .expected_embedding_model
+                    .as_deref()
+                    .unwrap_or("qwen3-embedding:0.6b");
+                alerts.push((
+                    "CẢNH BÁO: Thiếu model Embedding".to_string(),
+                    format!(
+                        "Ollama đang thiếu model '{}'; tìm kiếm ngữ nghĩa sẽ lỗi 404.",
+                        model
+                    ),
+                ));
+            }
+        }
+        Some(true) => {
+            tracker.embedding_missing_notified = false;
+        }
+        None => {}
+    }
+
+    if let Some(vlm_res) = snapshot.vlm.as_ref().and_then(|v| v.result.as_ref()) {
+        let idx = vlm_res.index.unwrap_or(0);
+        let manual_hold = vlm_res.manual_hold.unwrap_or(false);
+        if idx > 0 && !manual_hold {
+            if notify_on_failover && tracker.failover_slot_notified != Some(idx) {
+                tracker.failover_slot_notified = Some(idx);
+                alerts.push((
+                    "ĐỊNH TUYẾN: Tự động chuyển Slot dự phòng".to_string(),
+                    format!(
+                        "OpenViking đã chuyển sang Slot dự phòng #{} do lỗi từ Slot chính.",
+                        idx
+                    ),
+                ));
+            }
+        } else {
+            tracker.failover_slot_notified = None;
+        }
+    }
+
+    alerts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -755,5 +835,93 @@ mod tests {
         let res = switched.result.expect("result");
         assert_eq!(res.index, Some(2));
         assert_eq!(res.manual_hold, Some(true));
+    }
+
+    #[test]
+    fn test_incident_tracker_debounces_and_distinguishes_manual_hold() {
+        let mut tracker = IncidentTracker::default();
+        let mut snap = TelemetrySnapshot {
+            timestamp_ms: 1,
+            health: Some(HealthResponse {
+                status: "ok".to_string(),
+                healthy: true,
+                version: Some("0.5.5".to_string()),
+                auth_mode: None,
+            }),
+            health_status: EndpointStatus::Ok,
+            health_latency_ms: 2,
+            ready: Some(ReadyResponse {
+                status: "ready".to_string(),
+                checks: ReadyChecks {
+                    agfs: None,
+                    vectordb: Some("ok".to_string()),
+                    api_key_manager: None,
+                    embedding: Some("ok".to_string()),
+                    ollama: Some("ok".to_string()),
+                },
+            }),
+            ready_status: EndpointStatus::Ok,
+            ready_latency_ms: 2,
+            vlm: Some(VlmActiveResponse {
+                status: "ok".to_string(),
+                result: Some(VlmActiveResult {
+                    kind: Some("MultiCredentialVLM".to_string()),
+                    index: Some(0),
+                    n: Some(4),
+                    manual_hold: Some(false),
+                    credential_ids: None,
+                }),
+                error: None,
+                telemetry: None,
+                profile: None,
+            }),
+            vlm_status: EndpointStatus::Ok,
+            vlm_latency_ms: 2,
+            vikingdb: None,
+            vikingdb_status: EndpointStatus::Ok,
+            vikingdb_latency_ms: 2,
+            memories: None,
+            memories_status: EndpointStatus::Ok,
+            memories_latency_ms: 2,
+            ollama_status: EndpointStatus::Ok,
+            ollama_models: vec!["qwen3-embedding:0.6b".to_string()],
+            ollama_latency_ms: 2,
+            expected_embedding_model: Some("qwen3-embedding:0.6b".to_string()),
+            embedding_model_ready: Some(false),
+        };
+
+        // 1. Missing embedding fires once, then suppresses duplicates until restored
+        let a1 = evaluate_telemetry_incidents(&mut tracker, &snap, true, true);
+        assert_eq!(a1.len(), 1);
+        assert!(a1[0].1.contains("qwen3-embedding:0.6b"));
+        assert!(evaluate_telemetry_incidents(&mut tracker, &snap, true, true).is_empty());
+
+        // Restore embedding -> resets latch
+        snap.embedding_model_ready = Some(true);
+        assert!(evaluate_telemetry_incidents(&mut tracker, &snap, true, true).is_empty());
+        assert!(!tracker.embedding_missing_notified);
+
+        // 2. Manual switch (manual_hold=true) must NOT trigger failover alarm
+        snap.vlm.as_mut().unwrap().result.as_mut().unwrap().index = Some(1);
+        snap.vlm
+            .as_mut()
+            .unwrap()
+            .result
+            .as_mut()
+            .unwrap()
+            .manual_hold = Some(true);
+        assert!(evaluate_telemetry_incidents(&mut tracker, &snap, true, true).is_empty());
+
+        // 3. Automatic failover (index=1, manual_hold=false) fires once
+        snap.vlm
+            .as_mut()
+            .unwrap()
+            .result
+            .as_mut()
+            .unwrap()
+            .manual_hold = Some(false);
+        let f1 = evaluate_telemetry_incidents(&mut tracker, &snap, true, true);
+        assert_eq!(f1.len(), 1);
+        assert!(evaluate_telemetry_incidents(&mut tracker, &snap, true, true).is_empty());
     }
 }

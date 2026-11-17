@@ -278,12 +278,14 @@ function renderMonitorState(summary) {
     const toSlotBtn = document.createElement("button");
     toSlotBtn.type = "button";
     toSlotBtn.className = "c-btn";
-    toSlotBtn.textContent = "Đưa sang Slot";
-    toSlotBtn.addEventListener("click", () => {
-      document.getElementById("slot-model").value = res.model;
-      document.getElementById("slot-base").value = res.api_base;
-      document.querySelector('[data-tab="slots"]').click();
-    });
+    toSlotBtn.textContent = "Đưa vào Slot";
+    toSlotBtn.addEventListener("click", () => promoteReserveToSlot(res.index));
+
+    const toWatchBtn = document.createElement("button");
+    toWatchBtn.type = "button";
+    toWatchBtn.className = "c-btn";
+    toWatchBtn.textContent = "→ Theo dõi";
+    toWatchBtn.addEventListener("click", () => copyReserveToWatch(res.index));
 
     const editResBtn = document.createElement("button");
     editResBtn.type = "button";
@@ -310,6 +312,7 @@ function renderMonitorState(summary) {
     delResBtn.addEventListener("click", () => deleteReserve(res.index));
 
     actTd.appendChild(toSlotBtn);
+    actTd.appendChild(toWatchBtn);
     actTd.appendChild(editResBtn);
 
     const auditResBtn = document.createElement("button");
@@ -410,6 +413,42 @@ async function deleteReserve(index) {
     statusEl.textContent = "Đã xóa model dự trữ.";
   } catch (err) {
     statusEl.textContent = `Lỗi: ${err}`;
+  }
+}
+
+async function promoteReserveToSlot(reserveIndex) {
+  const statusEl = document.getElementById("reserve-status");
+  const slotIndex = Number(document.getElementById("slot-index")?.value || 0);
+  const allowUnaudited = Boolean(document.getElementById("slot-allow-unaudited")?.checked);
+  statusEl.textContent = `Đang chuyển trực tiếp sang Slot #${slotIndex} (giải mã nội bộ Rust)…`;
+  try {
+    const out = await tauriApi.core.invoke("promote_reserve_to_slot", {
+      expectedConfSha: state.confSha,
+      reserveIndex,
+      slotIndex,
+      allowUnaudited,
+    });
+    state.confSha = out.new_sha256;
+    statusEl.textContent = `Đã đưa vào Slot #${slotIndex} thành công (SHA: ${out.new_sha256.slice(0, 12)}…).`;
+    await refreshAll();
+  } catch (err) {
+    statusEl.textContent = `Từ chối đưa vào Slot #${slotIndex}: ${err}`;
+  }
+}
+
+async function copyReserveToWatch(reserveIndex) {
+  const statusEl = document.getElementById("reserve-status");
+  statusEl.textContent = "Đang sao chép sang Theo dõi (bảo toàn mã hóa DPAPI)…";
+  try {
+    const summary = await tauriApi.core.invoke("copy_reserve_to_watch", {
+      expectedSha: state.monitorSha,
+      reserveIndex,
+      alias: null,
+    });
+    renderMonitorState(summary);
+    statusEl.textContent = "Đã sao chép sang bảng THEO DÕI (Auto mặc định tắt).";
+  } catch (err) {
+    statusEl.textContent = `Lỗi sao chép sang Theo dõi: ${err}`;
   }
 }
 

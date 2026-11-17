@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use tauri::ipc::Channel;
 use tokio::sync::watch;
 
-use cockpit_rs::services::telemetry::{TelemetryClient, TelemetrySnapshot};
+use cockpit_rs::services::telemetry::{IncidentTracker, TelemetryClient, TelemetrySnapshot};
 
 #[derive(Debug, Clone)]
 pub struct CockpitPaths {
@@ -41,6 +41,7 @@ pub struct CockpitState {
     pub paths: CockpitPaths,
     pub telemetry_client: TelemetryClient,
     pub latest_snapshot: RwLock<Option<TelemetrySnapshot>>,
+    pub incident_tracker: Mutex<IncidentTracker>,
     pub subscribers: Mutex<Vec<Channel<TelemetrySnapshot>>>,
     pub shutdown_tx: watch::Sender<bool>,
 }
@@ -59,6 +60,7 @@ impl CockpitState {
             paths,
             telemetry_client,
             latest_snapshot: RwLock::new(None),
+            incident_tracker: Mutex::new(IncidentTracker::default()),
             subscribers: Mutex::new(Vec::new()),
             shutdown_tx,
         });

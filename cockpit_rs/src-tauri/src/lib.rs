@@ -13,7 +13,7 @@ use crate::state::{CockpitPaths, CockpitState};
 
 /// Emits a native Win32 tray balloon (`Shell_NotifyIconW` `NIF_INFO`) without raw credentials (`COCKPIT_RUST_SPEC` §4.3).
 #[cfg(windows)]
-pub fn dispatch_watch_auto_disabled_balloon(alias: &str, model: &str, status_code: u16) {
+pub fn dispatch_tray_balloon(title: &str, body: &str) {
     use std::mem::{size_of, zeroed};
     use std::ptr::null;
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
@@ -21,19 +21,6 @@ pub fn dispatch_watch_auto_disabled_balloon(alias: &str, model: &str, status_cod
         Shell_NotifyIconW, NIF_INFO, NIIF_WARNING, NIM_MODIFY, NOTIFYICONDATAW,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetWindowThreadProcessId};
-
-    let clean_alias = if alias.trim().is_empty() {
-        "Key theo dõi"
-    } else {
-        alias.trim()
-    };
-    let title = "THEO DÕI: Key bị tắt Auto";
-    let body = format!(
-        "Key '{}' ({}) đã tự tắt Auto do lỗi HTTP {} liên tiếp 2 lần.",
-        clean_alias,
-        model.trim(),
-        status_code
-    );
 
     fn copy_wide_bounded(src: &str, dst: &mut [u16]) {
         if dst.is_empty() {
@@ -76,7 +63,7 @@ pub fn dispatch_watch_auto_disabled_balloon(alias: &str, model: &str, status_cod
                     nid.uFlags = NIF_INFO;
                     nid.dwInfoFlags = NIIF_WARNING;
                     copy_wide_bounded(title, &mut nid.szInfoTitle);
-                    copy_wide_bounded(&body, &mut nid.szInfo);
+                    copy_wide_bounded(body, &mut nid.szInfo);
                     if Shell_NotifyIconW(NIM_MODIFY, &nid) != 0 {
                         return;
                     }
@@ -88,7 +75,22 @@ pub fn dispatch_watch_auto_disabled_balloon(alias: &str, model: &str, status_cod
 }
 
 #[cfg(not(windows))]
-pub fn dispatch_watch_auto_disabled_balloon(_alias: &str, _model: &str, _status_code: u16) {}
+pub fn dispatch_tray_balloon(_title: &str, _body: &str) {}
+
+pub fn dispatch_watch_auto_disabled_balloon(alias: &str, model: &str, status_code: u16) {
+    let clean_alias = if alias.trim().is_empty() {
+        "Key theo dõi"
+    } else {
+        alias.trim()
+    };
+    let body = format!(
+        "Key '{}' ({}) đã tự tắt Auto do lỗi HTTP {} liên tiếp 2 lần.",
+        clean_alias,
+        model.trim(),
+        status_code
+    );
+    dispatch_tray_balloon("THEO DÕI: Key bị tắt Auto", &body);
+}
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let show_item = MenuItem::with_id(app, "show", "Mở OpenViking Cockpit", true, None::<&str>)?;
@@ -206,6 +208,8 @@ pub fn run() {
             commands::delete_watch_entry,
             commands::upsert_reserve_entry,
             commands::delete_reserve_entry,
+            commands::promote_reserve_to_slot,
+            commands::copy_reserve_to_watch,
             commands::probe_watch_entry,
             commands::run_security_audit,
         ])

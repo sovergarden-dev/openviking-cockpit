@@ -16,10 +16,12 @@ app.log
 # Temporary and local state
 target/
 cockpit_rs/target/
+docs/recovery-*/
 monitor/monitor.json
 monitor/app.log
 monitor/security_reports/
 monitor/backups/
+monitor/_*.py
 monitor/_*.json
 monitor/_window_shot*.png
 monitor/openviking-monitor.pyw.bak

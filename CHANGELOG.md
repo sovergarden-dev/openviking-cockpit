@@ -2,6 +2,15 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
+## [Unreleased]
+
+### Added
+- Wired incident-debounced Windows tray balloon notifications (`notify_on_down` and `notify_on_failover` in `cockpit_rs`) for OpenViking port 19330 outages, missing Ollama embedding models (`qwen3-embedding:0.6b`), and automatic VLM backup slot failovers without false-alarming on manual operator holds.
+- Added one-click backend-side DPAPI Reserve promotion (`promote_reserve_to_slot`) and Watchlist cloning (`copy_reserve_to_watch`) in `cockpit_rs` so encrypted credentials move to active slots or the Watchlist without exposing raw API keys across WebView IPC.
+
+### Security
+- Added `docs/recovery-*/` and `monitor/_*.py` exclusion patterns to `.gitignore` to prevent accidental staging of local diagnostic artifacts containing workspace memory URIs.
+
 ## [1.3.0] - 2026-11-18
 
 ### Added
