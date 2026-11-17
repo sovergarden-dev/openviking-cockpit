@@ -87,6 +87,8 @@ class NotificationController:
         self.retry_cooldown = retry_cooldown
         self.max_retries = max_retries
         self.incidents: Dict[str, Dict[str, Any]] = {
+            "write_path": {"active": False, "first_seen": 0.0, "notified": False,
+                           "retries": 0, "last_attempt_mono": 0.0, "body": ""},
             "ov_down": {
                 "active": False,
                 "first_seen": 0.0,
@@ -241,7 +243,27 @@ class NotificationController:
                     "first_seen": inc_ov["first_seen"],
                 })
 
+        pending_events.extend(self._write_events(state, now, now_mono, curr_snap.get("write_health") if curr["ov_up"] else None))
         return pending_events
+
+    def _write_events(self, state, now, now_mono, health=None):
+        inc = self.incidents["write_path"]
+        if isinstance(health, dict):
+            alert = health.get("alert")
+            if alert:
+                if not inc["active"]:
+                    inc.update(active=True, first_seen=now, notified=False, retries=0,
+                               last_attempt_mono=0.0)
+                inc["body"] = alert
+            elif health.get("tone") == "ok":
+                inc.update(active=False, notified=False, retries=0)
+        if (inc["active"] and state.get("notify_on_down") and not inc["notified"] and
+                inc["retries"] < self.max_retries and
+                (not inc["last_attempt_mono"] or now_mono - inc["last_attempt_mono"] >= self.retry_cooldown)):
+            inc["last_attempt_mono"] = now_mono
+            return [{"kind": "write_path", "title": "OpenViking extraction cảnh báo",
+                     "body": inc["body"], "first_seen": inc["first_seen"]}]
+        return []
 
     def acknowledge_delivery(self, kind: str, success: bool) -> None:
         """Ghi nhận phản hồi gửi balloon từ Windows Shell."""
@@ -320,6 +342,7 @@ class NotificationController:
                 })
                 inc_fo["last_attempt_mono"] = now_mono
 
+        events.extend(self._write_events(state, now, now_mono))
         return self._coalesce(events, inc_ov["first_seen"])
 
     def get_banner_text(self) -> Optional[Tuple[str, str]]:

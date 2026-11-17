@@ -15,6 +15,7 @@ import ctypes
 import copy
 import hashlib
 import json
+import math
 import os
 import queue
 import re
@@ -63,6 +64,15 @@ OV_VLM_ACTIVE = "http://127.0.0.1:19330/api/v1/observer/vlm/active"
 OV_VDB = "http://127.0.0.1:19330/api/v1/observer/vikingdb"
 OV_VDB_JSON = OV_VDB + "?format=json"  # OpenViking 0.4.22+ structured status
 OV_RETR = "http://127.0.0.1:19330/api/v1/observer/retrieval"
+OV_TASKS = "http://127.0.0.1:19330/api/v1/tasks?task_type=session_commit&limit=200&pagination=cursor"
+OV_MEMORY_STATS = "http://127.0.0.1:19330/api/v1/stats/memories"
+_WRITE_HEALTH_LOCK = threading.Lock()
+# Telemetry budget: one bounded scan, no unbounded body reads, freshness by monotonic clock.
+_WRITE_HEALTH_TTL_S = 30.0
+_WRITE_HEALTH_BUDGET_S = 6.0
+_WRITE_HEALTH_STATS_BUDGET_S = 3.0
+_WRITE_HEALTH_MAX_BYTES = 4 * 1024 * 1024
+_WRITE_HEALTH_STATE: dict = {}
 OLLAMA = "http://127.0.0.1:21434/api/version"
 GATEWAY = "http://127.0.0.1:20128/v1/models"
 PORTS = (("ov", 19330), ("ollama", 21434), ("gateway", 20128))
@@ -204,7 +214,8 @@ def ssl_context() -> ssl.SSLContext:
     return _SSL_CONTEXT
 
 
-def http_json(url: str, timeout: float = 3.0, method: str = "GET", body: bytes | None = None, headers: dict | None = None):
+def http_json(url: str, timeout: float = 3.0, method: str = "GET", body: bytes | None = None, headers: dict | None = None,
+              max_bytes: int | None = None):
     hdrs = {"Accept": "application/json", "User-Agent": "OpenViking-Monitor/1.0"}
     if headers:
         hdrs.update(headers)
@@ -216,7 +227,9 @@ def http_json(url: str, timeout: float = 3.0, method: str = "GET", body: bytes |
     req = urllib.request.Request(url, data=body, method=method, headers=hdrs)
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ssl_context()) as r:
-            raw = r.read()
+            raw = r.read(max_bytes + 1) if max_bytes else r.read()
+            if max_bytes and len(raw) > max_bytes:
+                return None, f"response too large: >{max_bytes} bytes"
             try:
                 return r.status, json.loads(raw.decode("utf-8", "replace"))
             except Exception:
@@ -1122,8 +1135,320 @@ def count_ov_processes() -> int:
     return len(parse_ps_pids(out))
 
 
+def scan_commit_tasks() -> tuple:
+    started = time.monotonic()
+    deadline = started + _WRITE_HEALTH_BUDGET_S
+    rows, seen, cursors = {}, set(), set()
+    url, pages, issue, more = OV_TASKS, 0, None, True
+    for _ in range(5):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            issue = "budget"
+            break
+        code, body = http_json(url, timeout=max(0.1, min(3, remaining)), max_bytes=_WRITE_HEALTH_MAX_BYTES)
+        # Re-check after request + body read + parse: a slow page must not pass as fresh.
+        if time.monotonic() >= deadline:
+            issue = "budget"
+            break
+        result = body.get("result") if isinstance(body, dict) else None
+        items = result.get("items") if isinstance(result, dict) else None
+        if code != 200 or not isinstance(items, list) or type(result.get("has_more")) is not bool:
+            issue = "api_or_schema"
+            break
+        if any(not isinstance(r, dict) or not isinstance(r.get("task_id"), str) or
+               not r["task_id"] or r.get("task_type") != "session_commit" for r in items):
+            issue = "schema"
+            break
+        pages += 1
+        for row in items:
+            ident = row["task_id"]
+            if ident in seen and rows[ident].get("status") != row.get("status"):
+                issue = "changed_during_scan"
+            seen.add(ident)
+            rows[ident] = row
+        more = result["has_more"]
+        if not more:
+            break
+        cursor = result.get("next_cursor")
+        if not isinstance(cursor, str) or not cursor or cursor in cursors:
+            issue = "cursor"
+            break
+        cursors.add(cursor)
+        url = OV_TASKS + "&cursor=" + urllib.parse.quote(cursor, safe="")
+    if issue is None and more is False and time.monotonic() >= deadline:
+        issue = "budget"  # last page consumed the whole budget
+    return (200 if pages else None), {"result": {"items": list(rows.values()),
+        "has_more": more, "pages": pages, "scan_issue": issue,
+        "scan_started_at": time.time() - (time.monotonic() - started), "scan_finished_at": time.time()}}
+
+
+def scan_pending_markers(marker_dir: Path, now=None) -> dict:
+    """Marker directory state: observed / missing / unreadable stay distinct (no fake empty)."""
+    now = time.time() if now is None else now
+    try:
+        markers = [p for p in marker_dir.iterdir() if p.suffix == ".json"]
+        ages = [max(0, now - p.stat().st_mtime) for p in markers]
+        return {"count": len(markers), "oldest_age_s": max(ages, default=None), "state": "observed"}
+    except FileNotFoundError:
+        return {"count": None, "oldest_age_s": None, "state": "missing"}
+    except OSError:
+        return {"count": None, "oldest_age_s": None, "state": "unreadable"}
+
+
+def summarize_write_health(tasks_reply, stats_reply, marker_dir: Path, *, now=None, markers=None) -> dict:
+    now = time.time() if now is None else now
+    code, body = tasks_reply
+    result = body.get("result") if isinstance(body, dict) else None
+    rows = result.get("items") if isinstance(result, dict) else None
+    statuses = ("pending", "running", "cancelling", "completed", "failed", "cancelled")
+    valid = (code == 200 and isinstance(rows, list) and type(result.get("has_more")) is bool and
+             all(isinstance(r, dict) and r.get("task_type") == "session_commit" for r in rows))
+    counts = {s: sum(r.get("status") == s for r in rows) for s in statuses} if valid else None
+    unknown_count = sum(r.get("status") not in statuses for r in rows) if valid else None
+    complete = valid and not result.get("has_more") and not result.get("scan_issue") and not unknown_count
+    def stamp(value):
+        """Installed 0.5.3 TaskRecord emits created_at/updated_at as finite epoch floats."""
+        if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= now:
+            return None
+        return value
+
+    timestamp_invalid = 0
+    if valid:
+        for r in rows:
+            created, updated = stamp(r.get("created_at")), stamp(r.get("updated_at"))
+            if created is None or updated is None or updated < created:
+                timestamp_invalid += 1
+    successes = [stamp(r.get("updated_at")) for r in rows if r.get("status") == "completed"] if valid else []
+    attempts = [stamp(r.get("created_at")) for r in rows] if valid else []
+    starts = [stamp(r.get("created_at")) for r in rows if r.get("status") in ("pending", "running", "cancelling")] if valid else []
+    age_unknown = sum(v is None for v in starts)
+    complete = complete and not age_unknown and not timestamp_invalid
+    success = max((v for v in successes if v is not None), default=None)
+    attempt = max((v for v in attempts if v is not None), default=None)
+    oldest = min((v for v in starts if v is not None), default=None)
+    active_age = max(0, now - oldest) if oldest is not None else None
+    markers = scan_pending_markers(marker_dir, now) if markers is None else markers
+    marker_count, marker_age, marker_state = markers["count"], markers["oldest_age_s"], markers["state"]
+    scode, sbody = stats_reply
+    stats = sbody.get("result") if isinstance(sbody, dict) else None
+    total, stats_issue = None, None
+    if scode != 200 or not isinstance(stats, dict):
+        stats_issue = "unavailable"
+    elif type(stats.get("total_memories")) is not int or stats["total_memories"] < 0:
+        stats_issue = "schema"
+    else:
+        total = stats["total_memories"]
+    alert = None
+    if counts and (counts["failed"] or counts["cancelled"]):
+        alert = f"Extraction có {counts['failed']} lỗi / {counts['cancelled']} hủy trong mẫu · cần đối soát"
+    elif active_age is not None and active_age >= 900:
+        alert = f"Extraction chờ/chạy {int(active_age // 60)} phút · kiểm tra task"
+    return {"counts": counts, "sample_count": len(rows) if valid else None,
+            "has_more": result.get("has_more") if valid else None,
+            "last_success": success, "last_attempt": attempt, "oldest_active_age_s": active_age,
+            "total_memories": total, "marker_count": marker_count,
+            "marker_state": marker_state, "pages": result.get("pages", 1) if valid else 0,
+            "unknown_count": unknown_count, "age_unknown": age_unknown, "timestamp_invalid": timestamp_invalid,
+            "stats_issue": stats_issue, "coverage": "retained_scan" if complete else "partial",
+            "scan_started_at": result.get("scan_started_at") if isinstance(result, dict) else None,
+            "scan_finished_at": result.get("scan_finished_at") if isinstance(result, dict) else None,
+            "scan_issue": result.get("scan_issue") if isinstance(result, dict) else "api_or_schema",
+            "oldest_marker_age_s": marker_age, "checked_at": now,
+            "alert": alert, "tone": "bad" if alert else ("ok" if complete and total is not None else "warn")}
+
+
+def write_health_text(health: dict) -> str:
+    counts = health.get("counts")
+    if counts is None:
+        line = "Extraction: chưa rõ · không đọc được task"
+    else:
+        scope = "mẫu chưa đầy đủ" if health.get("coverage") == "partial" else "mẫu task còn lưu"
+        line = (f"Extraction ({scope}): {counts['completed']} xong · {counts['failed']} lỗi · {counts['cancelled']} hủy · "
+                f"{counts['pending'] + counts['running'] + counts['cancelling']} chờ/chạy")
+    last = health.get("last_success")
+    age = max(0, health.get("checked_at", time.time()) - last) if last is not None else None
+    line += f"\nLần xong: {int(age // 60)} phút trước" if age is not None else "\nLần xong: chưa rõ"
+    attempt = health.get("last_attempt")
+    attempt_age = max(0, health.get("checked_at", time.time()) - attempt) if attempt is not None else None
+    line += f" · Lần thử task {int(attempt_age // 60)} phút trước" if attempt_age is not None else " · Lần thử task chưa rõ"
+    total = health.get("total_memories")
+    fallback = "chưa rõ (sai schema)" if health.get("stats_issue") == "schema" else "chưa rõ"
+    line += f" · ký ức {total if total is not None else fallback}"
+    markers = health.get("marker_count")
+    line += f"\nMarker {markers if markers is not None else 'chưa rõ'} · không chứng minh backlog / recovery Windows"
+    marker_age = health.get("oldest_marker_age_s")
+    if marker_age is not None:
+        line += f" · cũ nhất {int(marker_age // 60)} phút"
+    observed = health.get("observed_at")
+    fresh_age = max(0, time.time() - observed) if observed is not None else 0
+    line += f"\nQuan sát {health.get('pages', 0)} trang · {int(fresh_age)}s trước · không xác minh retrieval"
+    if health.get("oldest_active_age_s") is not None:
+        line += f"\nTuổi từ lúc tạo {int(health['oldest_active_age_s'] // 60)} phút · không phải thời gian chạy"
+    if health.get("age_unknown") or health.get("unknown_count"):
+        line += "\nCó task thiếu tuổi / trạng thái chưa biết"
+    if health.get("coverage") == "partial":
+        line += "\nPhạm vi chưa đủ · không xác nhận toàn pipeline"
+    if health.get("timestamp_invalid"):
+        line += f"\n{health['timestamp_invalid']} task có mốc thời gian sai schema · không đủ điều kiện xanh"
+    known = health.get("last_known_counts")
+    if counts is None and known is not None:
+        line += f"\nMẫu lần đọc tốt: {known['completed']} xong / {known['failed']} lỗi · dữ liệu cũ"
+    if health.get("no_longer_observable"):
+        line += f"\n{health['no_longer_observable']} task không còn quan sát · chưa xác nhận hoàn tất"
+    if health.get("tracking_limited"):
+        line += "\nChạm giới hạn theo dõi 1000 task · phạm vi chưa đủ"
+    for label, key in (("Tasks", "tasks_read_success_at"), ("Stats", "stats_read_success_at")):
+        stamp = health.get(key)
+        line += f" · {label} đọc tốt {int(max(0, time.time() - stamp))}s trước" if stamp is not None else f" · {label} chưa đọc tốt"
+    if health.get("telemetry") == "busy":
+        busy = health.get("telemetry_busy_s")
+        line += f"\nTelemetry đang đọc {int(busy if busy is not None else 0)}s · không chặn lõi"
+    elif health.get("stale"):
+        line += "\nBản quan sát đã cũ · không dùng để kết luận xanh"
+    return line
+
+
+def telemetry_publishable(state: dict, generation: int, epoch: int) -> bool:
+    """Only the request that still owns the cache slot may publish (restart/epoch safe)."""
+    return state.get("generation") == generation and state.get("epoch") == epoch
+
+
+def _write_health_lock_state(state: dict) -> dict:
+    state.setdefault("generation", 0)
+    state.setdefault("epoch", 0)
+    state.setdefault("cache", None)
+    state.setdefault("inflight", None)
+    state.setdefault("tick", 0.0)
+    state.setdefault("watched", set())
+    state.setdefault("up", None)
+    return state
+
+
+def invalidate_write_health() -> None:
+    """Restart/refresh: drop cached observation and make every running worker obsolete."""
+    with _WRITE_HEALTH_LOCK:
+        state = _write_health_lock_state(_WRITE_HEALTH_STATE)
+        state["epoch"] += 1
+        state["generation"] += 1
+        state.update(cache=None, tick=0.0)
+
+
+def write_health_fetch(ov_up: bool, generation: int, epoch: int) -> None:
+    """Single telemetry worker. Never called from the Tk thread or under the lock."""
+    tasks, stats = (None, None), (None, None)
+    markers = {"count": None, "oldest_age_s": None, "state": "unknown"}
+    try:
+        if ov_up:
+            tasks = scan_commit_tasks()
+            started = time.monotonic()
+            stats = http_json(OV_MEMORY_STATS, timeout=3, max_bytes=_WRITE_HEALTH_MAX_BYTES)
+            if time.monotonic() - started > _WRITE_HEALTH_STATS_BUDGET_S:
+                stats = (None, "budget")
+        home = Path(os.environ.get("HERMES_HOME") or (HOME / "AppData/Local/hermes"))
+        markers = scan_pending_markers(home / "openviking/pending_sessions")
+    except Exception:
+        tasks, stats = (None, None), (None, None)  # surfaced as unknown, never as green
+    with _WRITE_HEALTH_LOCK:
+        state = _write_health_lock_state(_WRITE_HEALTH_STATE)
+        if state.get("inflight") == (generation, epoch):
+            state["inflight"] = None
+        if not telemetry_publishable(state, generation, epoch):
+            return  # release the worker slot without publishing obsolete evidence
+        state.update(cache={"tasks": tasks, "stats": stats, "markers": markers, "up": ov_up,
+                            "observed_at": time.time(), "mono": time.monotonic()},
+                     tick=time.monotonic(), inflight=None)
+
+
+def collect_write_health(ov_up: bool) -> dict:
+    """Observation-only: returns cache or unknown immediately; telemetry I/O stays off this path."""
+    state = _WRITE_HEALTH_STATE
+    now_mono = time.monotonic()
+    with _WRITE_HEALTH_LOCK:
+        _write_health_lock_state(state)
+        if state["up"] is not None and state["up"] != ov_up:
+            state["epoch"] += 1
+            state["generation"] += 1
+            state.update(cache=None, tick=0.0)
+        state["up"] = ov_up
+        cache = state["cache"]
+        if (cache is None or now_mono - state["tick"] >= _WRITE_HEALTH_TTL_S) and state["inflight"] is None:
+            state["generation"] += 1
+            state["inflight"] = (state["generation"], state["epoch"])
+            threading.Thread(target=write_health_fetch, args=(ov_up, state["generation"], state["epoch"]),
+                             name="ov-write-health", daemon=True).start()
+        inflight = state["inflight"]
+        if inflight is not None:
+            if state.get("busy_since") is None:
+                state["busy_since"] = now_mono
+        else:
+            state["busy_since"] = None
+        busy_s = round(now_mono - state["busy_since"], 1) if state.get("busy_since") else None
+
+    home = Path(os.environ.get("HERMES_HOME") or (HOME / "AppData/Local/hermes"))
+    if cache is None:
+        health = summarize_write_health((None, None), (None, None), home / "openviking/pending_sessions",
+                                        markers={"count": None, "oldest_age_s": None, "state": "unknown"})
+        health.update(observed_at=None, observed_age_s=None, stale=True, telemetry_busy_s=busy_s,
+                      telemetry="busy" if inflight is not None else "unknown")
+        health["tone"] = "warn"
+        return health
+    health = summarize_write_health(cache["tasks"], cache["stats"], home / "openviking/pending_sessions",
+                                   markers=cache["markers"])
+    health["observed_at"] = cache["observed_at"]
+    health["observed_age_s"] = max(0, now_mono - cache["mono"])
+    health["telemetry"] = "busy" if inflight is not None else "idle"
+    health["telemetry_busy_s"] = busy_s
+    health["stale"] = health["observed_age_s"] >= _WRITE_HEALTH_TTL_S
+    rows = (cache["tasks"][1] or {}).get("result", {}).get("items", [])
+    with _WRITE_HEALTH_LOCK:
+        watched = state["watched"]
+        for row in rows:
+            ident = row.get("task_id")
+            if row.get("status") in ("completed", "failed", "cancelled"):
+                watched.discard(ident)
+            elif ident and row.get("status") in ("pending", "running", "cancelling"):
+                if len(watched) < 1000:
+                    watched.add(ident)
+                elif ident not in watched:
+                    state["tracking_limited"] = True
+        visible = {r.get("task_id") for r in rows}
+        health["no_longer_observable"] = len(watched - visible) if health["coverage"] == "retained_scan" else None
+        health["tracking_limited"] = bool(state.get("tracking_limited"))
+        if health["coverage"] == "retained_scan":
+            state["tasks_read_success_at"] = cache["observed_at"]
+            state["last_known_counts"] = health["counts"]
+        if health["total_memories"] is not None:
+            state["stats_read_success_at"] = cache["observed_at"]
+        for key in ("tasks_read_success_at", "stats_read_success_at", "last_known_counts"):
+            health[key] = state.get(key)
+    if (health["no_longer_observable"] or health["tracking_limited"] or health["stale"]) and health["tone"] == "ok":
+        health["tone"] = "warn"
+    if health["stale"] and health["coverage"] == "retained_scan":
+        health["coverage"] = "partial"  # an aged sample is an estimate, not a fresh full scan
+    return health
+
+
+_SNAPSHOT_LOCK = threading.Lock()
+_SNAPSHOT_GEN = {"n": 0}
+
+
+def next_snapshot_generation() -> int:
+    """Token stamped when a core observation starts, so a slow one cannot win on arrival."""
+    with _SNAPSHOT_LOCK:
+        _SNAPSHOT_GEN["n"] += 1
+        return _SNAPSHOT_GEN["n"]
+
+
+def accept_snapshot(last_generation: int, generation) -> bool:
+    """Reject a late, older observation once a newer one has been published."""
+    if type(generation) is not int:
+        return True  # foreign producer (fixture) carries no ordering token
+    return generation > last_generation
+
+
 def collect(include_ready: bool = False) -> dict:
     t0 = time.perf_counter()
+    generation = next_snapshot_generation()
     conf = read_ov_conf()
     h_code, h_body = http_json(OV_HEALTH, timeout=3)
     o_code, o_body = http_json(OLLAMA, timeout=2)
@@ -1185,6 +1510,7 @@ def collect(include_ready: bool = False) -> dict:
     config_drift = compute_conf_drift(slots, live)
     snap = {
         "ts": time.time(),
+        "generation": generation,
         "elapsed_ms": int((time.perf_counter() - t0) * 1000),
         "health_code": h_code,
         "health": h_body if isinstance(h_body, dict) else None,
@@ -1200,6 +1526,7 @@ def collect(include_ready: bool = False) -> dict:
         "vectors": vec,
         "usage": usage,
         "retrieval": retr,
+        "write_health": collect_write_health(h_code == 200),
         "conf": {k: v for k, v in conf.items() if "api_key" not in k},
         "listeners": listening,
         "task": task_status(),
@@ -1266,6 +1593,11 @@ def sentence(snap: dict) -> tuple[str, str]:
         return "Cổng model 20128 không LISTEN · VLM sẽ lỗi", "warn"
     if snap.get("config_drift", {}).get("drift"):
         return "ov.conf khác chuỗi slot đang nạp · kiểm tra trước khi restart", "warn"
+    write = snap.get("write_health") or {}
+    if write.get("alert"):
+        return write["alert"], write.get("tone", "bad")
+    if write.get("tone") == "warn":
+        return "Đường ghi chưa rõ · xem task extraction", "warn"
     if snap.get("failover"):
         if using.strip().casefold() == primary.strip().casefold():
             return f"Đang failover sang {using} · đang kiểm tra", "warn"
@@ -1657,6 +1989,16 @@ def apply_credentials(vlm: dict, creds: list[dict]) -> dict:
         if top.get(k):
             vlm[k] = top[k]
     return vlm
+
+
+def quarantine_slot(raw: dict, index: int) -> dict:
+    vlm = dict(raw.get("vlm") or {})
+    creds = vlm_credentials_list(vlm)
+    if type(index) is not int or not 1 <= index < len(creds):
+        raise ValueError("Chỉ cách ly slot dự phòng tồn tại; không được bỏ slot chính")
+    del creds[index]
+    raw["vlm"] = apply_credentials(vlm, creds)
+    return raw
 
 
 def promote_slot(raw: dict, index: int) -> dict:
@@ -3725,6 +4067,7 @@ def run_gui(start_hidden: bool) -> None:
                 f"task {st_map.get(t.get('status') or '', t.get('status') or '—')}  ·  "
                 f"{st_map.get(t.get('state') or '', t.get('state') or '—')}  ·  mã {t.get('last_result') or '—'}"
             )
+            + "\n" + write_health_text(snap.get("write_health") or {})
         )
         refresh_spares(spare_list.curselection()[0] if spare_list.curselection() else None)
         ver = snap.get("version") or "—"
@@ -3810,6 +4153,8 @@ def run_gui(start_hidden: bool) -> None:
                 uiq.put(("err", str(e)))
             stop.wait(interval)
 
+    last_gen = [0]
+
     def drain():
         try:
             while True:
@@ -3817,6 +4162,10 @@ def run_gui(start_hidden: bool) -> None:
                 kind = item[0]
                 if kind == "snap":
                     _, snap, prev = item
+                    if not accept_snapshot(last_gen[0], snap.get("generation")):
+                        continue  # obsolete observation arrived after a newer one
+                    if type(snap.get("generation")) is int:
+                        last_gen[0] = snap["generation"]
                     ingest_fails((snap.get("conf") or {}).get("slots") or [])
                     notify_changes(prev, snap)
                     paint(snap)
@@ -3873,6 +4222,7 @@ def run_gui(start_hidden: bool) -> None:
                     add_btn.configure(state="normal")
                     slot_sig["value"] = None
                     res = item[1]
+                    invalidate_write_health()  # server restarted: drop pre-restart telemetry
                     if res.get("health_ok") and res.get("ready_ok"):
                         note = res.get("swap_note")
                         messagebox.showinfo(
@@ -3896,6 +4246,7 @@ def run_gui(start_hidden: bool) -> None:
                     add_btn.configure(state="normal")
                     slot_sig["value"] = None
                     res = item[1]
+                    invalidate_write_health()  # fresh server epoch: pre-start telemetry is obsolete
                     if res.get("health_ok"):
                         foot_var.set("OpenViking đã chạy" + (" · ready" if res.get("ready_ok") else " · chưa ready"))
                     else:

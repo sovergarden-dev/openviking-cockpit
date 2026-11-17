@@ -45,6 +45,14 @@ GUI['collect'] = lambda include_ready=False: {
     'vectors': {'vectors': 12345678, 'indexes': 12},
     'usage': {'all': [{'model': 'fixture/model-0', 'calls': 1234}]},
     'retrieval': {'queries': 12345, 'score': 0.913, 'latency_ms': 456, 'zero_rate': '2%'}, 'conf': fixture_conf,
+    'write_health': {'counts': {'pending': 3, 'running': 1, 'cancelling': 0, 'completed': 8, 'failed': 14, 'cancelled': 0},
+                     'tone': 'bad', 'alert': 'Extraction có 14 lỗi / 0 hủy trong mẫu · cần đối soát',
+                     'has_more': True, 'pages': 5, 'coverage': 'partial', 'age_unknown': 1,
+                     'last_success': 1, 'last_attempt': 1, 'checked_at': 1801,
+                     'observed_at': __import__('time').time(), 'observed_age_s': 0.0,
+                     'telemetry': 'idle', 'telemetry_busy_s': None, 'stale': False,
+                     'total_memories': 1990, 'timestamp_invalid': 0, 'stats_issue': None,
+                     'marker_count': None, 'oldest_active_age_s': 1800},
     'listeners': {'ov': [{'pid': '4242', 'addr': '127.0.0.1:19330'}], 'ollama': [], 'gateway': []},
     'task': {'status': 'Ready', 'last_result': '0'}, 'issues': [], 'failover': False, 'active': 0,
     'live': {'index': 0, 'n': 4, 'manual_hold': False, 'credential_ids': [slot['id'] for slot in fixture_slots]},
@@ -151,6 +159,7 @@ def loop(root, *args):
                 mapped_texts = ' '.join(text_of(w) for w in walk(root) if w.winfo_ismapped())
                 assert 'retry' in mapped_texts, 'vận hành: dòng meta (retry/failback) đang bị ẩn'
                 assert 'lần gọi' in mapped_texts, 'vận hành: dòng usage đang bị ẩn'
+                assert 'Extraction' in mapped_texts and 'không xác minh retrieval' in mapped_texts, 'write health missing'
 
                 def ancestors(w):
                     chain = []
@@ -243,8 +252,7 @@ def loop(root, *args):
                 hints = [w for w in walk(root) if 'Double-click' in text_of(w)]
                 assert titles and hints, 'thiếu tiêu đề DỰ TRỮ hoặc dòng hướng dẫn'
                 assert abs(titles[0].winfo_rooty() - hints[0].winfo_rooty()) <= 4, 'hướng dẫn DỰ TRỮ chưa cùng hàng tiêu đề'
-                # Thanh lọc phải HIỆN NGAY, không phụ thuộc <Configure>: mọi mục con
-                # phải được map và có kích thước thật (đã từng mất cả hàng trên Tk 8.6).
+                # Thanh lọc phải hiện ngay không phụ thuộc <Configure>: mọi mục con phải được map và có kích thước thật trên Tk 8.6.
                 entries = [w for w in walk(reserve) if w.winfo_class() == 'TEntry']
                 assert entries, 'thiếu ô Tìm:'
                 bar = entries[0].master

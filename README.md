@@ -2,7 +2,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests: 79/79 PASS](https://img.shields.io/badge/tests-79%2F79%20passed-brightgreen.svg)]()
+[![Tests: 84/84 PASS](https://img.shields.io/badge/tests-84%2F84%20passed-brightgreen.svg)]()
 [![Standard Library Only](https://img.shields.io/badge/dependencies-stdlib--only-success.svg)]()
 
 **OpenViking Cockpit** là bộ công cụ buồng lái giám sát vận hành thời gian thực, quản trị cân bằng tải định tuyến slot, và **Khung kiểm định an toàn ranh giới hành vi nhà cung cấp AI (Provider Behavioral Safety & Boundary Auditor — Taxonomy V3.1)** được phát triển dành riêng cho hệ sinh thái **OpenViking** (Local Vector DB & Autonomous AI Agent System).
@@ -85,8 +85,9 @@ openviking-cockpit/
 │   ├── watch_keys.py                   # Giới hạn 7 key, worker và backoff độc lập
 │   ├── watch_panel.py                  # Khung THEO DÕI trong tab Tổng quan
 │   ├── openviking_monitor_notification.py # Bộ điều khiển thông báo hệ thống (Toasts)
+│   ├── slot_quarantine.py              # Chốt cách ly slot lỗi định danh & cửa sổ bằng chứng hữu hạn
 │   ├── openviking.ico                  # Icon ứng dụng
-│   └── tests/                          # 74 suite Monitor + 5 suite scripts tích hợp
+│   └── tests/                          # 78 suite Monitor + 6 suite scripts tích hợp
 │       ├── run_all_tests.py            # Test runner tổng thể
 │       ├── test_reference_core_v31.py  # 84 unit tests tham chiếu V3.1
 │       ├── test_provider_security_auditor.py # 24 unit tests kiểm định an toàn
@@ -100,8 +101,9 @@ openviking-cockpit/
 │   └── TAXONOMY_V2_2.md                # Đặc tả kiến trúc V2.2
 ├── cockpit_rs/                         # Phân hệ Rust / Tauri V2 độc lập (openviking-cockpit.exe)
 │   ├── src/                            # Lõi DPAPI, DACL Safe Write, Config Gate, Telemetry, Watchlist, Auditor V3.1
-│   ├── src-tauri/                      # Tauri V2 Desktop Host, Tray Balloon & 14 lệnh IPC async
+│   ├── src-tauri/                      # Tauri V2 Desktop Host, Tray Balloon & 16 lệnh IPC async
 │   └── ui/                             # Giao diện Dark Dashboard & 3-Tab Audit Modal (Design Tokens)
+├── ops/                                # Trình khởi chạy ẩn watchdog & bọc vòng đời tiến trình (ov_lifecycle.py)
 ├── scripts/                            # Tiện ích vận hành chạy từ repo (retrofit ACL, retention, sync)
 ├── config/
 │   ├── ov.conf.example                 # Cấu hình OpenViking mẫu (đã lọc secret)
@@ -152,12 +154,12 @@ cargo build --manifest-path cockpit_rs/src-tauri/Cargo.toml --release
 - [Disaster Recovery Runbook](docs/ops/recovery-runbook.md): Phục hồi `monitor/monitor.json` (`backups/monitor-state/<sha256>/`), `ov.conf` (`ov.conf-before-*`), xử lý `.REJECTED[-N].json`, siết ACL cũ bằng `scripts/retrofit_ov_conf_backup_acl.py` (`--plan-file`), và rollback mã nguồn qua `scripts/monitor_sync.py`.
 - [Windowless OpenViking Startup](docs/ops/windowless-startup.md): Kiến trúc khởi chạy ẩn qua `OpenViking Autostart` (`ollama.exe` & `openviking-server.exe`).
 
-### Chạy Toàn Bộ 79 Test Suites:
+### Chạy Toàn Bộ 84 Test Suites:
 ```powershell
 $env:PYTHONPATH = ""
 & "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe" monitor/tests/run_all_tests.py --runtime-helpers
 ```
-Chạy bằng Python 3.11 (Tk 8.6). Runner tích hợp **74 suite Monitor + 5 suite scripts**; `--runtime-helpers` bật hai suite runtime dùng fixture/provider giả lập. `suite_bootstrap.py` tự tạo home, `TMPDIR` cô lập (khi chưa đặt hoặc đang trỏ tới `%LOCALAPPDATA%\Temp`) và cấu hình giả riêng cho mỗi suite, kể cả khi chạy trực tiếp ngoài runner; audit hook chặn truy cập thư mục `.openviking` live và socket guard chặn provider thật. Ma trận giao diện có startup từ 1020×640, kích thước tối thiểu 880×560, 880×800, 996×960 và các bề ngang 1100/1400; dashboard lẫn slot editor chạy ở Tk scaling **1.333333 / 1.666667 / 2.0** (Windows **100% / 125% / 150%**). Dashboard phải hiện tối thiểu 3 hàng THEO DÕI đầy đủ và cuộn tới key thứ 7. Màn hình thấp có thể cần tăng chiều cao cửa sổ; không tuyên bố hỗ trợ Windows 200% từ Tk scaling 2.0.
+Chạy bằng Python 3.11 (Tk 8.6). Runner tích hợp **78 suite Monitor + 6 suite scripts**; `--runtime-helpers` bật hai suite runtime dùng fixture/provider giả lập. `suite_bootstrap.py` tự tạo home, `TMPDIR` cô lập (khi chưa đặt hoặc đang trỏ tới `%LOCALAPPDATA%\Temp`) và cấu hình giả riêng cho mỗi suite, kể cả khi chạy trực tiếp ngoài runner; audit hook chặn truy cập thư mục `.openviking` live và socket guard chặn provider thật. Ma trận giao diện có startup từ 1020×640, kích thước tối thiểu 880×560, 880×800, 996×960 và các bề ngang 1100/1400; dashboard lẫn slot editor chạy ở Tk scaling **1.333333 / 1.666667 / 2.0** (Windows **100% / 125% / 150%**). Dashboard phải hiện tối thiểu 3 hàng THEO DÕI đầy đủ và cuộn tới key thứ 7. Màn hình thấp có thể cần tăng chiều cao cửa sổ; không tuyên bố hỗ trợ Windows 200% từ Tk scaling 2.0.
 ```powershell
 $env:PYTHONPATH = ""
 foreach ($scale in @("1.333333", "1.666667", "2.0")) {
