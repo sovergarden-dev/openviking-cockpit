@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "cockpit_rs"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "base64 0.22.1",
  "regex",
@@ -2251,7 +2251,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "openviking-cockpit"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "cockpit_rs",
  "serde",

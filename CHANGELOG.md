@@ -2,7 +2,7 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
-## [Unreleased]
+## [1.4.0] - 2026-11-18
 
 ### Added
 - Wired incident-debounced Windows tray balloon notifications (`notify_on_down` and `notify_on_failover` in `cockpit_rs`) for OpenViking port 19330 outages, missing Ollama embedding models (`qwen3-embedding:0.6b`), and automatic VLM backup slot failovers without false-alarming on manual operator holds, backed by `(mtime, size)` metadata caching, a tray-menu test action, and `--test-balloon` startup verification.
