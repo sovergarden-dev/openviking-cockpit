@@ -1,0 +1,315 @@
+const tauriApi = window.__TAURI__;
+
+const state = {
+  confSha: "",
+  monitorSha: "",
+  slots: [],
+};
+
+function setBanner(id, message) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (!message) {
+    el.hidden = true;
+    el.textContent = "";
+  } else {
+    el.hidden = false;
+    el.textContent = message;
+  }
+}
+
+function formatEndpointStatus(st) {
+  if (st === "Ok") return "OK";
+  if (st === "Degraded") return "Degraded";
+  if (st === "Timeout") return "Timeout";
+  if (st === "Unreachable") return "Offline";
+  if (st === "DecodeError") return "DecodeError";
+  if (st && typeof st === "object" && "HttpError" in st) {
+    return `HTTP ${st.HttpError}`;
+  }
+  return String(st);
+}
+
+function renderTelemetry(snap) {
+  if (!snap) return;
+  const badge = document.getElementById("overall-badge");
+  const healthy =
+    snap.health_status === "Ok" &&
+    snap.health?.healthy === true &&
+    snap.ready_status === "Ok" &&
+    snap.ready?.status === "ready" &&
+    snap.embedding_model_ready !== false;
+
+  badge.className = `c-badge ${healthy ? "c-badge--ok" : "c-badge--danger"}`;
+  badge.textContent = healthy ? "Hệ thống ổn định" : "Cần kiểm tra";
+
+  document.getElementById("metric-server").textContent =
+    `${formatEndpointStatus(snap.health_status)} · v${snap.health?.version || "?"}`;
+  document.getElementById("meta-server").textContent =
+    `Ready: ${snap.ready?.status || formatEndpointStatus(snap.ready_status)} · ${snap.health_latency_ms} ms`;
+
+  const expectedEmb = snap.expected_embedding_model || "qwen3-embedding:0.6b";
+  const embReady = snap.embedding_model_ready;
+  document.getElementById("metric-ollama").textContent =
+    embReady === false
+      ? `THIẾU MODEL`
+      : `${formatEndpointStatus(snap.ollama_status)} (${snap.ollama_models?.length || 0} model)`;
+  document.getElementById("meta-ollama").textContent =
+    `Model yêu cầu: ${expectedEmb} · ${snap.ollama_latency_ms} ms`;
+
+  if (embReady === false) {
+    setBanner(
+      "alert-banner",
+      `Cảnh báo vận hành: Ollama đang chạy nhưng thiếu model embedding '${expectedEmb}'. Tìm kiếm ngữ nghĩa OpenViking sẽ trả lỗi HTTP 404 cho tới khi nạp lại model.`
+    );
+  } else {
+    setBanner("alert-banner", "");
+  }
+
+  const vlmRes = snap.vlm?.result;
+  document.getElementById("metric-vlm").textContent = vlmRes
+    ? `Slot ${(vlmRes.index ?? 0)} / ${(vlmRes.n ?? 1)}`
+    : formatEndpointStatus(snap.vlm_status);
+  document.getElementById("meta-vlm").textContent = vlmRes
+    ? `Hold: ${vlmRes.manual_hold ? "Bật" : "Tắt"} · ${snap.vlm_latency_ms} ms`
+    : `${snap.vlm_latency_ms} ms`;
+
+  const dbStatus = snap.vikingdb?.result?.status;
+  document.getElementById("metric-vikingdb").textContent = dbStatus
+    ? `${dbStatus.vector_count ?? 0} vectors`
+    : formatEndpointStatus(snap.vikingdb_status);
+  document.getElementById("meta-vikingdb").textContent = dbStatus
+    ? `Dim ${dbStatus.dimension ?? "?"} · ${dbStatus.backend ?? "local"} · ${snap.vikingdb_latency_ms} ms`
+    : `${snap.vikingdb_latency_ms} ms`;
+
+  const memRes = snap.memories?.result;
+  document.getElementById("metric-memories").textContent = memRes
+    ? `${memRes.total_memories ?? 0} memories`
+    : formatEndpointStatus(snap.memories_status);
+  document.getElementById("meta-memories").textContent = memRes
+    ? `Warm: ${memRes.hotness_distribution?.warm ?? 0} · Cold: ${memRes.hotness_distribution?.cold ?? 0} · ${snap.memories_latency_ms} ms`
+    : `${snap.memories_latency_ms} ms`;
+}
+
+function createCell(text, mono = false) {
+  const td = document.createElement("td");
+  if (mono) td.className = "c-mono";
+  td.textContent = text;
+  return td;
+}
+
+function renderConfig(cfg) {
+  if (!cfg) return;
+  state.confSha = cfg.sha256;
+  state.slots = cfg.slots || [];
+
+  setBanner("drift-banner", cfg.drift?.drift ? cfg.drift.reason : "");
+
+  const tbody = document.getElementById("slots-tbody");
+  tbody.replaceChildren();
+  for (const slot of state.slots) {
+    const tr = document.createElement("tr");
+    tr.appendChild(createCell(`#${slot.slot_index}`, true));
+    tr.appendChild(createCell(slot.role === "primary" ? "Chính (Primary)" : "Dự phòng"));
+    tr.appendChild(createCell(slot.model, true));
+    tr.appendChild(createCell(slot.api_base, true));
+    const keyDesc = slot.env_var_name
+      ? `${slot.secret_status} (\${${slot.env_var_name}})`
+      : slot.secret_status;
+    tr.appendChild(createCell(keyDesc, true));
+
+    const actTd = document.createElement("td");
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "c-btn";
+    editBtn.textContent = "Nạp vào form";
+    editBtn.addEventListener("click", () => {
+      document.getElementById("slot-index").value = String(slot.slot_index);
+      document.getElementById("slot-model").value = slot.model;
+      document.getElementById("slot-base").value = slot.api_base;
+      document.getElementById("slot-key").value = "";
+    });
+    actTd.appendChild(editBtn);
+    tr.appendChild(actTd);
+    tbody.appendChild(tr);
+  }
+}
+
+function renderMonitorState(summary) {
+  if (!summary) return;
+  state.monitorSha = summary.sha256;
+
+  const wBody = document.getElementById("watch-tbody");
+  wBody.replaceChildren();
+  for (const row of summary.watches || []) {
+    const tr = document.createElement("tr");
+    tr.appendChild(createCell(row.alias || "—"));
+    tr.appendChild(createCell(row.model, true));
+    tr.appendChild(createCell(row.api_base, true));
+    tr.appendChild(createCell(row.secret_status, true));
+    tr.appendChild(createCell(row.auto_enabled ? "Bật" : row.auto_disabled_reason || "Tắt"));
+    const probeText = row.last_probe
+      ? `${row.last_probe.category} (${row.last_probe.ms ?? "?"} ms)`
+      : "Chưa thử";
+    tr.appendChild(createCell(probeText, true));
+
+    const actTd = document.createElement("td");
+    actTd.className = "c-actions";
+    const probeBtn = document.createElement("button");
+    probeBtn.type = "button";
+    probeBtn.className = "c-btn";
+    probeBtn.textContent = "Thử ngay";
+    probeBtn.addEventListener("click", () => probeWatch(row.id));
+
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "c-btn";
+    delBtn.textContent = "Xóa";
+    delBtn.addEventListener("click", () => deleteWatch(row.id));
+
+    actTd.appendChild(probeBtn);
+    actTd.appendChild(delBtn);
+    tr.appendChild(actTd);
+    wBody.appendChild(tr);
+  }
+
+  const rBody = document.getElementById("reserve-tbody");
+  rBody.replaceChildren();
+  for (const res of summary.reserves || []) {
+    const tr = document.createElement("tr");
+    tr.appendChild(createCell(String(res.index + 1), true));
+    tr.appendChild(createCell(res.model, true));
+    tr.appendChild(createCell(res.api_base, true));
+    tr.appendChild(createCell(res.secret_status, true));
+    tr.appendChild(createCell(res.note || "—"));
+    rBody.appendChild(tr);
+  }
+}
+
+async function refreshAll() {
+  if (!tauriApi?.core?.invoke) return;
+  const [snap, cfg, mon] = await Promise.allSettled([
+    tauriApi.core.invoke("get_telemetry_status"),
+    tauriApi.core.invoke("read_config"),
+    tauriApi.core.invoke("read_monitor_state"),
+  ]);
+  if (snap.status === "fulfilled") renderTelemetry(snap.value);
+  if (cfg.status === "fulfilled") renderConfig(cfg.value);
+  if (mon.status === "fulfilled") renderMonitorState(mon.value);
+}
+
+async function probeWatch(watchId) {
+  const statusEl = document.getElementById("watch-status");
+  statusEl.textContent = `Đang thử ${watchId}…`;
+  try {
+    const res = await tauriApi.core.invoke("probe_watch_entry", { watchId });
+    renderMonitorState(res);
+    statusEl.textContent = "Đã cập nhật kết quả thử.";
+  } catch (err) {
+    statusEl.textContent = `Lỗi: ${err}`;
+  }
+}
+
+async function deleteWatch(watchId) {
+  const statusEl = document.getElementById("watch-status");
+  try {
+    const res = await tauriApi.core.invoke("delete_watch_entry", {
+      expectedSha: state.monitorSha,
+      watchId,
+    });
+    renderMonitorState(res);
+    statusEl.textContent = "Đã xóa bản ghi theo dõi.";
+  } catch (err) {
+    statusEl.textContent = `Lỗi: ${err}`;
+  }
+}
+
+function setupTabs() {
+  const tabs = document.querySelectorAll(".c-tab");
+  tabs.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const target = btn.dataset.tab;
+      tabs.forEach((b) => b.setAttribute("aria-selected", String(b === btn)));
+      document.getElementById("panel-overview").hidden = target !== "overview";
+      document.getElementById("panel-slots").hidden = target !== "slots";
+      document.getElementById("panel-watch").hidden = target !== "watch";
+    });
+  });
+}
+
+function setupForms() {
+  document.getElementById("btn-refresh").addEventListener("click", refreshAll);
+
+  document.getElementById("slot-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const statusEl = document.getElementById("slot-status");
+    const rawKey = document.getElementById("slot-key").value.trim();
+    const input = {
+      slot_index: Number(document.getElementById("slot-index").value),
+      model: document.getElementById("slot-model").value.trim(),
+      api_base: document.getElementById("slot-base").value.trim(),
+      api_key: rawKey || null,
+      allow_unaudited: document.getElementById("slot-allow-unaudited").checked,
+      manual_save: false,
+    };
+    statusEl.textContent = "Đang kiểm tra và ghi nguyên tử…";
+    try {
+      const out = await tauriApi.core.invoke("apply_slot", {
+        expectedSha: state.confSha,
+        input,
+      });
+      state.confSha = out.new_sha256;
+      document.getElementById("slot-key").value = "";
+      statusEl.textContent = `Đã lưu thành công (SHA: ${out.new_sha256.slice(0, 12)}…).`;
+      await refreshAll();
+    } catch (err) {
+      statusEl.textContent = `Từ chối ghi: ${err}`;
+    }
+  });
+
+  document.getElementById("watch-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const statusEl = document.getElementById("watch-status");
+    const input = {
+      id: null,
+      alias: document.getElementById("watch-alias").value.trim(),
+      model: document.getElementById("watch-model").value.trim(),
+      api_base: document.getElementById("watch-base").value.trim(),
+      api_key: document.getElementById("watch-key").value.trim(),
+    };
+    try {
+      const summary = await tauriApi.core.invoke("upsert_watch_entry", {
+        expectedSha: state.monitorSha,
+        input,
+      });
+      document.getElementById("watch-key").value = "";
+      renderMonitorState(summary);
+      statusEl.textContent = "Đã lưu key theo dõi (mã hóa DPAPI).";
+    } catch (err) {
+      statusEl.textContent = `Lỗi: ${err}`;
+    }
+  });
+}
+
+async function setupStreaming() {
+  if (!tauriApi?.core?.Channel || !tauriApi?.core?.invoke) return;
+  const onTelemetry = new tauriApi.core.Channel();
+  onTelemetry.onmessage = (snap) => renderTelemetry(snap);
+  await tauriApi.core.invoke("subscribe_telemetry_channel", { onEvent: onTelemetry });
+
+  if (tauriApi.event?.listen) {
+    await tauriApi.event.listen("telemetry://snapshot", (ev) => renderTelemetry(ev.payload));
+    await tauriApi.event.listen("watchlist://auto-disabled", (ev) => {
+      const p = ev.payload;
+      setBanner(
+        "alert-banner",
+        `Đã tự tắt Auto cho '${p.alias}' (${p.model}) sau 2 lỗi xác thực HTTP ${p.status_code} liên tiếp.`
+      );
+    });
+  }
+}
+
+setupTabs();
+setupForms();
+refreshAll();
+setupStreaming();

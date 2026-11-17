@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenViking Cockpit</title>
+  <link rel="stylesheet" href="styles/tokens.css" />
+  <link rel="stylesheet" href="styles/app.css" />
+</head>
+<body>
+  <div class="c-shell">
+    <header class="c-topbar">
+      <div class="c-brand">
+        <span>OpenViking Cockpit</span>
+        <span id="overall-badge" class="c-badge c-badge--warn">Đang kết nối…</span>
+      </div>
+      <nav class="c-tabs" role="tablist">
+        <button class="c-tab" role="tab" data-tab="overview" aria-selected="true">Tổng quan</button>
+        <button class="c-tab" role="tab" data-tab="slots" aria-selected="false">Định tuyến Slot</button>
+        <button class="c-tab" role="tab" data-tab="watch" aria-selected="false">Theo dõi &amp; Dự trữ</button>
+      </nav>
+      <div class="c-actions">
+        <button id="btn-refresh" class="c-btn">Làm mới</button>
+      </div>
+    </header>
+
+    <main class="c-main">
+      <div id="alert-banner" class="c-banner c-banner--danger" hidden></div>
+
+      <section id="panel-overview" class="c-panel">
+        <div class="c-grid">
+          <article class="c-card">
+            <span class="c-card-title">OpenViking Server (19330)</span>
+            <div id="metric-server" class="c-card-metric">—</div>
+            <div id="meta-server" class="c-card-meta">Chưa có dữ liệu</div>
+          </article>
+          <article class="c-card">
+            <span class="c-card-title">Ollama &amp; Embedding (21434)</span>
+            <div id="metric-ollama" class="c-card-metric">—</div>
+            <div id="meta-ollama" class="c-card-meta">Chưa có dữ liệu</div>
+          </article>
+          <article class="c-card">
+            <span class="c-card-title">VLM Hot-Switch</span>
+            <div id="metric-vlm" class="c-card-metric">—</div>
+            <div id="meta-vlm" class="c-card-meta">Chưa có dữ liệu</div>
+          </article>
+          <article class="c-card">
+            <span class="c-card-title">VikingDB Vectors</span>
+            <div id="metric-vikingdb" class="c-card-metric">—</div>
+            <div id="meta-vikingdb" class="c-card-meta">Chưa có dữ liệu</div>
+          </article>
+          <article class="c-card">
+            <span class="c-card-title">Long-Term Memories</span>
+            <div id="metric-memories" class="c-card-metric">—</div>
+            <div id="meta-memories" class="c-card-meta">Chưa có dữ liệu</div>
+          </article>
+        </div>
+      </section>
+
+      <section id="panel-slots" class="c-panel" hidden>
+        <div id="drift-banner" class="c-banner c-banner--warn" hidden></div>
+        <div class="c-table-wrap">
+          <table class="c-table">
+            <thead>
+              <tr>
+                <th>Slot</th>
+                <th>Vai trò</th>
+                <th>Model</th>
+                <th>Endpoint</th>
+                <th>Trạng thái Key</th>
+                <th>Thao tác</th>
+              </tr>
+            </thead>
+            <tbody id="slots-tbody"></tbody>
+          </table>
+        </div>
+
+        <article class="c-card">
+          <span class="c-card-title">Cập nhật Slot (Draft → Commit nguyên tử)</span>
+          <form id="slot-form" class="c-form">
+            <div class="c-field">
+              <label for="slot-index">Chỉ số Slot (0 = Primary)</label>
+              <input id="slot-index" class="c-input" type="number" min="0" value="0" required />
+            </div>
+            <div class="c-field">
+              <label for="slot-model">Model</label>
+              <input id="slot-model" class="c-input" type="text" placeholder="gemini-3.8-flash-high" required />
+            </div>
+            <div class="c-field">
+              <label for="slot-base">Base URL</label>
+              <input id="slot-base" class="c-input" type="url" placeholder="https://api.example.com/v1" required />
+            </div>
+            <div class="c-field">
+              <label for="slot-key">API Key / ${ENV_VAR} (để trống = giữ nguyên)</label>
+              <input id="slot-key" class="c-input" type="password" autocomplete="off" placeholder="${MY_API_KEY}" />
+            </div>
+            <div class="c-field">
+              <label>
+                <input id="slot-allow-unaudited" type="checkbox" />
+                Cho phép lưu dự phòng chưa kiểm định (Slot ≥ 1)
+              </label>
+            </div>
+            <div class="c-actions">
+              <button type="submit" class="c-btn c-btn--primary">Lưu Slot</button>
+            </div>
+          </form>
+          <div id="slot-status" class="c-card-meta"></div>
+        </article>
+      </section>
+
+      <section id="panel-watch" class="c-panel" hidden>
+        <article class="c-card">
+          <span class="c-card-title">THEO DÕI (Tối đa 7 key độc lập — DPAPI)</span>
+          <div class="c-table-wrap">
+            <table class="c-table">
+              <thead>
+                <tr>
+                  <th>Tên gợi nhớ</th>
+                  <th>Model</th>
+                  <th>Endpoint</th>
+                  <th>Key</th>
+                  <th>Auto</th>
+                  <th>Lần thử gần nhất</th>
+                  <th>Thao tác</th>
+                </tr>
+              </thead>
+              <tbody id="watch-tbody"></tbody>
+            </table>
+          </div>
+
+          <form id="watch-form" class="c-form">
+            <div class="c-field">
+              <label for="watch-alias">Tên gợi nhớ</label>
+              <input id="watch-alias" class="c-input" type="text" placeholder="Gateway dự phòng" />
+            </div>
+            <div class="c-field">
+              <label for="watch-model">Model thử</label>
+              <input id="watch-model" class="c-input" type="text" required />
+            </div>
+            <div class="c-field">
+              <label for="watch-base">Base URL (/v1)</label>
+              <input id="watch-base" class="c-input" type="url" placeholder="https://api.example.com/v1" required />
+            </div>
+            <div class="c-field">
+              <label for="watch-key">API Key / ${ENV_VAR}</label>
+              <input id="watch-key" class="c-input" type="password" autocomplete="off" required />
+            </div>
+            <div class="c-actions">
+              <button type="submit" class="c-btn c-btn--primary">+ Thêm Theo dõi</button>
+            </div>
+          </form>
+          <div id="watch-status" class="c-card-meta"></div>
+        </article>
+
+        <article class="c-card">
+          <span class="c-card-title">DỰ TRỮ (Spare Models Pool)</span>
+          <div class="c-table-wrap">
+            <table class="c-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Model</th>
+                  <th>Endpoint</th>
+                  <th>Trạng thái Key</th>
+                  <th>Ghi chú</th>
+                </tr>
+              </thead>
+              <tbody id="reserve-tbody"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
