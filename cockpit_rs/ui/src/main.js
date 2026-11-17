@@ -4,7 +4,35 @@ const state = {
   confSha: "",
   monitorSha: "",
   slots: [],
+  editingWatchId: null,
+  editingReserveIndex: null,
 };
+
+function resetWatchDraft() {
+  state.editingWatchId = null;
+  document.getElementById("watch-alias").value = "";
+  document.getElementById("watch-model").value = "";
+  document.getElementById("watch-base").value = "";
+  const keyInput = document.getElementById("watch-key");
+  keyInput.value = "";
+  keyInput.required = true;
+  document.getElementById("watch-key-label").textContent = "API Key / ${ENV_VAR}";
+  document.getElementById("watch-submit-btn").textContent = "+ Thêm Theo dõi";
+  document.getElementById("watch-cancel-edit").hidden = true;
+}
+
+function resetReserveDraft() {
+  state.editingReserveIndex = null;
+  document.getElementById("reserve-model").value = "";
+  document.getElementById("reserve-base").value = "";
+  document.getElementById("reserve-note").value = "";
+  const keyInput = document.getElementById("reserve-key");
+  keyInput.value = "";
+  keyInput.required = true;
+  document.getElementById("reserve-key-label").textContent = "API Key / ${ENV_VAR}";
+  document.getElementById("reserve-submit-btn").textContent = "+ Thêm Dự trữ";
+  document.getElementById("reserve-cancel-edit").hidden = true;
+}
 
 function setBanner(id, message) {
   const el = document.getElementById(id);
@@ -193,6 +221,24 @@ function renderMonitorState(summary) {
     autoBtn.textContent = row.auto_enabled ? "Tắt Auto" : "Bật Auto";
     autoBtn.addEventListener("click", () => toggleWatchRowAuto(row.id, !row.auto_enabled));
 
+    const editWatchBtn = document.createElement("button");
+    editWatchBtn.type = "button";
+    editWatchBtn.className = "c-btn";
+    editWatchBtn.textContent = "Sửa";
+    editWatchBtn.addEventListener("click", () => {
+      state.editingWatchId = row.id;
+      document.getElementById("watch-alias").value = row.alias || "";
+      document.getElementById("watch-model").value = row.model;
+      document.getElementById("watch-base").value = row.api_base;
+      const keyInput = document.getElementById("watch-key");
+      keyInput.value = "";
+      keyInput.required = false;
+      document.getElementById("watch-key-label").textContent =
+        "API Key / ${ENV_VAR} (để trống = giữ nguyên)";
+      document.getElementById("watch-submit-btn").textContent = "Lưu cập nhật Theo dõi";
+      document.getElementById("watch-cancel-edit").hidden = false;
+    });
+
     const delBtn = document.createElement("button");
     delBtn.type = "button";
     delBtn.className = "c-btn";
@@ -201,6 +247,7 @@ function renderMonitorState(summary) {
 
     actTd.appendChild(probeBtn);
     actTd.appendChild(autoBtn);
+    actTd.appendChild(editWatchBtn);
 
     const auditWatchBtn = document.createElement("button");
     auditWatchBtn.type = "button";
@@ -238,6 +285,24 @@ function renderMonitorState(summary) {
       document.querySelector('[data-tab="slots"]').click();
     });
 
+    const editResBtn = document.createElement("button");
+    editResBtn.type = "button";
+    editResBtn.className = "c-btn";
+    editResBtn.textContent = "Sửa";
+    editResBtn.addEventListener("click", () => {
+      state.editingReserveIndex = res.index;
+      document.getElementById("reserve-model").value = res.model;
+      document.getElementById("reserve-base").value = res.api_base;
+      document.getElementById("reserve-note").value = res.note || "";
+      const keyInput = document.getElementById("reserve-key");
+      keyInput.value = "";
+      keyInput.required = false;
+      document.getElementById("reserve-key-label").textContent =
+        "API Key / ${ENV_VAR} (để trống = giữ nguyên)";
+      document.getElementById("reserve-submit-btn").textContent = "Lưu cập nhật Dự trữ";
+      document.getElementById("reserve-cancel-edit").hidden = false;
+    });
+
     const delResBtn = document.createElement("button");
     delResBtn.type = "button";
     delResBtn.className = "c-btn";
@@ -245,6 +310,7 @@ function renderMonitorState(summary) {
     delResBtn.addEventListener("click", () => deleteReserve(res.index));
 
     actTd.appendChild(toSlotBtn);
+    actTd.appendChild(editResBtn);
 
     const auditResBtn = document.createElement("button");
     auditResBtn.type = "button";
@@ -472,22 +538,31 @@ function setupForms() {
     }
   });
 
+  document.getElementById("watch-cancel-edit").addEventListener("click", () => {
+    resetWatchDraft();
+  });
+
+  document.getElementById("reserve-cancel-edit").addEventListener("click", () => {
+    resetReserveDraft();
+  });
+
   document.getElementById("watch-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const statusEl = document.getElementById("watch-status");
+    const rawKey = document.getElementById("watch-key").value.trim();
     const input = {
-      id: null,
+      id: state.editingWatchId,
       alias: document.getElementById("watch-alias").value.trim(),
       model: document.getElementById("watch-model").value.trim(),
       api_base: document.getElementById("watch-base").value.trim(),
-      api_key: document.getElementById("watch-key").value.trim(),
+      api_key: rawKey || null,
     };
     try {
       const summary = await tauriApi.core.invoke("upsert_watch_entry", {
         expectedSha: state.monitorSha,
         input,
       });
-      document.getElementById("watch-key").value = "";
+      resetWatchDraft();
       renderMonitorState(summary);
       statusEl.textContent = "Đã lưu key theo dõi (mã hóa DPAPI).";
     } catch (err) {
@@ -498,11 +573,12 @@ function setupForms() {
   document.getElementById("reserve-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const statusEl = document.getElementById("reserve-status");
+    const rawKey = document.getElementById("reserve-key").value.trim();
     const input = {
-      index: null,
+      index: state.editingReserveIndex,
       model: document.getElementById("reserve-model").value.trim(),
       api_base: document.getElementById("reserve-base").value.trim(),
-      api_key: document.getElementById("reserve-key").value.trim(),
+      api_key: rawKey || null,
       note: document.getElementById("reserve-note").value.trim(),
     };
     try {
@@ -510,7 +586,7 @@ function setupForms() {
         expectedSha: state.monitorSha,
         input,
       });
-      document.getElementById("reserve-key").value = "";
+      resetReserveDraft();
       renderMonitorState(summary);
       statusEl.textContent = "Đã lưu model dự trữ (mã hóa DPAPI).";
     } catch (err) {

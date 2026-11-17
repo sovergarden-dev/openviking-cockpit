@@ -7,9 +7,9 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, State};
 
 use cockpit_rs::config::conf_gate::{
-    apply_slot_update, load_raw_config, resolve_slot_audit_target, summarize_config,
-    summarize_slots, ApplySlotOutcome, ConfigSummary, SlotSummary, SlotUpdateInput,
-    AUDIT_TTL_FAILOVER_S,
+    apply_slot_update_with_live_policy, load_raw_config, resolve_slot_audit_target,
+    summarize_config, summarize_slots, ApplySlotOutcome, ConfigSummary, SlotSummary,
+    SlotUpdateInput, AUDIT_TTL_FAILOVER_S,
 };
 use cockpit_rs::secrets::secret_store::{resolve_secret, SecretStatus};
 use cockpit_rs::services::auditor::{run_provider_audit, AuditReportDocument};
@@ -107,6 +107,13 @@ pub async fn run_due_watch_auto_pass(app: &AppHandle, state: &Arc<CockpitState>)
 
         if let Some(alert) = maybe_alert {
             let _ = app.emit("watchlist://auto-disabled", &alert);
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::dispatch_watch_auto_disabled_balloon(
+                    &alert.alias,
+                    &alert.model,
+                    alert.status_code,
+                );
+            });
         }
     }
 }
@@ -194,12 +201,13 @@ pub async fn apply_slot(
 ) -> Result<ApplySlotOutcome, String> {
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        apply_slot_update(
+        apply_slot_update_with_live_policy(
             &paths.conf_path,
             &paths.backups_dir,
             &expected_sha,
             &input,
             None,
+            true,
             |api_base, model, resolved_key| {
                 load_cached_audit_verdict(
                     &paths.security_reports_dir,
@@ -421,6 +429,13 @@ pub async fn probe_watch_entry(
 
     if let Some(alert) = maybe_alert {
         let _ = app.emit("watchlist://auto-disabled", &alert);
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::dispatch_watch_auto_disabled_balloon(
+                &alert.alias,
+                &alert.model,
+                alert.status_code,
+            );
+        });
     }
 
     Ok(summary)

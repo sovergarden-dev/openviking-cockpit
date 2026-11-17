@@ -8,9 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::safe_write::{
-    apply_restricted_file_acl, safe_atomic_write_text, sha256_hex, SafeWriteError,
-};
+use super::safe_write::{apply_restricted_file_acl, sha256_hex, SafeWriteError};
 use crate::secrets::secret_store::{get_env_var_name, resolve_secret, SecretStatus};
 use crate::services::telemetry::VlmActiveResult;
 
@@ -678,7 +676,7 @@ where
     Ok(conditional)
 }
 
-/// Applies a single slot edit onto `conf_path` with optimistic concurrency, gatekeeper checks, and atomic backup.
+/// Applies a single slot edit onto `conf_path` with default live-path protection enabled.
 pub fn apply_slot_update<F>(
     conf_path: &Path,
     backups_dir: &Path,
@@ -690,7 +688,59 @@ pub fn apply_slot_update<F>(
 where
     F: FnMut(&str, &str, &str) -> Option<CachedAuditVerdict>,
 {
-    verify_not_live_path(conf_path)?;
+    apply_slot_update_with_live_policy(
+        conf_path,
+        backups_dir,
+        expected_sha,
+        input,
+        env_map,
+        false,
+        lookup_audit,
+    )
+}
+
+/// Applies a single slot edit onto `conf_path` with explicit `allow_live_write` policy for the production desktop host.
+pub fn apply_slot_update_with_live_policy<F>(
+    conf_path: &Path,
+    backups_dir: &Path,
+    expected_sha: &str,
+    input: &SlotUpdateInput,
+    env_map: Option<&HashMap<String, String>>,
+    allow_live_write: bool,
+    lookup_audit: F,
+) -> Result<ApplySlotOutcome, ConfGateError>
+where
+    F: FnMut(&str, &str, &str) -> Option<CachedAuditVerdict>,
+{
+    let home_var = std::env::var_os("USERPROFILE");
+    let home_path = home_var.as_ref().map(Path::new);
+    apply_slot_update_internal(
+        conf_path,
+        backups_dir,
+        expected_sha,
+        input,
+        env_map,
+        home_path,
+        allow_live_write,
+        lookup_audit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_slot_update_internal<F>(
+    conf_path: &Path,
+    backups_dir: &Path,
+    expected_sha: &str,
+    input: &SlotUpdateInput,
+    env_map: Option<&HashMap<String, String>>,
+    home_dir: Option<&Path>,
+    allow_live_write: bool,
+    lookup_audit: F,
+) -> Result<ApplySlotOutcome, ConfGateError>
+where
+    F: FnMut(&str, &str, &str) -> Option<CachedAuditVerdict>,
+{
+    verify_live_path_for_home(conf_path, home_dir, allow_live_write)?;
     let (before, _, current_sha) = load_raw_config(conf_path)?;
     if current_sha != expected_sha {
         return Err(ConfGateError::RevisionMismatch {
@@ -792,8 +842,14 @@ where
         lookup_audit,
     )?;
 
-    let (new_sha, backup_path) =
-        save_config_with_backup(conf_path, backups_dir, &after, Some(expected_sha))?;
+    let (new_sha, backup_path) = save_config_with_backup_for_home(
+        conf_path,
+        backups_dir,
+        &after,
+        Some(expected_sha),
+        home_dir,
+        allow_live_write,
+    )?;
     let slots = summarize_slots(&after, env_map);
 
     Ok(ApplySlotOutcome {
@@ -804,16 +860,25 @@ where
     })
 }
 
-pub fn verify_not_live_path(dest_path: &Path) -> Result<(), ConfGateError> {
-    let home_var = std::env::var_os("USERPROFILE");
-    let home_path = home_var.as_ref().map(Path::new);
-    let allow_live = std::env::var("COCKPIT_ALLOW_LIVE_WRITE").as_deref() == Ok("1");
-    if super::safe_write::is_live_path_protected(dest_path, home_path, allow_live) {
+fn verify_live_path_for_home(
+    dest_path: &Path,
+    home_dir: Option<&Path>,
+    allow_live_write: bool,
+) -> Result<(), ConfGateError> {
+    let allow_live =
+        allow_live_write || std::env::var("COCKPIT_ALLOW_LIVE_WRITE").as_deref() == Ok("1");
+    if super::safe_write::is_live_path_protected(dest_path, home_dir, allow_live) {
         return Err(ConfGateError::LivePathProtected(
             dest_path.display().to_string(),
         ));
     }
     Ok(())
+}
+
+pub fn verify_not_live_path(dest_path: &Path) -> Result<(), ConfGateError> {
+    let home_var = std::env::var_os("USERPROFILE");
+    let home_path = home_var.as_ref().map(Path::new);
+    verify_live_path_for_home(dest_path, home_path, false)
 }
 
 pub fn load_raw_config(path: &Path) -> Result<(OpenVikingConfig, String, String), ConfGateError> {
@@ -871,7 +936,27 @@ pub fn save_config_with_backup(
     config: &OpenVikingConfig,
     expected_previous_sha: Option<&str>,
 ) -> Result<(String, Option<PathBuf>), ConfGateError> {
-    verify_not_live_path(dest_path)?;
+    let home_var = std::env::var_os("USERPROFILE");
+    let home_path = home_var.as_ref().map(Path::new);
+    save_config_with_backup_for_home(
+        dest_path,
+        backups_dir,
+        config,
+        expected_previous_sha,
+        home_path,
+        false,
+    )
+}
+
+fn save_config_with_backup_for_home(
+    dest_path: &Path,
+    backups_dir: &Path,
+    config: &OpenVikingConfig,
+    expected_previous_sha: Option<&str>,
+    home_dir: Option<&Path>,
+    allow_live_write: bool,
+) -> Result<(String, Option<PathBuf>), ConfGateError> {
+    verify_live_path_for_home(dest_path, home_dir, allow_live_write)?;
 
     if let Some(ref vlm) = config.vlm {
         if vlm.model.trim().is_empty() {
@@ -909,18 +994,29 @@ pub fn save_config_with_backup(
         None
     };
 
+    let allow_live =
+        allow_live_write || std::env::var("COCKPIT_ALLOW_LIVE_WRITE").as_deref() == Ok("1");
     let payload = serde_json::to_string_pretty(config)? + "\n";
-    let written_sha = safe_atomic_write_text(dest_path, &payload, true, expected_previous_sha)?;
+    let written_sha = super::safe_write::safe_atomic_write_text_internal(
+        dest_path,
+        &payload,
+        true,
+        expected_previous_sha,
+        home_dir,
+        allow_live,
+    )?;
 
     let (reloaded, _, _) = load_raw_config(dest_path)?;
     if reloaded != *config {
         if let Some(ref bak) = backup_path {
             if let Ok(bak_bytes) = fs::read(bak) {
-                let _ = safe_atomic_write_text(
+                let _ = super::safe_write::safe_atomic_write_text_internal(
                     dest_path,
                     &String::from_utf8_lossy(&bak_bytes),
                     true,
                     None,
+                    home_dir,
+                    allow_live,
                 );
             }
         }
@@ -1183,5 +1279,59 @@ mod tests {
         .expect("audited primary save");
         assert!(primary_ok.conditional_warnings.is_empty());
         assert_eq!(primary_ok.slots[0].model, "audited-primary-v2");
+
+        // 4. Fake home `.openviking/ov.conf` blocks un-authorized writes, permits authorized desktop saves
+        let fake_home = dir.path().join("fake_user_home");
+        let fake_ov = fake_home.join(".openviking");
+        let fake_conf = fake_ov.join("ov.conf");
+        let fake_backups = fake_ov.join("backups");
+        fs::create_dir_all(&fake_ov).expect("create fake_ov");
+        fs::write(&fake_conf, initial_json).expect("write fake live ov.conf");
+        let (_, _, fake_sha) = load_raw_config(&fake_conf).expect("load fake live ov.conf");
+
+        let blocked_live = apply_slot_update_internal(
+            &fake_conf,
+            &fake_backups,
+            &fake_sha,
+            &SlotUpdateInput {
+                slot_index: 1,
+                provider: Some("openai".to_string()),
+                model: "blocked-live-edit".to_string(),
+                api_base: "https://backup.example.com/v1".to_string(),
+                api_key: None,
+                allow_unaudited: true,
+                manual_save: false,
+            },
+            Some(&env),
+            Some(&fake_home),
+            false,
+            |_, _, _| None,
+        );
+        assert!(matches!(
+            blocked_live,
+            Err(ConfGateError::LivePathProtected(_))
+        ));
+
+        let authorized_live = apply_slot_update_internal(
+            &fake_conf,
+            &fake_backups,
+            &fake_sha,
+            &SlotUpdateInput {
+                slot_index: 1,
+                provider: Some("openai".to_string()),
+                model: "authorized-gui-edit".to_string(),
+                api_base: "https://backup.example.com/v1".to_string(),
+                api_key: None,
+                allow_unaudited: true,
+                manual_save: false,
+            },
+            Some(&env),
+            Some(&fake_home),
+            true,
+            |_, _, _| None,
+        )
+        .expect("authorized desktop slot save on fake home");
+        assert_eq!(authorized_live.slots[1].model, "authorized-gui-edit");
+        assert!(authorized_live.backup_path.is_some());
     }
 }

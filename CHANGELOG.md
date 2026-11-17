@@ -4,6 +4,12 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 
 ## [Unreleased]
 
+### Rust / Tauri V2 Standalone Cockpit (`cockpit_rs`)
+- Implemented the standalone Rust & Tauri V2 desktop host (`cockpit_rs/` and `cockpit_rs/src-tauri/`) alongside the legacy Python/Tkinter `monitor/` baseline, compiling to a portable Windows executable (`openviking-cockpit.exe`, ~9.7 MiB private working set idle) with single-instance Win32 mutex, minimize-to-tray window close handling, and native `Shell_NotifyIconW` tray balloon notifications on consecutive HTTP 401/403 watch auto-disable events.
+- Built transactional `ov.conf` and `monitor.json` persistence (`cockpit_rs/src/config/safe_write.rs`, `conf_gate.rs`) with exclusive interprocess file locking, pre-write SHA-256 verified backups, restrictive Windows DACLs (`SYSTEM`, `Administrators`, Owner, Current User SID), `${ENV_VAR}` non-expansion guarantee, default live-path test protection with explicit desktop IPC write authorization, and Primary vs Failover (`allow_unaudited`) Slot Gatekeeper enforcement.
+- Implemented native 64-bit Windows DPAPI (`dpapi:` envelope parity with Python `secret_store.py`), bounded Watchlist (`MAX_WATCHES = 7`, sequential 20s/64-token shared-client prober, 60m exponential backoff, 2x 401/403 auto-disable, corrupted-file preservation, SHA-256 revision conflict guard), Reserve pool CRUD, and runtime VLM slot hot-switching (`/api/v1/observer/vlm/active`).
+- Implemented the active Taxonomy V3.1 Behavioral Security Auditor in Rust (`cockpit_rs/src/services/auditor.rs`, `auditor_cache.rs`) with monotonic `SecurityLatch`, 7 synthetic probes, chunk-bounded 64 KiB response reading, strict RFC 8259 duplicate-key and trailing-root JSON rejection, adaptive `PASS_SLOW` rescue ladder, byte-exact `_scope_id` cache interoperability with Python `provider_security_auditor.py`, and a tokenized 3-Tab Audit Modal UI (`cockpit_rs/ui/`).
+
 ### Watch Panel Security Audit & Auto-Disable Toast Notifications
 - Added "Kiểm định" action button to the THEO DÕI watchlist toolbar (`watch_panel.py`), allowing direct execution of the 3-tab security audit modal for any selected watch key.
 - Integrated `audit_watch_key` in `openviking-monitor.pyw` reusing `launch_security_audit_ui`, checking 24h cached reports with user confirmation, and updating audit badge status on completion without modifying `ov.conf` or slots.

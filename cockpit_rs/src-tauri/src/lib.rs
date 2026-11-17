@@ -6,10 +6,89 @@ pub mod state;
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, RunEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 
 use crate::commands::{collect_telemetry_once, run_due_watch_auto_pass};
 use crate::state::{CockpitPaths, CockpitState};
+
+/// Emits a native Win32 tray balloon (`Shell_NotifyIconW` `NIF_INFO`) without raw credentials (`COCKPIT_RUST_SPEC` §4.3).
+#[cfg(windows)]
+pub fn dispatch_watch_auto_disabled_balloon(alias: &str, model: &str, status_code: u16) {
+    use std::mem::{size_of, zeroed};
+    use std::ptr::null;
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::Shell::{
+        Shell_NotifyIconW, NIF_INFO, NIIF_WARNING, NIM_MODIFY, NOTIFYICONDATAW,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetWindowThreadProcessId};
+
+    let clean_alias = if alias.trim().is_empty() {
+        "Key theo dõi"
+    } else {
+        alias.trim()
+    };
+    let title = "THEO DÕI: Key bị tắt Auto";
+    let body = format!(
+        "Key '{}' ({}) đã tự tắt Auto do lỗi HTTP {} liên tiếp 2 lần.",
+        clean_alias,
+        model.trim(),
+        status_code
+    );
+
+    fn copy_wide_bounded(src: &str, dst: &mut [u16]) {
+        if dst.is_empty() {
+            return;
+        }
+        let cap = dst.len() - 1;
+        let mut idx = 0;
+        for ch in src.chars() {
+            let mut buf = [0u16; 2];
+            let units = ch.encode_utf16(&mut buf);
+            if idx + units.len() > cap {
+                break;
+            }
+            for &u in units.iter() {
+                dst[idx] = u;
+                idx += 1;
+            }
+        }
+        dst[idx] = 0;
+    }
+
+    let class_name: Vec<u16> = "tray_icon_app\0".encode_utf16().collect();
+    let self_pid = unsafe { GetCurrentProcessId() };
+
+    unsafe {
+        let mut prev_hwnd = std::ptr::null_mut();
+        loop {
+            let hwnd = FindWindowExW(std::ptr::null_mut(), prev_hwnd, class_name.as_ptr(), null());
+            if hwnd.is_null() {
+                break;
+            }
+            let mut owner_pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut owner_pid);
+            if owner_pid == self_pid {
+                for uid in [1u32, 0u32, 2u32] {
+                    let mut nid: NOTIFYICONDATAW = zeroed();
+                    nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
+                    nid.hWnd = hwnd;
+                    nid.uID = uid;
+                    nid.uFlags = NIF_INFO;
+                    nid.dwInfoFlags = NIIF_WARNING;
+                    copy_wide_bounded(title, &mut nid.szInfoTitle);
+                    copy_wide_bounded(&body, &mut nid.szInfo);
+                    if Shell_NotifyIconW(NIM_MODIFY, &nid) != 0 {
+                        return;
+                    }
+                }
+            }
+            prev_hwnd = hwnd;
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn dispatch_watch_auto_disabled_balloon(_alias: &str, _model: &str, _status_code: u16) {}
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let show_item = MenuItem::with_id(app, "show", "Mở OpenViking Cockpit", true, None::<&str>)?;
@@ -60,6 +139,12 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .manage(cockpit_state.clone())
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .setup(move |app| {
             setup_tray(app.handle())?;
 

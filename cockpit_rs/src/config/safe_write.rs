@@ -291,11 +291,7 @@ pub fn acquire_file_lock(
     }
 }
 
-/// Pure helper: returns true if `dest_path` resolves to the protected `ov.conf` under `home_dir`,
-/// and live writing is not explicitly permitted by `allow_live_write`.
-///
-/// Canonicalizes parent directories so that both existing and first-time (not yet created)
-/// live configuration paths are strictly protected.
+/// Returns true when `dest_path` targets `%USERPROFILE%\.openviking\ov.conf` without live-write authorization (`COCKPIT_RUST_SPEC` §4.2).
 pub fn is_live_path_protected(
     dest_path: &Path,
     home_dir: Option<&Path>,
@@ -333,26 +329,34 @@ pub fn is_live_path_protected(
     false
 }
 
-/// Atomically writes content to `dest_path` with strict verification.
-///
-/// Steps:
-/// 1. Verifies path safety invariant (never writes to live ov.conf directly in tests).
-/// 2. Acquires exclusive interprocess file lock on `.{filename}.lock`.
-/// 3. Verifies expected previous SHA-256 revision under lock if provided.
-/// 4. Creates secure temp file in the same directory (`.filename.tmp.TIMESTAMP`).
-/// 5. Applies restrictive DACL before writing sensitive bytes.
-/// 6. Writes bytes, flushes buffer, fsyncs to disk.
-/// 7. Performs atomic replace (MoveFileExW with write-through).
-/// 8. Verifies written SHA-256 matches expected SHA-256.
+/// Atomically writes `content` to `dest_path` under file lock with DACL hardening and readback check (`COCKPIT_RUST_SPEC` §4.2).
 pub fn safe_atomic_write_text(
     dest_path: &Path,
     content: &str,
     restrict_acl: bool,
     expected_previous_sha: Option<&str>,
 ) -> Result<String, SafeWriteError> {
+    safe_atomic_write_text_with_live_policy(
+        dest_path,
+        content,
+        restrict_acl,
+        expected_previous_sha,
+        false,
+    )
+}
+
+/// Atomically writes `content` to `dest_path` with explicit `allow_live_write` authorization (`COCKPIT_RUST_SPEC` §4.2).
+pub fn safe_atomic_write_text_with_live_policy(
+    dest_path: &Path,
+    content: &str,
+    restrict_acl: bool,
+    expected_previous_sha: Option<&str>,
+    allow_live_write: bool,
+) -> Result<String, SafeWriteError> {
     let home_var = std::env::var_os("USERPROFILE");
     let home_path = home_var.as_ref().map(Path::new);
-    let allow_live = std::env::var("COCKPIT_ALLOW_LIVE_WRITE").as_deref() == Ok("1");
+    let allow_live =
+        allow_live_write || std::env::var("COCKPIT_ALLOW_LIVE_WRITE").as_deref() == Ok("1");
     safe_atomic_write_text_internal(
         dest_path,
         content,

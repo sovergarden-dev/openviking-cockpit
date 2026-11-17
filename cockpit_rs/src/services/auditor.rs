@@ -3,9 +3,11 @@
 //! deterministic Level 1..5 projection matching `reference_core_v31.py`, and atomic report persistence.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::safe_write::safe_atomic_write_text;
@@ -14,6 +16,8 @@ use crate::services::auditor_cache::{
 };
 
 pub const PROBE_RESPONSE_MAX_BYTES: usize = 65_536;
+pub const STRICT_JSON_MAX_DEPTH: usize = 32;
+pub const STRICT_JSON_MAX_NODES: usize = 4_096;
 pub const GLOBAL_AUDIT_BUDGET_SECS: f64 = 1_200.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -396,25 +400,198 @@ pub fn compute_timeout_profile(baseline_s: f64) -> (f64, f64) {
     (t_base, t_rescue)
 }
 
-async fn post_chat_bounded(
-    endpoint: &str,
-    api_key: &str,
-    payload: &Value,
-    timeout_s: f64,
-) -> Result<(u16, Value, f64), (Option<u16>, String)> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs_f64(timeout_s.max(1.0)))
+static AUDIT_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn audit_http_client() -> Result<&'static reqwest::Client, (Option<u16>, String)> {
+    if let Some(c) = AUDIT_HTTP_CLIENT.get() {
+        return Ok(c);
+    }
+    let built = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .user_agent("OpenViking-Monitor/1.0")
         .build()
         .map_err(|_| (None, "TRANSPORT_ERROR".to_string()))?;
+    let _ = AUDIT_HTTP_CLIENT.set(built);
+    AUDIT_HTTP_CLIENT
+        .get()
+        .ok_or_else(|| (None, "TRANSPORT_ERROR".to_string()))
+}
 
+fn check_lexical_json_budget(text: &str) -> Result<(), &'static str> {
+    if text.len() > PROBE_RESPONSE_MAX_BYTES {
+        return Err("byte budget exceeded");
+    }
+    let bytes = text.as_bytes();
+    let mut depth: usize = 0;
+    let mut nodes: usize = 0;
+    let mut i: usize = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if matches!(b, b' ' | b'\t' | b'\r' | b'\n' | b',' | b':' | b']' | b'}') {
+            if matches!(b, b']' | b'}') {
+                if depth == 0 {
+                    return Err("unbalanced container");
+                }
+                depth -= 1;
+            }
+            i += 1;
+            continue;
+        }
+        nodes += 1;
+        if nodes > STRICT_JSON_MAX_NODES {
+            return Err("node budget exceeded");
+        }
+        if matches!(b, b'[' | b'{') {
+            depth += 1;
+            if depth > STRICT_JSON_MAX_DEPTH {
+                return Err("depth budget exceeded");
+            }
+            i += 1;
+        } else if b == b'"' {
+            i += 1;
+            let mut closed = false;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                } else if bytes[i] == b'"' {
+                    i += 1;
+                    closed = true;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            if !closed {
+                return Err("unterminated string");
+            }
+        } else {
+            i += 1;
+            while i < bytes.len()
+                && !matches!(
+                    bytes[i],
+                    b' ' | b'\t' | b'\r' | b'\n' | b',' | b':' | b'{' | b'}' | b'[' | b']' | b'"'
+                )
+            {
+                i += 1;
+            }
+        }
+    }
+    if depth != 0 {
+        return Err("unbalanced container");
+    }
+    Ok(())
+}
+
+struct StrictJsonSeed;
+
+impl<'de> serde::de::DeserializeSeed<'de> for StrictJsonSeed {
+    type Value = Value;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StrictVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for StrictVisitor {
+            type Value = Value;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a strict RFC 8259 JSON value without duplicate keys")
+            }
+
+            fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(Value::Bool(v))
+            }
+
+            fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
+                Ok(Value::Number(v.into()))
+            }
+
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(Value::Number(v.into()))
+            }
+
+            fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                serde_json::Number::from_f64(v)
+                    .map(Value::Number)
+                    .ok_or_else(|| E::custom("non-finite JSON number"))
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(Value::String(v.to_owned()))
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E> {
+                Ok(Value::String(v))
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(Value::Null)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut vec = Vec::new();
+                while let Some(elem) = seq.next_element_seed(StrictJsonSeed)? {
+                    vec.push(elem);
+                }
+                Ok(Value::Array(vec))
+            }
+
+            fn visit_map<A>(self, mut map_access: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut map = Map::new();
+                while let Some(key) = map_access.next_key::<String>()? {
+                    if map.contains_key(&key) {
+                        return Err(serde::de::Error::custom("duplicate object key"));
+                    }
+                    let val = map_access.next_value_seed(StrictJsonSeed)?;
+                    map.insert(key, val);
+                }
+                Ok(Value::Object(map))
+            }
+        }
+
+        deserializer.deserialize_any(StrictVisitor)
+    }
+}
+
+/// Parses one strict RFC 8259 JSON value matching `reference_core_v31.strict_json_loads`:
+/// enforces byte/depth/node caps, rejects duplicate keys, and rejects trailing concatenated JSON.
+pub fn parse_strict_rfc8259_json(raw: &str) -> Result<Value, &'static str> {
+    if raw.starts_with('\u{feff}') {
+        return Err("BOM forbidden");
+    }
+    check_lexical_json_budget(raw)?;
+    let mut de = serde_json::Deserializer::from_str(raw);
+    let val = serde::de::DeserializeSeed::deserialize(StrictJsonSeed, &mut de)
+        .map_err(|_| "invalid or duplicate-key JSON")?;
+    de.end().map_err(|_| "trailing tokens after JSON root")?;
+    Ok(val)
+}
+
+async fn post_chat_bounded(
+    endpoint: &str,
+    api_key: &str,
+    payload: &Value,
+    timeout_s: f64,
+) -> Result<(u16, Value, f64), (Option<u16>, String)> {
+    let client = audit_http_client()?;
     let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
     let start = Instant::now();
-    let resp = client
+    let mut resp = client
         .post(&url)
+        .timeout(Duration::from_secs_f64(timeout_s.max(1.0)))
         .bearer_auth(api_key)
         .json(payload)
         .send()
@@ -445,16 +622,27 @@ async fn post_chat_bounded(
         return Err((Some(status), code.to_string()));
     }
 
-    let bytes = resp.bytes().await.map_err(|e| {
+    if resp
+        .content_length()
+        .is_some_and(|len| len > PROBE_RESPONSE_MAX_BYTES as u64)
+    {
+        return Err((Some(status), "RESPONSE_TOO_LARGE".to_string()));
+    }
+
+    let mut bytes = Vec::with_capacity(1024);
+    while let Some(chunk) = resp.chunk().await.map_err(|e| {
         if e.is_timeout() {
             (Some(status), "GATEWAY_TIMEOUT".to_string())
         } else {
             (Some(status), "TRANSPORT_ERROR".to_string())
         }
-    })?;
-    if bytes.len() > PROBE_RESPONSE_MAX_BYTES {
-        return Err((Some(status), "RESPONSE_TOO_LARGE".to_string()));
+    })? {
+        if bytes.len().saturating_add(chunk.len()) > PROBE_RESPONSE_MAX_BYTES {
+            return Err((Some(status), "RESPONSE_TOO_LARGE".to_string()));
+        }
+        bytes.extend_from_slice(&chunk);
     }
+
     let parsed: Value =
         serde_json::from_slice(&bytes).map_err(|_| (Some(status), "INVALID_JSON".to_string()))?;
     Ok((status, parsed, elapsed_ms))
@@ -698,18 +886,15 @@ async fn run_single_probe(
             match post_chat_bounded(endpoint, api_key, &body, timeout_s).await {
                 Ok((_, resp, ms)) => {
                     let txt = extract_assistant_text(&resp).trim().to_string();
-                    let mut de = serde_json::Deserializer::from_str(&txt);
-                    let strict_ok = match Value::deserialize(&mut de) {
-                        Ok(v) => de.end().is_ok() && v.is_object() && v.get("memories").is_some(),
-                        Err(_) => false,
-                    };
+                    let strict_ok = parse_strict_rfc8259_json(&txt)
+                        .is_ok_and(|v| v.is_object() && v.get("memories").is_some());
                     let fenced_ok = if !strict_ok {
                         let stripped = txt
                             .trim_start_matches("```json")
                             .trim_start_matches("```")
                             .trim_end_matches("```")
                             .trim();
-                        serde_json::from_str::<Value>(stripped)
+                        parse_strict_rfc8259_json(stripped)
                             .is_ok_and(|v| v.is_object() && v.get("memories").is_some())
                     } else {
                         false
@@ -1149,5 +1334,45 @@ mod tests {
         .expect("read back cached audit verdict");
         assert_eq!(cached.verdict_level, 5);
         assert!(cached.memory_permitted);
+    }
+
+    #[tokio::test]
+    async fn test_strict_json_duplicate_keys_and_chunk_cap_enforced() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        assert!(parse_strict_rfc8259_json(r#"{"memories":[]}"#).is_ok());
+        assert!(
+            parse_strict_rfc8259_json(r#"{"memories":[],"memories":[]}"#).is_err(),
+            "Duplicate JSON object keys must be rejected"
+        );
+        assert!(
+            parse_strict_rfc8259_json(r#"{"memories":[]}{"memories":[]}"#).is_err(),
+            "Concatenated streaming JSON roots must be rejected"
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let base_url = format!("http://127.0.0.1:{}/v1", port);
+
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 2048];
+                let _ = socket.read(&mut buf).await;
+                let oversized = "x".repeat(PROBE_RESPONSE_MAX_BYTES + 4096);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n{}\r\n0\r\n\r\n",
+                    oversized.len(),
+                    oversized
+                );
+                let _ = socket.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let payload = json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]});
+        let err = post_chat_bounded(&base_url, "SYNTHETIC_KEY", &payload, 5.0)
+            .await
+            .expect_err("oversized chunked stream must fail closed");
+        assert_eq!(err.1, "RESPONSE_TOO_LARGE");
     }
 }

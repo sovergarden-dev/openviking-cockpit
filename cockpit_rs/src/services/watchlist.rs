@@ -8,6 +8,7 @@ use std::fmt;
 use std::fs;
 use std::net::IpAddr;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::safe_write::{safe_atomic_write_text, sha256_hex, SafeWriteError};
@@ -655,6 +656,24 @@ pub fn record_watch_probe_outcome(
     None
 }
 
+static WATCH_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn watch_http_client() -> Option<&'static reqwest::Client> {
+    if let Some(c) = WATCH_HTTP_CLIENT.get() {
+        return Some(c);
+    }
+    let built = reqwest::Client::builder()
+        .timeout(Duration::from_millis(WATCH_PROBE_TIMEOUT_MS))
+        .connect_timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .user_agent("OpenViking-Monitor/1.0")
+        .build()
+        .ok()?;
+    let _ = WATCH_HTTP_CLIENT.set(built);
+    WATCH_HTTP_CLIENT.get()
+}
+
 /// Executes a bounded chat-completions probe (`20s` timeout, `max_tokens: 64`, zero redirect, Monitor UA).
 /// Never logs or persists response bodies or bearer secrets.
 pub async fn probe_watch_credential(
@@ -692,24 +711,14 @@ pub async fn probe_watch_credential(
         }
     };
 
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_millis(WATCH_PROBE_TIMEOUT_MS))
-        .connect_timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .user_agent("OpenViking-Monitor/1.0")
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => {
-            return ProbeOutcome {
-                ok: false,
-                category: "client_error".to_string(),
-                status_code: None,
-                ms: None,
-                at: now,
-            };
-        }
+    let Some(client) = watch_http_client() else {
+        return ProbeOutcome {
+            ok: false,
+            category: "client_error".to_string(),
+            status_code: None,
+            ms: None,
+            at: now,
+        };
     };
 
     let url = format!("{}/chat/completions", clean_base);

@@ -98,6 +98,10 @@ openviking-cockpit/
 │   │   └── windowless-startup.md       # Watchdog khởi chạy ẩn OpenViking & Ollama
 │   ├── TAXONOMY_V3_1.md                # Đặc tả kiến trúc kiểm định V3.1 toàn văn
 │   └── TAXONOMY_V2_2.md                # Đặc tả kiến trúc V2.2
+├── cockpit_rs/                         # Phân hệ Rust / Tauri V2 độc lập (openviking-cockpit.exe)
+│   ├── src/                            # Lõi DPAPI, DACL Safe Write, Config Gate, Telemetry, Watchlist, Auditor V3.1
+│   ├── src-tauri/                      # Tauri V2 Desktop Host, Tray Balloon & 14 lệnh IPC async
+│   └── ui/                             # Giao diện Dark Dashboard & 3-Tab Audit Modal (Design Tokens)
 ├── scripts/                            # Tiện ích vận hành chạy từ repo (retrofit ACL, retention, sync)
 ├── config/
 │   ├── ov.conf.example                 # Cấu hình OpenViking mẫu (đã lọc secret)
@@ -133,6 +137,16 @@ Hoặc trên Command Prompt (CMD):
 & "$env:LOCALAPPDATA\Programs\Python\Python311\pythonw.exe" monitor\openviking-monitor.pyw
 ```
 *(Lưu ý: Khởi chạy từ repo vẫn sử dụng dữ liệu cấu hình live tại `%USERPROFILE%\.openviking\`. Cơ chế Win32 Mutex trong ứng dụng sẽ tự động kích hoạt cửa sổ hiện có nếu Monitor đang chạy nền. Nếu chưa có Monitor nào chạy, việc mở từ repo sẽ cập nhật lối tắt Desktop/Start Menu trỏ về tệp mã nguồn repo thay vì thư mục live; đồng thời tiến trình này nằm ngoài phạm vi phát hiện của `scripts/monitor_sync.py deploy`).*
+
+**3. Khởi chạy hoặc biên dịch bản độc lập Rust / Tauri V2 (`cockpit_rs`):**
+```powershell
+# Chạy toàn bộ unit tests & kiểm tra clippy nghiêm ngặt:
+cargo test --manifest-path cockpit_rs/Cargo.toml
+cargo clippy --manifest-path cockpit_rs/src-tauri/Cargo.toml --all-targets -- -D warnings
+
+# Đóng gói tệp thực thi độc lập openviking-cockpit.exe (~27 MiB, ~10 MiB RAM khi rỗi):
+cargo build --manifest-path cockpit_rs/src-tauri/Cargo.toml --release
+```
 
 ### Vận hành & Phục hồi (Ops Runbooks):
 - [Disaster Recovery Runbook](docs/ops/recovery-runbook.md): Phục hồi `monitor/monitor.json` (`backups/monitor-state/<sha256>/`), `ov.conf` (`ov.conf-before-*`), xử lý `.REJECTED[-N].json`, siết ACL cũ bằng `scripts/retrofit_ov_conf_backup_acl.py` (`--plan-file`), và rollback mã nguồn qua `scripts/monitor_sync.py`.

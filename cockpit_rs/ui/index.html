@@ -148,11 +148,12 @@
               <input id="watch-base" class="c-input" type="url" placeholder="https://api.example.com/v1" required />
             </div>
             <div class="c-field">
-              <label for="watch-key">API Key / ${ENV_VAR}</label>
+              <label id="watch-key-label" for="watch-key">API Key / ${ENV_VAR}</label>
               <input id="watch-key" class="c-input" type="password" autocomplete="off" required />
             </div>
             <div class="c-actions">
-              <button type="submit" class="c-btn c-btn--primary">+ Thêm Theo dõi</button>
+              <button id="watch-submit-btn" type="submit" class="c-btn c-btn--primary">+ Thêm Theo dõi</button>
+              <button id="watch-cancel-edit" type="button" class="c-btn" hidden>Hủy sửa</button>
             </div>
           </form>
           <div id="watch-status" class="c-card-meta"></div>
@@ -186,7 +187,7 @@
               <input id="reserve-base" class="c-input" type="url" placeholder="https://api.example.com/v1" required />
             </div>
             <div class="c-field">
-              <label for="reserve-key">API Key / ${ENV_VAR}</label>
+              <label id="reserve-key-label" for="reserve-key">API Key / ${ENV_VAR}</label>
               <input id="reserve-key" class="c-input" type="password" autocomplete="off" required />
             </div>
             <div class="c-field">
@@ -194,7 +195,8 @@
               <input id="reserve-note" class="c-input" type="text" />
             </div>
             <div class="c-actions">
-              <button type="submit" class="c-btn c-btn--primary">+ Thêm Dự trữ</button>
+              <button id="reserve-submit-btn" type="submit" class="c-btn c-btn--primary">+ Thêm Dự trữ</button>
+              <button id="reserve-cancel-edit" type="button" class="c-btn" hidden>Hủy sửa</button>
             </div>
           </form>
           <div id="reserve-status" class="c-card-meta"></div>
