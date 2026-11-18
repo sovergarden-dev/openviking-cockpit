@@ -54,10 +54,12 @@ G:/AI/openviking-cockpit/
     │   ├── secrets/
     │   │   └── secret_store.rs  # Native 64-bit Windows DPAPI & strict ${ENV} secret resolver
     │   └── services/
-    │       ├── telemetry.rs     # Async server, Ollama & lifecycle.jsonl polling + incident debouncer
-    │       ├── watchlist.rs     # Bounded 4-key watchlist, reserves_sha256 CAS, 30-snapshot cap & probe worker
-    │       ├── auditor.rs       # Taxonomy V3.1 active 7-probe suite & rescue ladder
-    │       └── auditor_cache.rs # 24h/7d HMAC-free scope cache, 0ms cached doc loader & sanitizer
+    │       ├── telemetry.rs         # Async server, queue, retrieval, semantic search, Ollama & lifecycle.jsonl polling + incident debouncer
+    │       ├── service_control.rs   # Guarded OpenViking Autostart task start/restart, socket-hang orphan cleanup & lock hygiene
+    │       ├── storage_inspector.rs # Read-only local storage & peer namespace footprint scanner
+    │       ├── watchlist.rs         # Bounded 4-key watchlist, reserves_sha256 CAS, 30-snapshot cap & probe worker
+    │       ├── auditor.rs           # Taxonomy V3.1 active 7-probe suite & rescue ladder
+    │       └── auditor_cache.rs     # 24h/7d HMAC-free scope cache, 0ms cached doc loader & sanitizer
     ├── src-tauri/
     │   ├── Cargo.toml           # Tauri V2 desktop binary crate (openviking-cockpit)
     │   ├── tauri.conf.json      # Tauri V2 window, CSP & bundle configuration
@@ -66,11 +68,11 @@ G:/AI/openviking-cockpit/
     │   └── src/
     │       ├── main.rs          # Single-instance Win32 mutex & window activation
     │       ├── lib.rs           # System tray, NIF_INFO balloon, geometry persistence & clean X-close exit
-    │       ├── state.rs         # CockpitState, monitor_lock, geometry draft & mtime poll cache
-    │       └── commands.rs      # 16 async Tauri IPC commands wrapping spawn_blocking + Startup .lnk sync
+    │       ├── state.rs         # CockpitState, monitor_lock, service_lock, geometry draft & mtime poll cache
+    │       └── commands.rs      # 21 async Tauri IPC commands wrapping spawn_blocking + Startup .lnk sync
     └── ui/                      # Vanilla JS + CSS Design Token Frontend
         ├── package.json
-        ├── index.html           # Overview (5 cards + 4-key Watchlist), Slots, Reserve, Audit Modal
+        ├── index.html           # 4-Tab UI: Overview (6 cards + Service Control + 4-key Watchlist), Slots, Reserve, Memory & Recall Inspector, Audit Modal
         ├── styles/
         │   ├── tokens.css       # Single source of visual tokens
         │   └── app.css          # Component pattern & modifier classes

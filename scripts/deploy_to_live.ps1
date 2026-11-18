@@ -4,6 +4,7 @@ param(
     [string]$OvHome = "$env:USERPROFILE\.openviking",
     [string]$LiveDir = "",
     [switch]$SyncOps,
+    [switch]$SyncAntigravityPlugin,
     [switch]$Apply,
     [string]$PythonExe = "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
 )
@@ -73,5 +74,16 @@ if ($SyncOps) {
         $s2 = (Get-FileHash -Path $p.Dst -Algorithm SHA256).Hash.ToLower()
         if ($s1 -ne $s2) { throw "Ops SHA-256 mismatch on $($p.Dst)" }
         Write-Output ("SYNCED_OPS=" + $p.Dst + " SHA256=" + $s2)
+    }
+}
+
+if ($SyncAntigravityPlugin) {
+    if (-not (Test-Path $PythonExe -PathType Leaf)) {
+        throw "Python 3.11 interpreter not found for Antigravity plugin sync: $PythonExe"
+    }
+    $PluginInstaller = Join-Path $PSScriptRoot "install_antigravity_plugin.py"
+    & $PythonExe -X utf8 $PluginInstaller --python-exe $PythonExe --apply
+    if ($LASTEXITCODE -ne 0) {
+        throw "Antigravity plugin installation failed (exit $LASTEXITCODE)."
     }
 }

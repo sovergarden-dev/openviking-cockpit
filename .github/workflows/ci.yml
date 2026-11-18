@@ -61,7 +61,9 @@ jobs:
             "monitor/tests/test_writeback_invariants.py",
             "scripts/tests/test_backup_retention.py",
             "scripts/tests/test_deploy_safety.py",
-            "scripts/tests/test_retrofit_ov_conf_backup_acl.py"
+            "scripts/tests/test_retrofit_ov_conf_backup_acl.py",
+            "scripts/tests/test_antigravity_mcp_bridge.py",
+            "scripts/tests/test_ov_storage_hygiene.py"
           )
           foreach ($s in $suites) {
             python -X utf8 monitor/tests/suite_bootstrap.py $s
