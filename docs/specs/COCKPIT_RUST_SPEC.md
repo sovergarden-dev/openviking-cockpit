@@ -22,19 +22,19 @@ This specification defines the complete architectural blueprint for rewriting th
 | **Core Runtime** | **Rust** | `2021 Edition` (`rustc 1.97+`) | Memory safety, zero-cost abstractions, deterministic performance. |
 | **Async Engine** | **Tokio** | `tokio = { version = "1.40", features = ["full"] }` | High-throughput asynchronous task scheduling for polling and probe queues. |
 | **HTTP Client** | **Reqwest** | `reqwest = { version = "0.12", features = ["json", "rustls-tls"] }` | Fast, asynchronous HTTP/REST client with explicit connection pooling and timeouts. |
-| **Windows OS API** | **Windows Crate** | `windows = { version = "0.58", features = ["Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_SystemServices", "Win32_UI_WindowsAndMessaging", "Win32_Security_Authorization"] }` | Direct native access to Windows DPAPI (`CryptProtectData`), Mutex, DACL manipulation, and Tray Balloon APIs without ctypes overhead. |
+| **Windows OS API** | **windows-sys** | `windows-sys = "0.59"` (`Cryptography`, `Authorization`, `Shell`, `WindowsAndMessaging`, `Threading`) | Direct native access to Windows DPAPI (`CryptProtectData`), Mutex, DACL manipulation, and `Shell_NotifyIconW` Tray Balloon APIs without ctypes overhead. |
 | **Serialization** | **Serde** | `serde = { version = "1.0", features = ["derive"] }`, `serde_json = "1.0"` | Zero-copy JSON serialization matching `docs/specs/contracts/` schemas. |
-| **Frontend UI** | **Webview** | HTML5 / CSS / TypeScript / Tailwind | Modern dark-themed dashboard, responsive high-DPI scaling, and real-time SVG charts. |
+| **Frontend UI** | **Webview** | HTML5 / Vanilla JS / CSS Design Tokens | Modern dark-themed dashboard (`tokens.css` + `app.css`) and 3-Tab Security Audit Modal with zero external frontend dependencies. |
 
 ---
 
 ## 3. Repository Structure (`cockpit_rs/`)
 
-The rewrite lives in an isolated workspace directory `cockpit_rs/` inside `G:/AI/openviking-cockpit/`, leaving the legacy `monitor/` tree 100% untouched:
+The rewrite lives in an isolated directory `cockpit_rs/` inside `G:/AI/openviking-cockpit/`, leaving the legacy `monitor/` tree untouched:
 
 ```text
 G:/AI/openviking-cockpit/
-├── monitor/                     # Legacy Python/Tkinter code (untouched, active live baseline)
+├── monitor/                     # Legacy Python/Tkinter code (reference baseline)
 ├── docs/specs/                  # Specifications, parity inventory, and contract schemas
 │   ├── INVENTORY.md
 │   ├── COCKPIT_RUST_SPEC.md
@@ -44,39 +44,38 @@ G:/AI/openviking-cockpit/
 │       ├── vlm_active.schema.json
 │       ├── vikingdb.schema.json
 │       └── memories_stats.schema.json
-└── cockpit_rs/                  # NEW Rust / Tauri V2 Project
-    ├── Cargo.toml               # Cargo workspace / project definition
+└── cockpit_rs/                  # Standalone Rust / Tauri V2 Project
+    ├── Cargo.toml               # Core library crate (cockpit_rs)
+    ├── src/
+    │   ├── lib.rs
+    │   ├── config/
+    │   │   ├── safe_write.rs    # Atomic file persistence, live-path guard & DACL hardening
+    │   │   └── conf_gate.rs     # ov.conf parser, slot validator, drift check & failover policy
+    │   ├── secrets/
+    │   │   └── secret_store.rs  # Native 64-bit Windows DPAPI & strict ${ENV} secret resolver
+    │   └── services/
+    │       ├── telemetry.rs     # Async server & Ollama polling + incident debouncer
+    │       ├── watchlist.rs     # Bounded 4-key watchlist, reserves_sha256 CAS & probe worker
+    │       ├── auditor.rs       # Taxonomy V3.1 active 7-probe suite & rescue ladder
+    │       └── auditor_cache.rs # 24h/7d HMAC-free scope cache & output sanitizer
     ├── src-tauri/
-    │   ├── Cargo.toml           # Tauri backend dependencies
-    │   ├── tauri.conf.json      # Tauri V2 configuration (app identity, tray, permissions)
+    │   ├── Cargo.toml           # Tauri V2 desktop binary crate (openviking-cockpit)
+    │   ├── tauri.conf.json      # Tauri V2 window, CSP & bundle configuration
+    │   ├── capabilities/
+    │   │   └── default.json     # Explicit WebView2 window & event permissions
     │   └── src/
-    │       ├── main.rs          # Process entry point, single-instance mutex, and Tauri bootstrap
-    │       ├── lib.rs           # Core library and IPC registration
-    │       ├── core/            # Cryptographic & Storage Foundation
-    │       │   ├── dpapi.rs         # Native 64-bit Windows DPAPI encryption
-    │       │   ├── safe_write.rs    # Atomic file persistence & DACL hardening
-    │       │   ├── config_gate.rs   # ov.conf parser, slot validator, and failover policy
-    │       │   └── secret_store.rs  # Strict ${ENV} secret resolver & fail-loud status
-    │       ├── services/        # Asynchronous Background Services
-    │       │   ├── telemetry.rs     # 1-second server polling (health, ready, stats)
-    │       │   ├── watchlist.rs     # Sequential watch prober (20s/64t, auto-disable)
-    │       │   ├── auditor.rs       # Taxonomy V3.1 probe suite & 24h caching
-    │       │   └── backup.rs        # ov.conf & monitor.json snapshot retention
-    │       ├── tray.rs          # Native system tray & balloon notification dispatcher
-    │       └── commands/        # Tauri IPC Commands
-    │           ├── telemetry_cmd.rs
-    │           ├── config_cmd.rs
-    │           ├── watch_cmd.rs
-    │           ├── spare_cmd.rs
-    │           └── audit_cmd.rs
-    └── ui/                      # Modern Web Dashboard Frontend
+    │       ├── main.rs          # Single-instance Win32 mutex & window activation
+    │       ├── lib.rs           # System tray, NIF_INFO balloon, clean X-close exit & workers
+    │       ├── state.rs         # CockpitState, monitor_lock & mtime poll cache
+    │       └── commands.rs      # 15 async Tauri IPC commands wrapping spawn_blocking
+    └── ui/                      # Vanilla JS + CSS Design Token Frontend
         ├── package.json
-        ├── index.html
-        ├── src/
-        │   ├── main.ts
-        │   ├── components/      # Overview, WatchPanel, ReserveTable, AuditModal, SlotEditor
-        │   └── styles/          # Dark Theme palette & high-DPI responsive layouts
-        └── dist/
+        ├── index.html           # Overview (5 cards + 4-key Watchlist), Slots, Reserve, Audit Modal
+        ├── styles/
+        │   ├── tokens.css       # Single source of visual tokens
+        │   └── app.css          # Component pattern & modifier classes
+        └── src/
+            └── main.js          # Streaming telemetry, FIFO mutation queue & NFC Reserve filter
 ```
 
 ---

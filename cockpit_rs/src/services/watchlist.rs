@@ -201,12 +201,32 @@ pub struct ReserveRowView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MonitorStateSummary {
     pub sha256: String,
+    pub reserves_sha256: String,
     pub notify_on_down: bool,
     pub notify_on_failover: bool,
     pub watch_auto_enabled: bool,
     pub watch_interval_minutes: u32,
     pub watches: Vec<WatchRowView>,
     pub reserves: Vec<ReserveRowView>,
+}
+
+pub fn compute_reserves_sha256(spares: &[SpareModelRecord]) -> String {
+    let bytes = serde_json::to_vec(spares).unwrap_or_default();
+    sha256_hex(&bytes)
+}
+
+pub fn verify_reserves_sha(
+    spares: &[SpareModelRecord],
+    expected_reserves_sha: &str,
+) -> Result<(), WatchError> {
+    let actual = compute_reserves_sha256(spares);
+    if actual != expected_reserves_sha {
+        return Err(WatchError::RevisionConflict {
+            expected: expected_reserves_sha.to_string(),
+            actual,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Deserialize)]
@@ -451,6 +471,7 @@ pub fn summarize_monitor_state(
 
     MonitorStateSummary {
         sha256: sha256.to_string(),
+        reserves_sha256: compute_reserves_sha256(&state.spare_models),
         notify_on_down: state.notify_on_down,
         notify_on_failover: state.notify_on_failover,
         watch_auto_enabled: state.watch_auto_enabled,
@@ -1143,6 +1164,12 @@ mod tests {
         assert!(summary.notify_on_failover);
         assert_eq!(summary.watch_interval_minutes, 10);
         assert_eq!(summary.reserves.len(), 1);
+        verify_reserves_sha(&state.spare_models, &summary.reserves_sha256)
+            .expect("matching reserves_sha256 must pass");
+        assert!(matches!(
+            verify_reserves_sha(&state.spare_models, "stale-reserves-sha"),
+            Err(WatchError::RevisionConflict { .. })
+        ));
         assert_eq!(summary.reserves[0].model, "spare-v1");
         let serialized = serde_json::to_string(&summary).unwrap();
         assert!(!serialized.contains("SYNTHETIC_SPARE_SECRET_42"));

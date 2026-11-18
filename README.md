@@ -101,7 +101,7 @@ openviking-cockpit/
 │   └── TAXONOMY_V2_2.md                # Đặc tả kiến trúc V2.2
 ├── cockpit_rs/                         # Phân hệ Rust / Tauri V2 độc lập (openviking-cockpit.exe)
 │   ├── src/                            # Lõi DPAPI, DACL Safe Write, Config Gate, Telemetry, Watchlist, Auditor V3.1
-│   ├── src-tauri/                      # Tauri V2 Desktop Host, Tray Balloon & 16 lệnh IPC async
+│   ├── src-tauri/                      # Tauri V2 Desktop Host, Tray Balloon & 15 lệnh IPC async
 │   └── ui/                             # Giao diện Dark Dashboard (Tổng quan + Theo dõi 4 key, Định tuyến Slot, Dự trữ có lọc nhanh, Công tắc thông báo & Chu kỳ Auto) & 3-Tab Audit Modal
 ├── ops/                                # Trình khởi chạy ẩn watchdog & bọc vòng đời tiến trình (ov_lifecycle.py)
 ├── scripts/                            # Tiện ích vận hành chạy từ repo (retrofit ACL, retention, sync)

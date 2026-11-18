@@ -2,6 +2,15 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
+## [Unreleased]
+
+### Changed
+- Removed the unused `list_slots` Tauri IPC command and 3 unreferenced CSS custom properties (`--space-6`, `--text-base`, `--z-banner`), added an explicit `Ẩn khay` top-bar button for minimizing to the system tray, and synchronized `docs/specs/COCKPIT_RUST_SPEC.md` with the shipped crate layout.
+
+### Fixed
+- Made clicking the native Windows `✕` (`CloseRequested`) titlebar button cleanly tear down background workers, remove the system tray icon, and exit `openviking-cockpit.exe` instead of hiding the window into the background tray.
+- Scoped Reserve concurrency checks to `reserves_sha256` (`compute_reserves_sha256` / `verify_reserves_sha` over `spare_models`) captured synchronously at click time in `cockpit_rs/ui/src/main.js`, preventing both shifted-index neighbor deletions during queued clicks and false `RevisionConflict` errors during background Watchlist Auto-probes, while surfacing top-bar alert toggle feedback across all tabs (`#topbar-status`).
+
 ## [1.5.0] - 2026-11-18
 
 ### Added

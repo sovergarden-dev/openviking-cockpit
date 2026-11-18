@@ -95,6 +95,14 @@ pub fn dispatch_watch_auto_disabled_balloon(alias: &str, model: &str, status_cod
     let _ = dispatch_tray_balloon("THEO DÕI: Key bị tắt Auto", &body);
 }
 
+fn quit_application(app: &AppHandle) {
+    if let Some(st) = app.try_state::<std::sync::Arc<CockpitState>>() {
+        let _ = st.shutdown_tx.send(true);
+    }
+    let _ = app.remove_tray_by_id("main-tray");
+    app.exit(0);
+}
+
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let show_item = MenuItem::with_id(app, "show", "Mở OpenViking Cockpit", true, None::<&str>)?;
     let test_item = MenuItem::with_id(
@@ -107,7 +115,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let quit_item = MenuItem::with_id(app, "quit", "Thoát", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_item, &test_item, &quit_item])?;
 
-    let mut builder = TrayIconBuilder::new()
+    let mut builder = TrayIconBuilder::with_id("main-tray")
         .menu(&menu)
         .tooltip("OpenViking Cockpit")
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -126,7 +134,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                 });
             }
             "quit" => {
-                app.exit(0);
+                quit_application(app);
             }
             _ => {}
         })
@@ -160,9 +168,8 @@ pub fn run() {
     let app = tauri::Builder::default()
         .manage(cockpit_state.clone())
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+            if let WindowEvent::CloseRequested { .. } = event {
+                quit_application(window.app_handle());
             }
         })
         .setup(move |app| {
@@ -241,7 +248,6 @@ pub fn run() {
             commands::subscribe_telemetry_channel,
             commands::switch_active_slot,
             commands::read_config,
-            commands::list_slots,
             commands::apply_slot,
             commands::read_monitor_state,
             commands::upsert_watch_entry,

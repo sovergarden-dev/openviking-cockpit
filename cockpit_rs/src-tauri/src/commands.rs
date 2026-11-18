@@ -8,8 +8,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use cockpit_rs::config::conf_gate::{
     apply_slot_update_with_live_policy, load_raw_config, resolve_slot_audit_target,
-    summarize_config, summarize_slots, ApplySlotOutcome, ConfigSummary, SlotSummary,
-    SlotUpdateInput, AUDIT_TTL_FAILOVER_S,
+    summarize_config, ApplySlotOutcome, ConfigSummary, SlotUpdateInput, AUDIT_TTL_FAILOVER_S,
 };
 use cockpit_rs::secrets::secret_store::{is_env_ref, resolve_secret, SecretStatus};
 use cockpit_rs::services::auditor::{run_provider_audit, AuditReportDocument};
@@ -20,17 +19,11 @@ use cockpit_rs::services::telemetry::{
 use cockpit_rs::services::watchlist::{
     copy_reserve_into_watchlist, load_monitor_state, probe_watch_credential,
     record_watch_probe_outcome, save_monitor_state_with_live_policy, set_watch_row_auto,
-    summarize_monitor_state, upsert_reserve_record, upsert_watch_record, AutoDisabledAlert,
-    MonitorStateSummary, UpsertReserveInput, UpsertWatchInput,
+    summarize_monitor_state, upsert_reserve_record, upsert_watch_record, verify_reserves_sha,
+    AutoDisabledAlert, MonitorStateSummary, UpsertReserveInput, UpsertWatchInput,
 };
 
 use crate::state::CockpitState;
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SlotListResponse {
-    pub conf_sha256: String,
-    pub slots: Vec<SlotSummary>,
-}
 
 fn file_stamp(path: &std::path::Path) -> Option<(SystemTime, u64)> {
     let meta = std::fs::metadata(path).ok()?;
@@ -281,21 +274,6 @@ pub async fn read_config(state: State<'_, Arc<CockpitState>>) -> Result<ConfigSu
 }
 
 #[tauri::command]
-pub async fn list_slots(state: State<'_, Arc<CockpitState>>) -> Result<SlotListResponse, String> {
-    let conf_path = state.paths.conf_path.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let (cfg, _, sha) = load_raw_config(&conf_path).map_err(|e| e.to_string())?;
-        let slots = summarize_slots(&cfg, None);
-        Ok(SlotListResponse {
-            conf_sha256: sha,
-            slots,
-        })
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking panicked: {}", e))?
-}
-
-#[tauri::command]
 pub async fn apply_slot(
     state: State<'_, Arc<CockpitState>>,
     expected_sha: String,
@@ -345,10 +323,8 @@ pub async fn read_monitor_state(
 pub async fn upsert_watch_entry(
     app: AppHandle,
     state: State<'_, Arc<CockpitState>>,
-    expected_sha: Option<String>,
     input: UpsertWatchInput,
 ) -> Result<MonitorStateSummary, String> {
-    let _ = expected_sha;
     let paths = state.paths.clone();
     let summary = {
         let _guard = state.monitor_lock.lock().await;
@@ -395,10 +371,8 @@ pub struct MonitorPrefsPatch {
 pub async fn set_watch_auto_state(
     app: AppHandle,
     state: State<'_, Arc<CockpitState>>,
-    expected_sha: Option<String>,
     patch: MonitorPrefsPatch,
 ) -> Result<MonitorStateSummary, String> {
-    let _ = expected_sha;
     let paths = state.paths.clone();
     let summary = {
         let _guard = state.monitor_lock.lock().await;
@@ -445,10 +419,8 @@ pub async fn set_watch_auto_state(
 pub async fn delete_watch_entry(
     app: AppHandle,
     state: State<'_, Arc<CockpitState>>,
-    expected_sha: Option<String>,
     watch_id: String,
 ) -> Result<MonitorStateSummary, String> {
-    let _ = expected_sha;
     let paths = state.paths.clone();
     let (summary, changed) = {
         let _guard = state.monitor_lock.lock().await;
@@ -487,21 +459,23 @@ pub async fn delete_watch_entry(
 pub async fn upsert_reserve_entry(
     app: AppHandle,
     state: State<'_, Arc<CockpitState>>,
-    expected_sha: String,
+    expected_reserves_sha: String,
     input: UpsertReserveInput,
 ) -> Result<MonitorStateSummary, String> {
     let paths = state.paths.clone();
     let summary = {
         let _guard = state.monitor_lock.lock().await;
         tauri::async_runtime::spawn_blocking(move || {
-            let (mut st, _) =
+            let (mut st, cur_sha) =
                 load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
+            verify_reserves_sha(&st.spare_models, &expected_reserves_sha)
+                .map_err(|e| e.to_string())?;
             upsert_reserve_record(&mut st, &input).map_err(|e| e.to_string())?;
             let new_sha = save_monitor_state_with_live_policy(
                 &paths.monitor_json_path,
                 &paths.backups_dir,
                 &st,
-                &expected_sha,
+                &cur_sha,
                 true,
             )
             .map_err(|e| e.to_string())?;
@@ -519,15 +493,17 @@ pub async fn upsert_reserve_entry(
 pub async fn delete_reserve_entry(
     app: AppHandle,
     state: State<'_, Arc<CockpitState>>,
-    expected_sha: String,
+    expected_reserves_sha: String,
     index: usize,
 ) -> Result<MonitorStateSummary, String> {
     let paths = state.paths.clone();
     let summary = {
         let _guard = state.monitor_lock.lock().await;
         tauri::async_runtime::spawn_blocking(move || {
-            let (mut st, _) =
+            let (mut st, cur_sha) =
                 load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
+            verify_reserves_sha(&st.spare_models, &expected_reserves_sha)
+                .map_err(|e| e.to_string())?;
             if index >= st.spare_models.len() {
                 return Err(format!("Reserve index {} out of range", index));
             }
@@ -536,7 +512,7 @@ pub async fn delete_reserve_entry(
                 &paths.monitor_json_path,
                 &paths.backups_dir,
                 &st,
-                &expected_sha,
+                &cur_sha,
                 true,
             )
             .map_err(|e| e.to_string())?;
@@ -554,6 +530,7 @@ pub async fn delete_reserve_entry(
 pub async fn promote_reserve_to_slot(
     state: State<'_, Arc<CockpitState>>,
     expected_conf_sha: String,
+    expected_reserves_sha: String,
     reserve_index: usize,
     slot_index: usize,
     allow_unaudited: bool,
@@ -561,6 +538,7 @@ pub async fn promote_reserve_to_slot(
     let paths = state.paths.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
         let (st, _) = load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
+        verify_reserves_sha(&st.spare_models, &expected_reserves_sha).map_err(|e| e.to_string())?;
         let rec = st
             .spare_models
             .get(reserve_index)
@@ -617,7 +595,7 @@ pub async fn promote_reserve_to_slot(
 pub async fn copy_reserve_to_watch(
     app: AppHandle,
     state: State<'_, Arc<CockpitState>>,
-    expected_sha: String,
+    expected_reserves_sha: String,
     reserve_index: usize,
     alias: Option<String>,
 ) -> Result<MonitorStateSummary, String> {
@@ -625,15 +603,17 @@ pub async fn copy_reserve_to_watch(
     let summary = {
         let _guard = state.monitor_lock.lock().await;
         tauri::async_runtime::spawn_blocking(move || {
-            let (mut st, _) =
+            let (mut st, cur_sha) =
                 load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
+            verify_reserves_sha(&st.spare_models, &expected_reserves_sha)
+                .map_err(|e| e.to_string())?;
             copy_reserve_into_watchlist(&mut st, reserve_index, alias.as_deref(), None)
                 .map_err(|e| e.to_string())?;
             let new_sha = save_monitor_state_with_live_policy(
                 &paths.monitor_json_path,
                 &paths.backups_dir,
                 &st,
-                &expected_sha,
+                &cur_sha,
                 true,
             )
             .map_err(|e| e.to_string())?;

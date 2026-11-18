@@ -4,6 +4,7 @@ const MAX_WATCHES = 4;
 const state = {
   confSha: "",
   monitorSha: "",
+  reservesSha: "",
   slots: [],
   watchCount: 0,
   lastMonitorSummary: null,
@@ -11,6 +12,7 @@ const state = {
   reserveEndpoint: "",
   editingWatchId: null,
   editingReserveIndex: null,
+  editingReserveSha: null,
 };
 
 let monitorMutationChain = Promise.resolve();
@@ -61,6 +63,7 @@ function resetWatchDraft() {
 
 function resetReserveDraft() {
   state.editingReserveIndex = null;
+  state.editingReserveSha = null;
   document.getElementById("reserve-model").value = "";
   document.getElementById("reserve-base").value = "";
   document.getElementById("reserve-note").value = "";
@@ -335,6 +338,7 @@ function renderReserveTable() {
     editResBtn.textContent = "Sửa";
     editResBtn.addEventListener("click", () => {
       state.editingReserveIndex = res.index;
+      state.editingReserveSha = state.reservesSha;
       document.getElementById("reserve-model").value = res.model;
       document.getElementById("reserve-base").value = res.api_base;
       document.getElementById("reserve-note").value = res.note || "";
@@ -375,9 +379,19 @@ function renderMonitorState(summary) {
   if (!summary) return;
   const watches = summary.watches || [];
   const reserves = summary.reserves || [];
+  const prevReservesSha = state.reservesSha;
   state.lastMonitorSummary = summary;
   state.monitorSha = summary.sha256;
+  state.reservesSha = summary.reserves_sha256 || "";
   state.watchCount = watches.length;
+
+  if (
+    state.editingReserveIndex !== null &&
+    prevReservesSha &&
+    state.reservesSha !== prevReservesSha
+  ) {
+    resetReserveDraft();
+  }
 
   const notifyDownEl = document.getElementById("pref-notify-down");
   if (notifyDownEl) notifyDownEl.checked = Boolean(summary.notify_on_down);
@@ -540,10 +554,7 @@ async function hotSwitchSlot(slotIndex, btn) {
 function updateMonitorPrefs(btn, statusEl, busyMsg, doneMsg, patch) {
   return enqueueMonitorMutation(btn, statusEl, busyMsg, async () => {
     try {
-      const res = await tauriApi.core.invoke("set_watch_auto_state", {
-        expectedSha: state.monitorSha,
-        patch,
-      });
+      const res = await tauriApi.core.invoke("set_watch_auto_state", { patch });
       renderMonitorState(res);
       if (statusEl && doneMsg) statusEl.textContent = doneMsg;
     } catch (err) {
@@ -582,10 +593,7 @@ function deleteWatch(watchId, btn) {
   const statusEl = document.getElementById("watch-status");
   return enqueueMonitorMutation(btn, statusEl, "Đang xóa key theo dõi…", async () => {
     try {
-      const res = await tauriApi.core.invoke("delete_watch_entry", {
-        expectedSha: state.monitorSha,
-        watchId,
-      });
+      const res = await tauriApi.core.invoke("delete_watch_entry", { watchId });
       if (state.editingWatchId === watchId) {
         resetWatchDraft();
       }
@@ -599,15 +607,14 @@ function deleteWatch(watchId, btn) {
 
 function deleteReserve(index, btn) {
   const statusEl = document.getElementById("reserve-status");
+  const expectedReservesSha = state.reservesSha;
   return enqueueMonitorMutation(btn, statusEl, "Đang xóa model dự trữ…", async () => {
     try {
       const res = await tauriApi.core.invoke("delete_reserve_entry", {
-        expectedSha: state.monitorSha,
+        expectedReservesSha,
         index,
       });
-      if (state.editingReserveIndex !== null) {
-        resetReserveDraft();
-      }
+      resetReserveDraft();
       renderMonitorState(res);
       statusEl.textContent = "Đã xóa model dự trữ.";
     } catch (err) {
@@ -618,6 +625,7 @@ function deleteReserve(index, btn) {
 
 async function promoteReserveToSlot(reserveIndex, btn) {
   const statusEl = document.getElementById("reserve-status");
+  const expectedReservesSha = state.reservesSha;
   const slotIndex = Number(document.getElementById("reserve-target-slot")?.value ?? 1);
   const allowUnaudited = Boolean(document.getElementById("reserve-allow-unaudited")?.checked);
   if (btn) btn.disabled = true;
@@ -625,6 +633,7 @@ async function promoteReserveToSlot(reserveIndex, btn) {
   try {
     const out = await tauriApi.core.invoke("promote_reserve_to_slot", {
       expectedConfSha: state.confSha,
+      expectedReservesSha,
       reserveIndex,
       slotIndex,
       allowUnaudited,
@@ -641,6 +650,7 @@ async function promoteReserveToSlot(reserveIndex, btn) {
 
 function copyReserveToWatch(reserveIndex, btn) {
   const statusEl = document.getElementById("reserve-status");
+  const expectedReservesSha = state.reservesSha;
   return enqueueMonitorMutation(
     btn,
     statusEl,
@@ -648,7 +658,7 @@ function copyReserveToWatch(reserveIndex, btn) {
     async () => {
       try {
         const summary = await tauriApi.core.invoke("copy_reserve_to_watch", {
-          expectedSha: state.monitorSha,
+          expectedReservesSha,
           reserveIndex,
           alias: null,
         });
@@ -751,14 +761,23 @@ async function launchSecurityAudit(target) {
 function setupForms() {
   document.getElementById("btn-refresh").addEventListener("click", refreshAll);
 
+  document.getElementById("btn-hide-tray").addEventListener("click", async () => {
+    const win = tauriApi?.window?.getCurrentWindow?.();
+    if (win) {
+      await win.hide();
+    }
+  });
+
+  const topbarStatus = document.getElementById("topbar-status");
+
   document.getElementById("pref-notify-down").addEventListener("change", (ev) => {
     const toggle = ev.target;
     const desired = toggle.checked;
     updateMonitorPrefs(
       toggle,
-      document.getElementById("watch-status"),
-      "Đang lưu cài đặt thông báo sự cố Server…",
-      desired ? "Đã bật thông báo sự cố Server." : "Đã tắt thông báo sự cố Server.",
+      topbarStatus,
+      "Đang lưu…",
+      desired ? "Đã bật báo sự cố." : "Đã tắt báo sự cố.",
       { notifyOnDown: desired }
     );
   });
@@ -768,9 +787,9 @@ function setupForms() {
     const desired = toggle.checked;
     updateMonitorPrefs(
       toggle,
-      document.getElementById("watch-status"),
-      "Đang lưu cài đặt thông báo Failover…",
-      desired ? "Đã bật thông báo chuyển mạch Failover." : "Đã tắt thông báo chuyển mạch Failover.",
+      topbarStatus,
+      "Đang lưu…",
+      desired ? "Đã bật báo Failover." : "Đã tắt báo Failover.",
       { notifyOnFailover: desired }
     );
   });
@@ -872,10 +891,7 @@ function setupForms() {
     };
     enqueueMonitorMutation(submitBtn, statusEl, "Đang mã hóa DPAPI và lưu key theo dõi…", async () => {
       try {
-        const summary = await tauriApi.core.invoke("upsert_watch_entry", {
-          expectedSha: state.monitorSha,
-          input,
-        });
+        const summary = await tauriApi.core.invoke("upsert_watch_entry", { input });
         resetWatchDraft();
         renderMonitorState(summary);
         statusEl.textContent = "Đã lưu key theo dõi (mã hóa DPAPI).";
@@ -890,6 +906,8 @@ function setupForms() {
     const statusEl = document.getElementById("reserve-status");
     const submitBtn = document.getElementById("reserve-submit-btn");
     const rawKey = document.getElementById("reserve-key").value.trim();
+    const expectedReservesSha =
+      state.editingReserveIndex !== null ? state.editingReserveSha : state.reservesSha;
     const input = {
       index: state.editingReserveIndex,
       model: document.getElementById("reserve-model").value.trim(),
@@ -900,7 +918,7 @@ function setupForms() {
     enqueueMonitorMutation(submitBtn, statusEl, "Đang mã hóa DPAPI và lưu model dự trữ…", async () => {
       try {
         const summary = await tauriApi.core.invoke("upsert_reserve_entry", {
-          expectedSha: state.monitorSha,
+          expectedReservesSha,
           input,
         });
         resetReserveDraft();

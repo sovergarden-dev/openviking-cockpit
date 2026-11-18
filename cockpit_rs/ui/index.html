@@ -20,6 +20,7 @@
         <button class="c-tab" role="tab" data-tab="reserve" aria-selected="false">Dự trữ</button>
       </nav>
       <div class="c-actions">
+        <span id="topbar-status" class="c-card-meta"></span>
         <label class="c-check-inline" title="Thông báo khay khi OpenViking (19330) mất kết nối hoặc thiếu model embedding">
           <input id="pref-notify-down" type="checkbox" checked />
           Báo sự cố Server
@@ -28,7 +29,8 @@
           <input id="pref-notify-failover" type="checkbox" checked />
           Báo Failover
         </label>
-        <button id="btn-refresh" class="c-btn c-btn--sm">Làm mới</button>
+        <button id="btn-hide-tray" type="button" class="c-btn c-btn--sm" title="Ẩn cửa sổ xuống khay hệ thống (vẫn chạy nền)">Ẩn khay</button>
+        <button id="btn-refresh" type="button" class="c-btn c-btn--sm">Làm mới</button>
       </div>
     </header>
 
