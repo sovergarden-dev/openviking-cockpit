@@ -145,6 +145,188 @@ pub struct MemoriesStaleness {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueueResponse {
+    pub status: String,
+    #[serde(default)]
+    pub result: Option<QueueResult>,
+    #[serde(default)]
+    pub error: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueueResult {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub is_healthy: Option<bool>,
+    #[serde(default)]
+    pub has_errors: Option<bool>,
+    #[serde(default)]
+    pub status: Option<QueueStatus>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct QueueStatus {
+    #[serde(default)]
+    pub queues: Vec<QueueItem>,
+}
+
+impl QueueStatus {
+    pub fn total_pending(&self) -> usize {
+        self.queues.iter().map(|q| q.pending).sum()
+    }
+
+    pub fn total_in_progress(&self) -> usize {
+        self.queues.iter().map(|q| q.in_progress).sum()
+    }
+
+    pub fn total_processed(&self) -> usize {
+        self.queues.iter().map(|q| q.processed).sum()
+    }
+
+    pub fn total_requeued(&self) -> usize {
+        self.queues.iter().map(|q| q.requeued).sum()
+    }
+
+    pub fn total_errors(&self) -> usize {
+        self.queues.iter().map(|q| q.errors).sum()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueItem {
+    #[serde(default)]
+    pub queue: String,
+    #[serde(default)]
+    pub pending: usize,
+    #[serde(default)]
+    pub in_progress: usize,
+    #[serde(default)]
+    pub processed: usize,
+    #[serde(default)]
+    pub requeued: usize,
+    #[serde(default)]
+    pub errors: usize,
+    #[serde(default)]
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RetrievalObserverResponse {
+    pub status: String,
+    #[serde(default)]
+    pub result: Option<RetrievalObserverResult>,
+    #[serde(default)]
+    pub error: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RetrievalObserverResult {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub is_healthy: Option<bool>,
+    #[serde(default)]
+    pub has_errors: Option<bool>,
+    #[serde(default)]
+    pub status: Option<RetrievalObserverStatus>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RetrievalObserverStatus {
+    #[serde(default)]
+    pub total_queries: usize,
+    #[serde(default)]
+    pub total_results: usize,
+    #[serde(default)]
+    pub zero_result_queries: usize,
+    #[serde(default)]
+    pub zero_result_rate: f64,
+    #[serde(default)]
+    pub avg_results_per_query: f64,
+    #[serde(default)]
+    pub avg_score: f64,
+    #[serde(default)]
+    pub max_score: f64,
+    #[serde(default)]
+    pub min_score: f64,
+    #[serde(default)]
+    pub avg_latency_ms: f64,
+    #[serde(default)]
+    pub max_latency_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchFindRequest {
+    pub query: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_type: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchFindResponse {
+    pub status: String,
+    #[serde(default)]
+    pub result: Option<SearchFindResult>,
+    #[serde(default)]
+    pub error: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SearchFindResult {
+    #[serde(default)]
+    pub memories: Vec<SearchFindHit>,
+    #[serde(default)]
+    pub resources: Vec<SearchFindHit>,
+    #[serde(default)]
+    pub skills: Vec<SearchFindHit>,
+    #[serde(default)]
+    pub total: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SearchFindHit {
+    #[serde(default)]
+    pub context_type: String,
+    #[serde(default)]
+    pub uri: String,
+    #[serde(default)]
+    pub level: Option<i32>,
+    #[serde(default)]
+    pub score: Option<f64>,
+    #[serde(default, rename = "abstract")]
+    pub abstract_text: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContentReadResponse {
+    pub status: String,
+    #[serde(default)]
+    pub result: Option<String>,
+    #[serde(default)]
+    pub error: Option<Value>,
+}
+
+/// RFC 3986 unreserved byte percent-encoder for query parameters (`uri=viking://...`).
+pub fn percent_encode_query_component(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() + 16);
+    for &b in input.as_bytes() {
+        let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~');
+        if unreserved {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OllamaTagsResponse {
     #[serde(default)]
     pub models: Vec<OllamaModelInfo>,
@@ -265,6 +447,13 @@ pub struct TelemetrySnapshot {
     pub memories_status: EndpointStatus,
     pub memories_latency_ms: u64,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<QueueResponse>,
+    #[serde(default = "default_ollama_status")]
+    pub queue_status: EndpointStatus,
+    #[serde(default)]
+    pub queue_latency_ms: u64,
+
     #[serde(default = "default_ollama_status")]
     pub ollama_status: EndpointStatus,
     #[serde(default)]
@@ -334,6 +523,7 @@ pub struct TelemetryClient {
     ollama_base_url: String,
     api_key: Option<RedactedApiKey>,
     http: reqwest::Client,
+    search_http: reqwest::Client,
 }
 
 impl Default for TelemetryClient {
@@ -349,11 +539,17 @@ impl TelemetryClient {
             .connect_timeout(Duration::from_millis(300))
             .no_proxy()
             .build()?;
+        let search_http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(12))
+            .connect_timeout(Duration::from_millis(500))
+            .no_proxy()
+            .build()?;
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             ollama_base_url: "http://127.0.0.1:21434".to_string(),
             api_key: None,
             http,
+            search_http,
         })
     }
 
@@ -487,6 +683,91 @@ impl TelemetryClient {
         self.probe("/api/v1/stats/memories").await
     }
 
+    pub async fn fetch_queue(&self) -> (EndpointStatus, Option<QueueResponse>, u64) {
+        self.probe("/api/v1/observer/queue?format=json").await
+    }
+
+    pub async fn fetch_retrieval_observer(
+        &self,
+    ) -> (EndpointStatus, Option<RetrievalObserverResponse>, u64) {
+        self.probe("/api/v1/observer/retrieval?format=json").await
+    }
+
+    /// Read-only semantic search via `POST /api/v1/search/find` (uses local embedding model only, zero VLM calls).
+    pub async fn search_find(
+        &self,
+        body: &SearchFindRequest,
+    ) -> Result<(SearchFindResult, u64), String> {
+        if body.query.trim().is_empty() {
+            return Err("Query must not be empty".to_string());
+        }
+        if let Some(ref target) = body.target_uri {
+            if !target.trim().is_empty() && !target.starts_with("viking://") {
+                return Err("Target URI must start with 'viking://'".to_string());
+            }
+        }
+        let start = Instant::now();
+        let url = format!("{}/api/v1/search/find", self.base_url);
+        let mut req = self.search_http.post(&url).json(body);
+        if let Some(ref key) = self.api_key {
+            req = req.header("X-API-Key", &key.0).bearer_auth(&key.0);
+        }
+        let resp = req.send().await.map_err(|e| {
+            if e.is_timeout() {
+                "Semantic search timed out (check OpenViking & Ollama)".to_string()
+            } else {
+                "OpenViking semantic search endpoint unreachable".to_string()
+            }
+        })?;
+        let latency_ms = start.elapsed().as_millis() as u64;
+        let code = resp.status();
+        if !code.is_success() {
+            return Err(format!(
+                "Semantic search failed with HTTP {}",
+                code.as_u16()
+            ));
+        }
+        let parsed = resp
+            .json::<SearchFindResponse>()
+            .await
+            .map_err(|_| "Failed to decode /api/v1/search/find response".to_string())?;
+        Ok((parsed.result.unwrap_or_default(), latency_ms))
+    }
+
+    /// Read-only content fetch for a validated `viking://` URI via `GET /api/v1/content/read`.
+    pub async fn read_content(&self, uri: &str, max_chars: usize) -> Result<String, String> {
+        let clean = uri.trim();
+        if !clean.starts_with("viking://") || clean.contains("..") {
+            return Err("URI must start with 'viking://' and contain no '..' segments".to_string());
+        }
+        let capped_limit = max_chars.clamp(256, 32_768);
+        let encoded_uri = percent_encode_query_component(clean);
+        let url = format!(
+            "{}/api/v1/content/read?uri={}&limit={}",
+            self.base_url, encoded_uri, capped_limit
+        );
+        let mut req = self.search_http.get(&url);
+        if let Some(ref key) = self.api_key {
+            req = req.header("X-API-Key", &key.0).bearer_auth(&key.0);
+        }
+        let resp = req.send().await.map_err(|e| {
+            if e.is_timeout() {
+                "Content read timed out".to_string()
+            } else {
+                "OpenViking content endpoint unreachable".to_string()
+            }
+        })?;
+        let code = resp.status();
+        if !code.is_success() {
+            return Err(format!("Content read failed with HTTP {}", code.as_u16()));
+        }
+        let parsed = resp
+            .json::<ContentReadResponse>()
+            .await
+            .map_err(|_| "Failed to decode /api/v1/content/read response".to_string())?;
+        Ok(parsed.result.unwrap_or_default())
+    }
+
     pub async fn fetch_ollama_tags(&self) -> (EndpointStatus, Vec<String>, u64) {
         let url = format!("{}/api/tags", self.ollama_base_url);
         let (status, parsed, latency) = self.probe_url::<OllamaTagsResponse>(&url, false).await;
@@ -509,12 +790,13 @@ impl TelemetryClient {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
-        let (h, r, v, db, m, ol) = tokio::join!(
+        let (h, r, v, db, m, q, ol) = tokio::join!(
             self.fetch_health(),
             self.fetch_ready(),
             self.fetch_vlm(),
             self.fetch_vikingdb(),
             self.fetch_memories(),
+            self.fetch_queue(),
             self.fetch_ollama_tags(),
         );
 
@@ -543,6 +825,10 @@ impl TelemetryClient {
             memories: m.1,
             memories_status: m.0,
             memories_latency_ms: m.2,
+
+            queue: q.1,
+            queue_status: q.0,
+            queue_latency_ms: q.2,
 
             ollama_status: ol.0,
             ollama_models: ol.1,
@@ -730,6 +1016,9 @@ mod tests {
             memories: None,
             memories_status: EndpointStatus::Ok,
             memories_latency_ms: 12,
+            queue: None,
+            queue_status: EndpointStatus::Ok,
+            queue_latency_ms: 4,
             ollama_status: EndpointStatus::Ok,
             ollama_models: vec!["qwen3-embedding:0.6b".to_string()],
             ollama_latency_ms: 3,
@@ -965,6 +1254,9 @@ mod tests {
             memories: None,
             memories_status: EndpointStatus::Ok,
             memories_latency_ms: 2,
+            queue: None,
+            queue_status: EndpointStatus::Ok,
+            queue_latency_ms: 2,
             ollama_status: EndpointStatus::Ok,
             ollama_models: vec!["qwen3-embedding:0.6b".to_string()],
             ollama_latency_ms: 2,
@@ -1027,5 +1319,99 @@ mod tests {
         assert_eq!(sum.total_crashes, 1);
         assert_eq!(sum.last_exit_hex.as_deref(), Some("0x00000003"));
         assert_eq!(sum.last_uptime_s, Some(12.5));
+    }
+
+    #[tokio::test]
+    async fn test_queue_search_and_content_read_contracts_and_uri_guards() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let q_json = r#"{"status":"ok","result":{"name":"queue","is_healthy":true,"has_errors":false,"status":{"queues":[{"queue":"Embedding","pending":2,"in_progress":1,"processed":8,"requeued":0,"errors":1,"total":11},{"queue":"Semantic","pending":0,"in_progress":0,"processed":5,"requeued":1,"errors":0,"total":5}]}}}"#;
+        let q_parsed: QueueResponse = serde_json::from_str(q_json).expect("parse queue json");
+        let q_status = q_parsed.result.unwrap().status.unwrap();
+        assert_eq!(q_status.total_pending(), 2);
+        assert_eq!(q_status.total_in_progress(), 1);
+        assert_eq!(q_status.total_processed(), 13);
+        assert_eq!(q_status.total_requeued(), 1);
+        assert_eq!(q_status.total_errors(), 1);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let base_url = format!("http://127.0.0.1:{}", port);
+
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req_str = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let first_line = req_str.lines().next().unwrap_or("");
+                    let body = if first_line.starts_with("POST /api/v1/search/find ") {
+                        r#"{"status":"ok","result":{"memories":[{"context_type":"memory","uri":"viking://user/default/memories/preferences/pref_1.md","level":2,"score":0.891,"abstract":"DPAPI key policy"}],"resources":[],"skills":[],"total":1}}"#
+                    } else if first_line.starts_with(
+                        "GET /api/v1/content/read?uri=viking%3A%2F%2Fuser%2Fdefault%2Fmemories%2Fpref_1.md&limit=512 ",
+                    ) {
+                        r##"{"status":"ok","result":"# DPAPI Policy\nNever write plaintext keys."}"##
+                    } else {
+                        r#"{"status":"error"}"#
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                }
+            }
+        });
+
+        let client = TelemetryClient::new(&base_url);
+
+        assert!(client
+            .search_find(&SearchFindRequest {
+                query: "   ".to_string(),
+                target_uri: None,
+                context_type: None,
+                limit: 5,
+            })
+            .await
+            .is_err());
+
+        assert!(client
+            .search_find(&SearchFindRequest {
+                query: "dpapi".to_string(),
+                target_uri: Some("http://evil.example".to_string()),
+                context_type: None,
+                limit: 5,
+            })
+            .await
+            .is_err());
+
+        let (found, _) = client
+            .search_find(&SearchFindRequest {
+                query: "dpapi".to_string(),
+                target_uri: Some("viking://user/default/memories".to_string()),
+                context_type: Some("memory".to_string()),
+                limit: 5,
+            })
+            .await
+            .expect("search_find ok");
+        assert_eq!(found.memories.len(), 1);
+        assert_eq!(found.memories[0].level, Some(2));
+
+        assert!(client
+            .read_content("file:///C:/Windows/win.ini", 512)
+            .await
+            .is_err());
+        assert!(client
+            .read_content("viking://user/default/../secrets", 512)
+            .await
+            .is_err());
+
+        let content = client
+            .read_content("viking://user/default/memories/pref_1.md", 512)
+            .await
+            .expect("read_content ok");
+        assert!(content.contains("Never write plaintext keys."));
     }
 }

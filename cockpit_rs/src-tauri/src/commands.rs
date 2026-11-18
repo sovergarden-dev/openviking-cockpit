@@ -7,16 +7,21 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, State};
 
 use cockpit_rs::config::conf_gate::{
-    apply_slot_update_with_live_policy, load_raw_config, resolve_slot_audit_target,
-    summarize_config_with_audits, ApplySlotOutcome, ConfigSummary, SlotUpdateInput,
-    AUDIT_TTL_FAILOVER_S, AUDIT_TTL_PRIMARY_S,
+    apply_slot_update_with_live_policy, display_clean_path, load_raw_config,
+    resolve_slot_audit_target, summarize_config_with_audits, ApplySlotOutcome, ConfigSummary,
+    SlotUpdateInput, AUDIT_TTL_FAILOVER_S, AUDIT_TTL_PRIMARY_S,
 };
 use cockpit_rs::secrets::secret_store::{is_env_ref, resolve_secret, SecretStatus};
 use cockpit_rs::services::auditor::{run_provider_audit, AuditReportDocument};
-use cockpit_rs::services::auditor_cache::{load_cached_audit_document, load_cached_audit_verdict};
+use cockpit_rs::services::auditor_cache::{
+    load_cached_audit_document, load_cached_audit_verdict, presentation_sanitize_text,
+};
+use cockpit_rs::services::service_control::{execute_service_step, ServiceAction};
+use cockpit_rs::services::storage_inspector::{inspect_storage_footprint, StorageFootprint};
 use cockpit_rs::services::telemetry::{
-    evaluate_telemetry_incidents, read_lifecycle_summary, LifecycleSummary, TelemetrySnapshot,
-    VlmActiveResponse,
+    evaluate_telemetry_incidents, read_lifecycle_summary, EndpointStatus, LifecycleSummary,
+    MemoriesStatsResponse, RetrievalObserverResponse, SearchFindHit, SearchFindRequest,
+    TelemetrySnapshot, VikingDbResponse, VlmActiveResponse,
 };
 use cockpit_rs::services::watchlist::{
     copy_reserve_into_watchlist, copy_watch_into_reserve, load_monitor_state,
@@ -981,4 +986,238 @@ pub async fn run_security_audit(
         &resolved_key,
     )
     .await)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ServiceControlOutcome {
+    pub action: String,
+    pub task_end_rc: Option<i32>,
+    pub task_run_rc: i32,
+    pub terminated_pids: Vec<u32>,
+    pub locks_cleaned: Vec<String>,
+    pub health_ok: bool,
+    pub ready_ok: bool,
+    pub elapsed_ms: u64,
+}
+
+#[tauri::command]
+pub async fn control_openviking_service(
+    state: State<'_, Arc<CockpitState>>,
+    action: String,
+) -> Result<ServiceControlOutcome, String> {
+    let parsed_action = ServiceAction::parse(&action)?;
+    let _guard = state.service_lock.lock().await;
+    let started = std::time::Instant::now();
+    let ov_home = state.paths.ov_home.clone();
+    let port = state.server_port;
+
+    let step = tauri::async_runtime::spawn_blocking(move || {
+        execute_service_step(parsed_action, &ov_home, port)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking panicked: {}", e))??;
+
+    let mut health_ok = false;
+    let mut ready_ok = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(35);
+
+    while std::time::Instant::now() < deadline {
+        let (h_st, h_body, _) = state.telemetry_client.fetch_health().await;
+        if h_st == EndpointStatus::Ok && h_body.as_ref().is_some_and(|h| h.healthy) {
+            health_ok = true;
+            let (r_st, r_body, _) = state.telemetry_client.fetch_ready().await;
+            if r_st == EndpointStatus::Ok && r_body.as_ref().is_some_and(|r| r.status == "ready") {
+                ready_ok = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    }
+
+    state.invalidate_poll_meta_cache();
+    let _ = collect_telemetry_once(state.inner()).await;
+
+    Ok(ServiceControlOutcome {
+        action: step.action,
+        task_end_rc: step.task_end_rc,
+        task_run_rc: step.task_run_rc,
+        terminated_pids: step.terminated_pids,
+        locks_cleaned: step.locks_cleaned,
+        health_ok,
+        ready_ok,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+#[tauri::command]
+pub async fn open_logs_folder(state: State<'_, Arc<CockpitState>>) -> Result<String, String> {
+    if is_isolated_ov_home() {
+        return Err(
+            "Opening Explorer is disabled under COCKPIT_OV_HOME test isolation".to_string(),
+        );
+    }
+    let logs_dir = state.paths.ov_home.join("logs");
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::create_dir_all(&logs_dir)
+            .map_err(|e| format!("Failed to create logs directory: {}", e))?;
+        #[cfg(windows)]
+        {
+            let explorer = std::env::var_os("SystemRoot")
+                .map(std::path::PathBuf::from)
+                .map(|r| r.join("explorer.exe"))
+                .filter(|p| p.is_file())
+                .unwrap_or_else(|| std::path::PathBuf::from("explorer.exe"));
+            std::process::Command::new(explorer)
+                .arg(&logs_dir)
+                .spawn()
+                .map_err(|e| format!("Failed to open Explorer: {}", e))?;
+        }
+        Ok(display_clean_path(&logs_dir))
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking panicked: {}", e))?
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemoryOverviewPayload {
+    pub memories: Option<MemoriesStatsResponse>,
+    pub memories_status: EndpointStatus,
+    pub vikingdb: Option<VikingDbResponse>,
+    pub vikingdb_status: EndpointStatus,
+    pub retrieval: Option<RetrievalObserverResponse>,
+    pub retrieval_status: EndpointStatus,
+    pub storage: StorageFootprint,
+}
+
+#[tauri::command]
+pub async fn get_memory_overview(
+    state: State<'_, Arc<CockpitState>>,
+) -> Result<MemoryOverviewPayload, String> {
+    let ov_home = state.paths.ov_home.clone();
+    let storage_fut =
+        tauri::async_runtime::spawn_blocking(move || inspect_storage_footprint(&ov_home));
+
+    let ((mem_st, mem_body, _), (vdb_st, vdb_body, _), (ret_st, ret_body, _), storage_res) = tokio::join!(
+        state.telemetry_client.fetch_memories(),
+        state.telemetry_client.fetch_vikingdb(),
+        state.telemetry_client.fetch_retrieval_observer(),
+        storage_fut,
+    );
+
+    let storage = storage_res.map_err(|e| format!("spawn_blocking panicked: {}", e))?;
+    Ok(MemoryOverviewPayload {
+        memories: mem_body,
+        memories_status: mem_st,
+        vikingdb: vdb_body,
+        vikingdb_status: vdb_st,
+        retrieval: ret_body,
+        retrieval_status: ret_st,
+        storage,
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchMemoriesInput {
+    pub query: String,
+    #[serde(default, alias = "target_uri")]
+    pub target_uri: Option<String>,
+    #[serde(default, alias = "context_type")]
+    pub context_type: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SanitizedSearchHit {
+    pub context_type: String,
+    pub uri: String,
+    pub level: Option<i32>,
+    pub score: Option<f64>,
+    pub abstract_text: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SearchMemoriesOutcome {
+    pub hits: Vec<SanitizedSearchHit>,
+    pub total: usize,
+    pub latency_ms: u64,
+}
+
+#[tauri::command]
+pub async fn search_memories(
+    state: State<'_, Arc<CockpitState>>,
+    input: SearchMemoriesInput,
+) -> Result<SearchMemoriesOutcome, String> {
+    let clean_query = input.query.trim().to_string();
+    if clean_query.is_empty() {
+        return Err("Vui lòng nhập từ khóa hoặc câu hỏi cần tra cứu.".to_string());
+    }
+    let target_uri = input
+        .target_uri
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let context_type = input
+        .context_type
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let limit = input.limit.unwrap_or(10).clamp(1, 50);
+
+    let req = SearchFindRequest {
+        query: clean_query,
+        target_uri,
+        context_type,
+        limit,
+    };
+    let (res, latency_ms) = state.telemetry_client.search_find(&req).await?;
+
+    let mut raw_hits: Vec<SearchFindHit> = Vec::new();
+    raw_hits.extend(res.memories);
+    raw_hits.extend(res.resources);
+    raw_hits.extend(res.skills);
+    raw_hits.sort_by(|a, b| {
+        let sa = a.score.unwrap_or(0.0);
+        let sb = b.score.unwrap_or(0.0);
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let hits: Vec<SanitizedSearchHit> = raw_hits
+        .into_iter()
+        .take(limit)
+        .map(|h| SanitizedSearchHit {
+            context_type: presentation_sanitize_text(&h.context_type, None),
+            uri: presentation_sanitize_text(&h.uri, None),
+            level: h.level,
+            score: h.score,
+            abstract_text: presentation_sanitize_text(
+                h.abstract_text.as_deref().unwrap_or(""),
+                None,
+            ),
+        })
+        .collect();
+    let total = res.total.unwrap_or(hits.len());
+
+    Ok(SearchMemoriesOutcome {
+        hits,
+        total,
+        latency_ms,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VikingContentOutcome {
+    pub uri: String,
+    pub content: String,
+}
+
+#[tauri::command]
+pub async fn read_viking_content(
+    state: State<'_, Arc<CockpitState>>,
+    uri: String,
+) -> Result<VikingContentOutcome, String> {
+    let raw = state.telemetry_client.read_content(&uri, 16_384).await?;
+    Ok(VikingContentOutcome {
+        uri: presentation_sanitize_text(&uri, None),
+        content: presentation_sanitize_text(&raw, None),
+    })
 }

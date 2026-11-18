@@ -69,14 +69,25 @@ impl CockpitPaths {
 
 pub struct CockpitState {
     pub paths: CockpitPaths,
+    pub server_port: u16,
     pub telemetry_client: TelemetryClient,
     pub latest_snapshot: RwLock<Option<TelemetrySnapshot>>,
     pub incident_tracker: Mutex<IncidentTracker>,
     pub poll_meta_cache: Mutex<TelemetryPollMetaCache>,
     pub monitor_lock: tokio::sync::Mutex<()>,
+    pub service_lock: tokio::sync::Mutex<()>,
     pub pending_geometry: Mutex<Option<String>>,
     pub subscribers: Mutex<Vec<Channel<TelemetrySnapshot>>>,
     pub shutdown_tx: watch::Sender<bool>,
+}
+
+fn extract_port_from_url(url: &str, default_port: u16) -> u16 {
+    let without_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
+    host_port
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse::<u16>().ok())
+        .unwrap_or(default_port)
 }
 
 impl CockpitState {
@@ -85,17 +96,20 @@ impl CockpitState {
             .unwrap_or_else(|_| "http://127.0.0.1:19330".to_string());
         let ollama_url = std::env::var("COCKPIT_OLLAMA_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:21434".to_string());
+        let server_port = extract_port_from_url(&server_url, 19330);
 
         let telemetry_client = TelemetryClient::new(&server_url).with_ollama_base_url(&ollama_url);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let state = Arc::new(Self {
             paths,
+            server_port,
             telemetry_client,
             latest_snapshot: RwLock::new(None),
             incident_tracker: Mutex::new(IncidentTracker::default()),
             poll_meta_cache: Mutex::new(TelemetryPollMetaCache::default()),
             monitor_lock: tokio::sync::Mutex::new(()),
+            service_lock: tokio::sync::Mutex::new(()),
             pending_geometry: Mutex::new(None),
             subscribers: Mutex::new(Vec::new()),
             shutdown_tx,

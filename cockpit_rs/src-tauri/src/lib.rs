@@ -372,6 +372,11 @@ pub fn run() {
             commands::copy_watch_to_reserve,
             commands::probe_watch_entry,
             commands::run_security_audit,
+            commands::control_openviking_service,
+            commands::open_logs_folder,
+            commands::get_memory_overview,
+            commands::search_memories,
+            commands::read_viking_content,
         ])
         .build(tauri::generate_context!())
         .expect("error while building OpenViking Cockpit Tauri application");

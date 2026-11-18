@@ -18,6 +18,7 @@
         <button class="c-tab" role="tab" data-tab="overview" aria-selected="true">Tổng quan</button>
         <button class="c-tab" role="tab" data-tab="slots" aria-selected="false">Định tuyến Slot</button>
         <button class="c-tab" role="tab" data-tab="reserve" aria-selected="false">Dự trữ</button>
+        <button class="c-tab" role="tab" data-tab="memory" aria-selected="false">Bộ nhớ &amp; Tra cứu</button>
       </nav>
       <div class="c-actions">
         <span id="topbar-status" class="c-card-meta"></span>
@@ -47,6 +48,13 @@
             <span class="c-card-title">OpenViking Server (19330)</span>
             <div id="metric-server" class="c-card-metric">—</div>
             <div id="meta-server" class="c-card-meta">Chưa có dữ liệu</div>
+            <div class="c-actions">
+              <button id="btn-server-start" type="button" class="c-btn c-btn--sm c-btn--primary" hidden>Chạy Server</button>
+              <button id="btn-server-restart" type="button" class="c-btn c-btn--sm">Khởi động lại</button>
+              <button id="btn-server-cancel-restart" type="button" class="c-btn c-btn--sm" hidden>Hủy</button>
+              <button id="btn-open-logs" type="button" class="c-btn c-btn--sm" title="Mở thư mục nhật ký logs/ trong Windows Explorer">Mở Logs</button>
+            </div>
+            <div id="server-action-status" class="c-card-meta" hidden></div>
           </article>
           <article class="c-card">
             <span class="c-card-title">Ollama &amp; Embedding (21434)</span>
@@ -59,11 +67,16 @@
             <div id="meta-vlm" class="c-card-meta">Chưa có dữ liệu</div>
           </article>
           <article class="c-card">
+            <span class="c-card-title">Extraction Queue</span>
+            <div id="metric-queue" class="c-card-metric">—</div>
+            <div id="meta-queue" class="c-card-meta">Chưa có dữ liệu</div>
+          </article>
+          <article id="card-jump-vectors" class="c-card c-card--interactive" role="button" tabindex="0" title="Bấm để xem phân bổ chi tiết và tra cứu thử ngữ nghĩa">
             <span class="c-card-title">VikingDB Vectors</span>
             <div id="metric-vikingdb" class="c-card-metric">—</div>
             <div id="meta-vikingdb" class="c-card-meta">Chưa có dữ liệu</div>
           </article>
-          <article class="c-card">
+          <article id="card-jump-memories" class="c-card c-card--interactive" role="button" tabindex="0" title="Bấm để xem phân bổ chi tiết và tra cứu thử ngữ nghĩa">
             <span class="c-card-title">Long-Term Memories</span>
             <div id="metric-memories" class="c-card-metric">—</div>
             <div id="meta-memories" class="c-card-meta">Chưa có dữ liệu</div>
@@ -248,6 +261,144 @@
             </div>
           </form>
           <div id="reserve-status" class="c-card-meta"></div>
+        </article>
+      </section>
+
+      <section id="panel-memory" class="c-panel" hidden>
+        <div class="c-grid">
+          <article class="c-card">
+            <span class="c-card-title">Chất lượng truy hồi (Retrieval)</span>
+            <div id="mem-ov-retrieval" class="c-card-metric">—</div>
+            <div id="mem-ov-retrieval-meta" class="c-card-meta">Chưa có dữ liệu</div>
+          </article>
+          <article class="c-card">
+            <span class="c-card-title">Độ nóng &amp; Chu kỳ truy cập</span>
+            <div id="mem-ov-hotness" class="c-card-metric">—</div>
+            <div id="mem-ov-hotness-meta" class="c-card-meta">Chưa có dữ liệu</div>
+          </article>
+          <article class="c-card">
+            <span class="c-card-title">Kho Ký ức &amp; Chỉ mục Vector</span>
+            <div id="mem-ov-core-disk" class="c-card-metric">—</div>
+            <div id="mem-ov-core-disk-meta" class="c-card-meta">Chưa có dữ liệu</div>
+          </article>
+          <article class="c-card">
+            <span class="c-card-title">Phiên thô &amp; Khu cách ly</span>
+            <div id="mem-ov-aux-disk" class="c-card-metric">—</div>
+            <div id="mem-ov-aux-disk-meta" class="c-card-meta">Chưa có dữ liệu</div>
+          </article>
+        </div>
+
+        <div class="c-grid-split">
+          <article class="c-card">
+            <div class="c-actions">
+              <span class="c-card-title">Phân bổ Ký ức theo Danh mục</span>
+              <button id="btn-refresh-memory-overview" type="button" class="c-btn c-btn--sm">Làm mới số liệu</button>
+              <span id="memory-overview-status" class="c-card-meta"></span>
+            </div>
+            <div class="c-table-wrap">
+              <table class="c-table">
+                <thead>
+                  <tr>
+                    <th>Danh mục</th>
+                    <th>Bản ghi</th>
+                    <th>Tỷ trọng</th>
+                    <th>Vai trò</th>
+                  </tr>
+                </thead>
+                <tbody id="memory-cat-tbody"></tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="c-card">
+            <span class="c-card-title">Phân nhánh Tác nhân (Peers) &amp; Lưu trữ Đĩa</span>
+            <div class="c-table-wrap">
+              <table class="c-table">
+                <thead>
+                  <tr>
+                    <th>Thành phần / Nhánh</th>
+                    <th>Số lượng</th>
+                    <th>Dung lượng</th>
+                    <th>Ghi chú</th>
+                  </tr>
+                </thead>
+                <tbody id="memory-storage-tbody"></tbody>
+              </table>
+            </div>
+          </article>
+        </div>
+
+        <article class="c-card">
+          <div class="c-actions">
+            <span class="c-card-title">Thử tra cứu ngữ nghĩa trực tiếp (Chỉ đọc · Local Embedding)</span>
+            <span id="memory-search-badge" class="c-badge c-badge--ok">Chỉ đọc</span>
+          </div>
+          <form id="memory-search-form" class="c-form">
+            <div class="c-field">
+              <label for="memory-search-query">Từ khóa / Câu hỏi ngữ nghĩa</label>
+              <input
+                id="memory-search-query"
+                class="c-input"
+                type="search"
+                placeholder="Ví dụ: quy tắc mã hóa DPAPI và định tuyến slot..."
+                required
+              />
+            </div>
+            <div class="c-field">
+              <label for="memory-search-type">Loại ngữ cảnh</label>
+              <select id="memory-search-type" class="c-input">
+                <option value="">Tất cả</option>
+                <option value="memory">Memory (Ký ức)</option>
+                <option value="resource">Resource (Tài nguyên)</option>
+                <option value="skill">Skill (Kỹ năng)</option>
+              </select>
+            </div>
+            <div class="c-field">
+              <label for="memory-search-scope">Phạm vi URI</label>
+              <select id="memory-search-scope" class="c-input">
+                <option value="">Toàn bộ kho</option>
+                <option value="viking://user/default/memories">Kho chung (user/default)</option>
+                <option value="viking://user/default/memories/preferences">Preferences (Sở thích)</option>
+                <option value="viking://user/default/memories/entities">Entities (Thực thể)</option>
+                <option value="viking://user/default/memories/patterns">Patterns (Mẫu giải pháp)</option>
+                <option value="viking://user/default/memories/events">Events (Sự kiện)</option>
+                <option value="viking://user/default/peers">Nhánh Tác nhân (Peers)</option>
+              </select>
+            </div>
+            <div class="c-field">
+              <label for="memory-search-limit">Số kết quả</label>
+              <select id="memory-search-limit" class="c-input">
+                <option value="5">Top 5</option>
+                <option value="10" selected>Top 10</option>
+                <option value="20">Top 20</option>
+              </select>
+            </div>
+            <div class="c-actions">
+              <button id="memory-search-btn" type="submit" class="c-btn c-btn--primary">Tra cứu thử</button>
+            </div>
+          </form>
+          <div id="memory-search-status" class="c-card-meta"></div>
+          <div class="c-table-wrap">
+            <table class="c-table">
+              <thead>
+                <tr>
+                  <th>Điểm</th>
+                  <th>Loại · Tầng</th>
+                  <th>URI</th>
+                  <th>Tóm tắt</th>
+                  <th>Thao tác</th>
+                </tr>
+              </thead>
+              <tbody id="memory-search-tbody"></tbody>
+            </table>
+          </div>
+          <article id="memory-preview-card" class="c-card" hidden>
+            <div class="c-actions">
+              <span id="memory-preview-uri" class="c-mono"></span>
+              <button id="btn-close-memory-preview" type="button" class="c-btn c-btn--sm">Đóng nội dung</button>
+            </div>
+            <pre id="memory-preview-body" class="c-pre"></pre>
+          </article>
         </article>
       </section>
     </main>
