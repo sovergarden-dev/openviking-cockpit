@@ -55,6 +55,52 @@ MILESTONE_KEEP_RE = re.compile(
     r"approved|paused|resumed|switch|swap|ativa[cç][aã]o|redirecionamento|redu[cç][aã]o)"
 )
 
+ENV_PLACEHOLDER_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+
+
+def validate_ov_base_url(raw_url: str) -> str:
+    cleaned = (raw_url or "").strip()
+    parsed = urllib.parse.urlparse(cleaned)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError(f"Invalid OpenViking URL: {raw_url!r}")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("OpenViking URL must not embed credentials, query parameters, or fragments")
+    host = parsed.hostname.lower()
+    allow_remote = os.environ.get("OPENVIKING_ALLOW_REMOTE", "").strip() == "1"
+    if not allow_remote and host not in ("127.0.0.1", "localhost", "::1"):
+        raise ValueError(
+            f"Refusing non-loopback OpenViking host {host!r} without OPENVIKING_ALLOW_REMOTE=1"
+        )
+    return cleaned.rstrip("/")
+
+
+def resolve_ov_api_key(ov_home: Path) -> str:
+    env_key = os.environ.get("OPENVIKING_API_KEY", "").strip()
+    if env_key:
+        return env_key
+    conf_path = ov_home / "ov.conf"
+    if not conf_path.is_file() or is_reparse_point(conf_path):
+        return ""
+    try:
+        doc = json.loads(conf_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(doc, dict):
+        return ""
+    srv = doc.get("server")
+    if not isinstance(srv, dict):
+        return ""
+    raw_key = srv.get("root_api_key")
+    if not isinstance(raw_key, str) or not raw_key.strip():
+        return ""
+    val = raw_key.strip()
+    if val.startswith("dpapi:"):
+        return ""
+    match = ENV_PLACEHOLDER_RE.match(val)
+    if match:
+        return os.environ.get(match.group(1), "").strip()
+    return val
+
 
 def is_reparse_point(path: Path) -> bool:
     try:
@@ -288,6 +334,7 @@ def apply_hygiene_plan(
     if not expected_sha or expected_sha != actual_sha:
         raise ValueError("Plan SHA-256 verification failed; re-run --dry-run to generate a fresh plan")
 
+    clean_ov_url = validate_ov_base_url(ov_url)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     results: dict[str, dict] = {}
 
@@ -338,6 +385,7 @@ def apply_hygiene_plan(
     if "tick-events" in scopes:
         archive_dir = ov_home / "backups" / "tick-events-archive" / stamp
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        api_key = resolve_ov_api_key(ov_home)
         deleted = 0
         errors = 0
         for item in candidates.get("tick-events", []):
@@ -350,14 +398,17 @@ def apply_hygiene_plan(
             shutil.copy2(target, archive_dest)
 
             q_uri = urllib.parse.quote(uri, safe="")
-            hdrs = {}
+            hdrs: dict[str, str] = {}
+            if api_key:
+                hdrs["X-API-Key"] = api_key
+                hdrs["Authorization"] = f"Bearer {api_key}"
             if uri.startswith("viking://user/default/peers/"):
                 rest = uri[len("viking://user/default/peers/") :]
                 peer_id = rest.split("/", 1)[0]
                 if peer_id:
                     hdrs["X-OpenViking-Actor-Peer"] = peer_id
             req = urllib.request.Request(
-                f"{ov_url.rstrip('/')}/api/v1/fs?uri={q_uri}&wait=true",
+                f"{clean_ov_url}/api/v1/fs?uri={q_uri}&wait=true",
                 headers=hdrs,
                 method="DELETE",
             )

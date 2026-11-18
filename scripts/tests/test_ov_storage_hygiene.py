@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from unittest import mock
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS_DIR))
@@ -133,6 +137,69 @@ class TestOvStorageHygiene(unittest.TestCase):
         self.assertTrue((ud / "sessions" / "20261118_interactive").is_dir())
         self.assertTrue((ud / "memories" / "preferences" / "pref_keep.md").is_file())
         self.assertTrue((ud / "memories" / "events" / "OpenViking_migrado_v055.md").is_file())
+
+    def test_apply_rejects_non_loopback_url_and_forwards_resolved_root_api_key(self) -> None:
+        now = time.time()
+        self._seed_tree(now)
+        (self.ov_home / "ov.conf").write_text(
+            '{"server":{"port":19330,"root_api_key":"${TEST_OV_HYGIENE_ROOT_KEY}"}}',
+            encoding="utf-8",
+        )
+        plan = ov_storage_hygiene.scan_hygiene(self.ov_home, min_age_days=3.0, now_ts=now)
+
+        # Non-loopback URL must fail closed before mutating quarantine on disk
+        with self.assertRaises(ValueError):
+            ov_storage_hygiene.apply_hygiene_plan(
+                self.ov_home,
+                plan,
+                scopes=["quarantine", "tick-events"],
+                ov_url="http://example.com:19330",
+            )
+        self.assertTrue((self.ov_home / "backups" / "quarantine" / "batch-old").is_dir())
+
+        captured: list[tuple[str, dict[str, str]]] = []
+
+        class _DeleteHandler(BaseHTTPRequestHandler):
+            def log_message(self, fmt: str, *args) -> None:
+                return
+
+            def do_DELETE(self) -> None:
+                captured.append(
+                    (self.path, {k.lower(): v for k, v in self.headers.items()})
+                )
+                body = b'{"status":"ok"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        srv = HTTPServer(("127.0.0.1", 0), _DeleteHandler)
+        port = srv.server_address[1]
+        worker = threading.Thread(target=srv.serve_forever, daemon=True)
+        worker.start()
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {"TEST_OV_HYGIENE_ROOT_KEY": "SYNTHETIC_HYGIENE_KEY_888"},
+                clear=False,
+            ):
+                receipt = ov_storage_hygiene.apply_hygiene_plan(
+                    self.ov_home,
+                    plan,
+                    scopes=["tick-events"],
+                    ov_url=f"http://127.0.0.1:{port}",
+                )
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+        self.assertEqual(receipt["results"]["tick-events"]["api_deleted"], 1)
+        self.assertEqual(receipt["results"]["tick-events"]["errors"], 0)
+        self.assertEqual(len(captured), 1)
+        req_path, req_headers = captured[0]
+        self.assertIn("wait=true", req_path)
+        self.assertEqual(req_headers.get("x-api-key"), "SYNTHETIC_HYGIENE_KEY_888")
 
 
 if __name__ == "__main__":
