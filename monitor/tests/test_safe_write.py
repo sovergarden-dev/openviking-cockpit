@@ -72,5 +72,13 @@ class TestSafeWrite(unittest.TestCase):
         tmp_files = list(self.root.glob(".*.tmp"))
         self.assertEqual(len(tmp_files), 0)
 
+    def test_apply_restricted_file_acl_on_file_and_dir(self):
+        target_dir = self.root / "acl_dir"
+        target_dir.mkdir()
+        target_file = target_dir / "secret.json"
+        target_file.write_text("{}", encoding="utf-8")
+        self.assertTrue(apply_restricted_file_acl(target_dir))
+        self.assertTrue(apply_restricted_file_acl(target_file))
+
 if __name__ == "__main__":
     unittest.main()

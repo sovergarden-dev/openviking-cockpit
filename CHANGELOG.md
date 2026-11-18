@@ -2,6 +2,11 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- Fixed `apply_restricted_file_acl()` in `monitor/safe_write.py` to validate read-back DACLs by translated Windows `SecurityIdentifier` values instead of raw SDDL alias strings (`LA` vs RID `-500` on `windows-latest` runners) with a 15-second PowerShell cold-start timeout.
+
 ## [1.6.0] - 2026-11-18
 
 ### Added

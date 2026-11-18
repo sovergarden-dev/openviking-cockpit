@@ -35,25 +35,45 @@ $p = ConvertFrom-Json ([Console]::In.ReadToEnd())
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $sddl = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;$sid)"
 $section = [System.Security.AccessControl.AccessControlSections]::Access
-$acl = if ((Get-Item -LiteralPath $p -Force).PSIsContainer) {
+$isDir = (Get-Item -LiteralPath $p -Force).PSIsContainer
+$acl = if ($isDir) {
     New-Object System.Security.AccessControl.DirectorySecurity
 } else {
     New-Object System.Security.AccessControl.FileSecurity
 }
 $acl.SetSecurityDescriptorSddlForm($sddl, $section)
-if ((Get-Item -LiteralPath $p -Force).PSIsContainer) {
+if ($isDir) {
     [System.IO.Directory]::SetAccessControl($p, $acl)
 } else {
     [System.IO.File]::SetAccessControl($p, $acl)
 }
-$actual = (Get-Acl -LiteralPath $p).GetSecurityDescriptorSddlForm($section)
-if (($actual -replace '^D:PAI', 'D:P') -ne $sddl) { throw 'Restricted ACL readback mismatch' }
+$readBack = Get-Acl -LiteralPath $p
+if (-not $readBack.AreAccessRulesProtected) { throw 'ACL inheritance not protected' }
+$allowed = @('S-1-5-18', 'S-1-5-32-544', $sid) | Select-Object -Unique
+$seen = @()
+foreach ($rule in $readBack.Access) {
+    if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) {
+        throw 'Unexpected non-Allow ACE'
+    }
+    $ruleSid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    if ($allowed -notcontains $ruleSid) {
+        throw "Unexpected principal SID: $ruleSid"
+    }
+    $fc = [System.Security.AccessControl.FileSystemRights]::FullControl
+    if (($rule.FileSystemRights -band $fc) -ne $fc) {
+        throw 'Missing FullControl right'
+    }
+    $seen += $ruleSid
+}
+foreach ($reqSid in $allowed) {
+    if ($seen -notcontains $reqSid) { throw "Missing required SID: $reqSid" }
+}
 """
     try:
         res = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
             input=json.dumps(str(Path(target_path).absolute())), capture_output=True,
-            text=True, check=False, timeout=5.0, creationflags=subprocess.CREATE_NO_WINDOW)
+            text=True, check=False, timeout=15.0, creationflags=subprocess.CREATE_NO_WINDOW)
         return res.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
