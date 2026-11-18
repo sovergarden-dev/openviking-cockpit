@@ -54,10 +54,10 @@ G:/AI/openviking-cockpit/
     │   ├── secrets/
     │   │   └── secret_store.rs  # Native 64-bit Windows DPAPI & strict ${ENV} secret resolver
     │   └── services/
-    │       ├── telemetry.rs     # Async server & Ollama polling + incident debouncer
-    │       ├── watchlist.rs     # Bounded 4-key watchlist, reserves_sha256 CAS & probe worker
+    │       ├── telemetry.rs     # Async server, Ollama & lifecycle.jsonl polling + incident debouncer
+    │       ├── watchlist.rs     # Bounded 4-key watchlist, reserves_sha256 CAS, 30-snapshot cap & probe worker
     │       ├── auditor.rs       # Taxonomy V3.1 active 7-probe suite & rescue ladder
-    │       └── auditor_cache.rs # 24h/7d HMAC-free scope cache & output sanitizer
+    │       └── auditor_cache.rs # 24h/7d HMAC-free scope cache, 0ms cached doc loader & sanitizer
     ├── src-tauri/
     │   ├── Cargo.toml           # Tauri V2 desktop binary crate (openviking-cockpit)
     │   ├── tauri.conf.json      # Tauri V2 window, CSP & bundle configuration
@@ -65,9 +65,9 @@ G:/AI/openviking-cockpit/
     │   │   └── default.json     # Explicit WebView2 window & event permissions
     │   └── src/
     │       ├── main.rs          # Single-instance Win32 mutex & window activation
-    │       ├── lib.rs           # System tray, NIF_INFO balloon, clean X-close exit & workers
-    │       ├── state.rs         # CockpitState, monitor_lock & mtime poll cache
-    │       └── commands.rs      # 15 async Tauri IPC commands wrapping spawn_blocking
+    │       ├── lib.rs           # System tray, NIF_INFO balloon, geometry persistence & clean X-close exit
+    │       ├── state.rs         # CockpitState, monitor_lock, geometry draft & mtime poll cache
+    │       └── commands.rs      # 16 async Tauri IPC commands wrapping spawn_blocking + Startup .lnk sync
     └── ui/                      # Vanilla JS + CSS Design Token Frontend
         ├── package.json
         ├── index.html           # Overview (5 cards + 4-key Watchlist), Slots, Reserve, Audit Modal
@@ -75,7 +75,7 @@ G:/AI/openviking-cockpit/
         │   ├── tokens.css       # Single source of visual tokens
         │   └── app.css          # Component pattern & modifier classes
         └── src/
-            └── main.js          # Streaming telemetry, FIFO mutation queue & NFC Reserve filter
+            └── main.js          # Streaming telemetry, [M1..M5] badges, Watch↔Reserve copy & NFC filter
 ```
 
 ---

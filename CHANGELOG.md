@@ -2,6 +2,20 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
+## [Unreleased]
+
+### Added
+- Added cached `[M1]..[M5]` Taxonomy V3.1 safety badges (`cached_audit_level`) across Slot, Watchlist, and Reserve tables in `cockpit_rs`, backed by 0ms cached report opening (`load_cached_audit_document` when `force_refresh` is false), an explicit `Đo lại (7 probe)` live rerun button (`#audit-modal-rerun`), and a `Sao chép JSON` button (`#audit-copy-json`) in the 3-Tab Audit Modal.
+- Added bidirectional `Watch → Reserve` (`copy_watch_into_reserve` / `copy_watch_to_reserve` / `→ Dự trữ`) DPAPI credential cloning alongside `Reserve → Watch`, keeping encrypted secrets strictly inside Rust backend memory.
+- Added `logs/lifecycle.jsonl` watchdog telemetry (`LifecycleSummary` via `(mtime, size)` poll cache) on the `OpenViking Server (19330)` card, added `ops/ov_stale_lock_clean.py` to version control, upgraded `scripts/deploy_to_live.ps1` (`-Target CockpitRs -Apply -SyncOps`) for atomic Rust binary + `ops/` live deployment, and added `.github/workflows/ci.yml` on `windows-latest`.
+- Added top-bar `Khởi động cùng Windows` (`--tray`) Startup `.lnk` synchronization (bypassed under `COCKPIT_OV_HOME` test isolation) and multi-monitor-aware window geometry draft/restore persistence (`MonitorState::geometry`).
+
+### Changed
+- Capped `backups/monitor-state/<sha256>` snapshot retention in `cockpit_rs` (`MAX_MONITOR_STATE_BACKUPS = 30`) and extended `scripts/backup_retention.py` to protect `pre-*` baseline archives while quarantining stale `monitor-state/` directories non-destructively.
+
+### Security
+- Enforced restrictive Windows file DACLs (`apply_restricted_file_acl`) on `backups/monitor-state/<sha256>/monitor.json` snapshots written by `cockpit_rs`.
+
 ## [1.5.1] - 2026-11-18
 
 ### Changed

@@ -101,10 +101,10 @@ openviking-cockpit/
 │   └── TAXONOMY_V2_2.md                # Đặc tả kiến trúc V2.2
 ├── cockpit_rs/                         # Phân hệ Rust / Tauri V2 độc lập (openviking-cockpit.exe)
 │   ├── src/                            # Lõi DPAPI, DACL Safe Write, Config Gate, Telemetry, Watchlist, Auditor V3.1
-│   ├── src-tauri/                      # Tauri V2 Desktop Host, Tray Balloon & 15 lệnh IPC async
-│   └── ui/                             # Giao diện Dark Dashboard (Tổng quan + Theo dõi 4 key, Định tuyến Slot, Dự trữ có lọc nhanh, Công tắc thông báo & Chu kỳ Auto) & 3-Tab Audit Modal
-├── ops/                                # Trình khởi chạy ẩn watchdog & bọc vòng đời tiến trình (ov_lifecycle.py)
-├── scripts/                            # Tiện ích vận hành chạy từ repo (retrofit ACL, retention, sync)
+│   ├── src-tauri/                      # Tauri V2 Desktop Host, Tray Balloon, Khởi động Windows & 16 lệnh IPC async
+│   └── ui/                             # Giao diện Dark Dashboard (Tổng quan + Theo dõi 4 key, Định tuyến Slot, Dự trữ có lọc nhanh, Huy hiệu [M1..M5], Công tắc thông báo & Khởi động) & 3-Tab Audit Modal
+├── ops/                                # Trình khởi chạy ẩn watchdog, dọn khóa stale (ov_stale_lock_clean.py) & bọc vòng đời (ov_lifecycle.py)
+├── scripts/                            # Tiện ích vận hành chạy từ repo (deploy_to_live.ps1, retrofit ACL, retention, sync)
 ├── config/
 │   ├── ov.conf.example                 # Cấu hình OpenViking mẫu (đã lọc secret)
 │   └── monitor.json.example            # Cấu hình trạng thái Monitor mẫu
@@ -146,8 +146,8 @@ Hoặc trên Command Prompt (CMD):
 cargo test --manifest-path cockpit_rs/Cargo.toml
 cargo clippy --manifest-path cockpit_rs/src-tauri/Cargo.toml --all-targets -- -D warnings
 
-# Đóng gói tệp thực thi độc lập openviking-cockpit.exe (~27 MiB, ~10 MiB RAM khi rỗi):
-cargo build --manifest-path cockpit_rs/src-tauri/Cargo.toml --release
+# Đóng gói tệp thực thi độc lập openviking-cockpit.exe (~11.5 MiB, ~8 MiB RAM khi rỗi) và đồng bộ live + ops/:
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy_to_live.ps1 -Apply -SyncOps
 ```
 
 ### Vận hành & Phục hồi (Ops Runbooks):

@@ -98,14 +98,22 @@ pub struct V31Decision {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProbeRow {
     pub id: String,
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub category: String,
+    #[serde(default)]
     pub tier: u8,
+    #[serde(default)]
     pub risk_level: String,
     pub status: String,
+    #[serde(default)]
     pub reason_code: String,
+    #[serde(default)]
     pub summary: String,
+    #[serde(default)]
     pub findings: Vec<String>,
+    #[serde(default)]
     pub evidence: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<f64>,
@@ -115,6 +123,7 @@ pub struct ProbeRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditReportDocument {
+    #[serde(default)]
     pub timestamp: String,
     pub epoch_ts: f64,
     pub target: BTreeMap<String, String>,
@@ -125,7 +134,7 @@ pub struct AuditReportDocument {
     pub saved_report_file: Option<String>,
 }
 
-fn probe_tier(id: &str) -> Option<u8> {
+pub(crate) fn probe_tier(id: &str) -> Option<u8> {
     match id {
         "transport_routing" | "ansi_control_hygiene" | "tool_call_hijack" | "canary_isolation" => {
             Some(0)

@@ -8,22 +8,25 @@ use tauri::{AppHandle, Emitter, State};
 
 use cockpit_rs::config::conf_gate::{
     apply_slot_update_with_live_policy, load_raw_config, resolve_slot_audit_target,
-    summarize_config, ApplySlotOutcome, ConfigSummary, SlotUpdateInput, AUDIT_TTL_FAILOVER_S,
+    summarize_config_with_audits, ApplySlotOutcome, ConfigSummary, SlotUpdateInput,
+    AUDIT_TTL_FAILOVER_S, AUDIT_TTL_PRIMARY_S,
 };
 use cockpit_rs::secrets::secret_store::{is_env_ref, resolve_secret, SecretStatus};
 use cockpit_rs::services::auditor::{run_provider_audit, AuditReportDocument};
-use cockpit_rs::services::auditor_cache::load_cached_audit_verdict;
+use cockpit_rs::services::auditor_cache::{load_cached_audit_document, load_cached_audit_verdict};
 use cockpit_rs::services::telemetry::{
-    evaluate_telemetry_incidents, TelemetrySnapshot, VlmActiveResponse,
+    evaluate_telemetry_incidents, read_lifecycle_summary, LifecycleSummary, TelemetrySnapshot,
+    VlmActiveResponse,
 };
 use cockpit_rs::services::watchlist::{
-    copy_reserve_into_watchlist, load_monitor_state, probe_watch_credential,
-    record_watch_probe_outcome, save_monitor_state_with_live_policy, set_watch_row_auto,
-    summarize_monitor_state, upsert_reserve_record, upsert_watch_record, verify_reserves_sha,
-    AutoDisabledAlert, MonitorStateSummary, UpsertReserveInput, UpsertWatchInput,
+    copy_reserve_into_watchlist, copy_watch_into_reserve, load_monitor_state,
+    probe_watch_credential, record_watch_probe_outcome, save_monitor_state_with_live_policy,
+    set_watch_row_auto, summarize_monitor_state_with_audits, upsert_reserve_record,
+    upsert_watch_record, verify_reserves_sha, AutoDisabledAlert, MonitorState, MonitorStateSummary,
+    UpsertReserveInput, UpsertWatchInput,
 };
 
-use crate::state::CockpitState;
+use crate::state::{CockpitPaths, CockpitState};
 
 fn file_stamp(path: &std::path::Path) -> Option<(SystemTime, u64)> {
     let meta = std::fs::metadata(path).ok()?;
@@ -31,11 +34,116 @@ fn file_stamp(path: &std::path::Path) -> Option<(SystemTime, u64)> {
     Some((modified, meta.len()))
 }
 
-async fn read_cached_poll_meta(state: &Arc<CockpitState>) -> (Option<String>, bool, bool) {
+fn is_isolated_ov_home() -> bool {
+    std::env::var_os("COCKPIT_OV_HOME").is_some()
+}
+
+fn windows_startup_lnk_path() -> Option<std::path::PathBuf> {
+    if is_isolated_ov_home() {
+        return None;
+    }
+    std::env::var_os("APPDATA")
+        .map(std::path::PathBuf::from)
+        .map(|p| {
+            p.join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs")
+                .join("Startup")
+                .join("OpenViking Monitor.lnk")
+        })
+}
+
+fn effective_startup_enabled(st: &MonitorState) -> bool {
+    if let Some(lnk) = windows_startup_lnk_path() {
+        lnk.is_file()
+    } else {
+        st.run_with_windows
+    }
+}
+
+#[cfg(windows)]
+fn sync_windows_startup_shortcut(enabled: bool, ov_home: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    let Some(lnk_path) = windows_startup_lnk_path() else {
+        return Ok(());
+    };
+    if !enabled {
+        if lnk_path.exists() {
+            std::fs::remove_file(&lnk_path)
+                .map_err(|e| format!("Failed to remove Startup shortcut: {}", e))?;
+        }
+        return Ok(());
+    }
+
+    let monitor_dir = ov_home.join("monitor");
+    let live_exe = monitor_dir.join("openviking-cockpit.exe");
+    let target_exe = if live_exe.is_file() {
+        live_exe
+    } else {
+        std::env::current_exe().map_err(|e| format!("Failed to locate executable: {}", e))?
+    };
+    let work_dir = target_exe.parent().unwrap_or(&monitor_dir).to_path_buf();
+    let icon_path = monitor_dir.join("openviking.ico");
+
+    let sys_ps = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .map(|r| {
+            r.join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe")
+        })
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| std::path::PathBuf::from("powershell.exe"));
+
+    let script = "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut($env:COCKPIT_LNK_PATH); $sc.TargetPath = $env:COCKPIT_TARGET_EXE; $sc.Arguments = '--tray'; $sc.WorkingDirectory = $env:COCKPIT_WORK_DIR; if ($env:COCKPIT_ICON_PATH -and (Test-Path -LiteralPath $env:COCKPIT_ICON_PATH)) { $sc.IconLocation = $env:COCKPIT_ICON_PATH }; $sc.Save()";
+
+    let out = std::process::Command::new(sys_ps)
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("COCKPIT_LNK_PATH", &lnk_path)
+        .env("COCKPIT_TARGET_EXE", &target_exe)
+        .env("COCKPIT_WORK_DIR", &work_dir)
+        .env("COCKPIT_ICON_PATH", &icon_path)
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| format!("Failed to invoke PowerShell for Startup shortcut: {}", e))?;
+
+    if !out.status.success() || !lnk_path.is_file() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "Failed to write Startup shortcut: {}",
+            stderr.trim()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn sync_windows_startup_shortcut(_enabled: bool, _ov_home: &std::path::Path) -> Result<(), String> {
+    Ok(())
+}
+
+fn build_monitor_summary(
+    paths: &CockpitPaths,
+    st: &MonitorState,
+    sha: &str,
+) -> MonitorStateSummary {
+    let mut summary =
+        summarize_monitor_state_with_audits(st, sha, None, Some(&paths.security_reports_dir));
+    summary.run_with_windows = effective_startup_enabled(st);
+    summary
+}
+
+async fn read_cached_poll_meta(
+    state: &Arc<CockpitState>,
+) -> (Option<String>, bool, bool, Option<LifecycleSummary>) {
     let state_ref = Arc::clone(state);
     tauri::async_runtime::spawn_blocking(move || {
         let cur_conf_stamp = file_stamp(&state_ref.paths.conf_path);
         let cur_mon_stamp = file_stamp(&state_ref.paths.monitor_json_path);
+        let cur_life_stamp = file_stamp(&state_ref.paths.lifecycle_log_path);
 
         let prev = state_ref
             .poll_meta_cache
@@ -46,11 +154,17 @@ async fn read_cached_poll_meta(state: &Arc<CockpitState>) -> (Option<String>, bo
 
         let conf_dirty = cur_conf_stamp != prev.conf_stamp;
         let mon_dirty = cur_mon_stamp != prev.monitor_stamp;
-        if !conf_dirty && !mon_dirty && (cur_conf_stamp.is_some() || cur_mon_stamp.is_some()) {
+        let life_dirty = cur_life_stamp != prev.lifecycle_stamp;
+        if !conf_dirty
+            && !mon_dirty
+            && !life_dirty
+            && (cur_conf_stamp.is_some() || cur_mon_stamp.is_some() || cur_life_stamp.is_some())
+        {
             return (
                 prev.expected_embedding_model,
                 prev.notify_on_down,
                 prev.notify_on_failover,
+                prev.lifecycle_summary,
             );
         }
 
@@ -85,27 +199,46 @@ async fn read_cached_poll_meta(state: &Arc<CockpitState>) -> (Option<String>, bo
             (prev.notify_on_down, prev.notify_on_failover)
         };
 
+        let lifecycle_summary = if life_dirty {
+            if cur_life_stamp.is_some() {
+                read_lifecycle_summary(&state_ref.paths.lifecycle_log_path)
+            } else {
+                None
+            }
+        } else {
+            prev.lifecycle_summary
+        };
+
         if let Ok(mut guard) = state_ref.poll_meta_cache.lock() {
             guard.conf_stamp = cur_conf_stamp;
             guard.expected_embedding_model = expected_emb.clone();
             guard.monitor_stamp = cur_mon_stamp;
             guard.notify_on_down = notify_on_down;
             guard.notify_on_failover = notify_on_failover;
+            guard.lifecycle_stamp = cur_life_stamp;
+            guard.lifecycle_summary = lifecycle_summary.clone();
         }
 
-        (expected_emb, notify_on_down, notify_on_failover)
+        (
+            expected_emb,
+            notify_on_down,
+            notify_on_failover,
+            lifecycle_summary,
+        )
     })
     .await
-    .unwrap_or((None, true, true))
+    .unwrap_or((None, true, true, None))
 }
 
 pub async fn collect_telemetry_once(state: &Arc<CockpitState>) -> TelemetrySnapshot {
-    let (expected_emb, notify_on_down, notify_on_failover) = read_cached_poll_meta(state).await;
+    let (expected_emb, notify_on_down, notify_on_failover, lifecycle_summary) =
+        read_cached_poll_meta(state).await;
 
-    let snapshot = state
+    let mut snapshot = state
         .telemetry_client
         .fetch_snapshot_with_embedding(expected_emb.as_deref())
         .await;
+    snapshot.lifecycle = lifecycle_summary;
 
     let alerts = state
         .incident_tracker
@@ -187,7 +320,7 @@ pub async fn run_due_watch_auto_pass(app: &AppHandle, state: &Arc<CockpitState>)
                         true,
                     )
                     .ok()?;
-                    let summary = summarize_monitor_state(&st, &new_sha, None);
+                    let summary = build_monitor_summary(&paths, &st, &new_sha);
                     Some((summary, alert))
                 },
             )
@@ -252,7 +385,7 @@ pub async fn switch_active_slot(
 
 #[tauri::command]
 pub async fn read_config(state: State<'_, Arc<CockpitState>>) -> Result<ConfigSummary, String> {
-    let conf_path = state.paths.conf_path.clone();
+    let paths = state.paths.clone();
     let live_vlm = state.latest_snapshot.read().ok().and_then(|g| {
         g.as_ref()
             .and_then(|s| s.vlm.as_ref())
@@ -260,13 +393,14 @@ pub async fn read_config(state: State<'_, Arc<CockpitState>>) -> Result<ConfigSu
     });
 
     tauri::async_runtime::spawn_blocking(move || {
-        let (cfg, _, sha) = load_raw_config(&conf_path).map_err(|e| e.to_string())?;
-        Ok(summarize_config(
-            &conf_path,
+        let (cfg, _, sha) = load_raw_config(&paths.conf_path).map_err(|e| e.to_string())?;
+        Ok(summarize_config_with_audits(
+            &paths.conf_path,
             &cfg,
             &sha,
             live_vlm.as_ref(),
             None,
+            Some(&paths.security_reports_dir),
         ))
     })
     .await
@@ -310,10 +444,10 @@ pub async fn apply_slot(
 pub async fn read_monitor_state(
     state: State<'_, Arc<CockpitState>>,
 ) -> Result<MonitorStateSummary, String> {
-    let mon_path = state.paths.monitor_json_path.clone();
+    let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let (st, sha) = load_monitor_state(&mon_path).map_err(|e| e.to_string())?;
-        Ok(summarize_monitor_state(&st, &sha, None))
+        let (st, sha) = load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
+        Ok(build_monitor_summary(&paths, &st, &sha))
     })
     .await
     .map_err(|e| format!("spawn_blocking panicked: {}", e))?
@@ -340,7 +474,7 @@ pub async fn upsert_watch_entry(
                 true,
             )
             .map_err(|e| e.to_string())?;
-            Ok::<MonitorStateSummary, String>(summarize_monitor_state(&st, &new_sha, None))
+            Ok::<MonitorStateSummary, String>(build_monitor_summary(&paths, &st, &new_sha))
         })
         .await
         .map_err(|e| format!("spawn_blocking panicked: {}", e))??
@@ -353,6 +487,8 @@ pub async fn upsert_watch_entry(
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MonitorPrefsPatch {
+    #[serde(default, alias = "run_with_windows")]
+    pub run_with_windows: Option<bool>,
     #[serde(default, alias = "master_enabled")]
     pub master_enabled: Option<bool>,
     #[serde(default, alias = "watch_interval_minutes")]
@@ -379,6 +515,10 @@ pub async fn set_watch_auto_state(
         tauri::async_runtime::spawn_blocking(move || {
             let (mut st, cur_sha) =
                 load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
+            if let Some(startup) = patch.run_with_windows {
+                sync_windows_startup_shortcut(startup, &paths.ov_home)?;
+                st.run_with_windows = startup;
+            }
             if let Some(m) = patch.master_enabled {
                 st.watch_auto_enabled = m;
             }
@@ -405,7 +545,7 @@ pub async fn set_watch_auto_state(
                 true,
             )
             .map_err(|e| e.to_string())?;
-            Ok::<MonitorStateSummary, String>(summarize_monitor_state(&st, &new_sha, None))
+            Ok::<MonitorStateSummary, String>(build_monitor_summary(&paths, &st, &new_sha))
         })
         .await
         .map_err(|e| format!("spawn_blocking panicked: {}", e))??
@@ -431,7 +571,7 @@ pub async fn delete_watch_entry(
             st.watch_keys.retain(|w| w.id != watch_id);
             if st.watch_keys.len() == before_len {
                 return Ok::<(MonitorStateSummary, bool), String>((
-                    summarize_monitor_state(&st, &cur_sha, None),
+                    build_monitor_summary(&paths, &st, &cur_sha),
                     false,
                 ));
             }
@@ -443,7 +583,7 @@ pub async fn delete_watch_entry(
                 true,
             )
             .map_err(|e| e.to_string())?;
-            Ok((summarize_monitor_state(&st, &new_sha, None), true))
+            Ok((build_monitor_summary(&paths, &st, &new_sha), true))
         })
         .await
         .map_err(|e| format!("spawn_blocking panicked: {}", e))??
@@ -479,7 +619,7 @@ pub async fn upsert_reserve_entry(
                 true,
             )
             .map_err(|e| e.to_string())?;
-            Ok::<MonitorStateSummary, String>(summarize_monitor_state(&st, &new_sha, None))
+            Ok::<MonitorStateSummary, String>(build_monitor_summary(&paths, &st, &new_sha))
         })
         .await
         .map_err(|e| format!("spawn_blocking panicked: {}", e))??
@@ -516,7 +656,7 @@ pub async fn delete_reserve_entry(
                 true,
             )
             .map_err(|e| e.to_string())?;
-            Ok::<MonitorStateSummary, String>(summarize_monitor_state(&st, &new_sha, None))
+            Ok::<MonitorStateSummary, String>(build_monitor_summary(&paths, &st, &new_sha))
         })
         .await
         .map_err(|e| format!("spawn_blocking panicked: {}", e))??
@@ -617,7 +757,38 @@ pub async fn copy_reserve_to_watch(
                 true,
             )
             .map_err(|e| e.to_string())?;
-            Ok::<MonitorStateSummary, String>(summarize_monitor_state(&st, &new_sha, None))
+            Ok::<MonitorStateSummary, String>(build_monitor_summary(&paths, &st, &new_sha))
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking panicked: {}", e))??
+    };
+    state.invalidate_poll_meta_cache();
+    let _ = app.emit("monitor://updated", &summary);
+    Ok(summary)
+}
+
+#[tauri::command]
+pub async fn copy_watch_to_reserve(
+    app: AppHandle,
+    state: State<'_, Arc<CockpitState>>,
+    watch_id: String,
+) -> Result<MonitorStateSummary, String> {
+    let paths = state.paths.clone();
+    let summary = {
+        let _guard = state.monitor_lock.lock().await;
+        tauri::async_runtime::spawn_blocking(move || {
+            let (mut st, cur_sha) =
+                load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
+            copy_watch_into_reserve(&mut st, &watch_id, None).map_err(|e| e.to_string())?;
+            let new_sha = save_monitor_state_with_live_policy(
+                &paths.monitor_json_path,
+                &paths.backups_dir,
+                &st,
+                &cur_sha,
+                true,
+            )
+            .map_err(|e| e.to_string())?;
+            Ok::<MonitorStateSummary, String>(build_monitor_summary(&paths, &st, &new_sha))
         })
         .await
         .map_err(|e| format!("spawn_blocking panicked: {}", e))??
@@ -682,9 +853,9 @@ pub async fn probe_watch_entry(
                         true,
                     )
                     .map_err(|e| e.to_string())?;
-                    return Ok((summarize_monitor_state(&st, &new_sha, None), alert, true));
+                    return Ok((build_monitor_summary(&paths, &st, &new_sha), alert, true));
                 }
-                Ok((summarize_monitor_state(&st, &cur_sha, None), alert, false))
+                Ok((build_monitor_summary(&paths, &st, &cur_sha), alert, false))
             },
         )
         .await
@@ -722,18 +893,25 @@ pub enum AuditTargetRequest {
 pub async fn run_security_audit(
     state: State<'_, Arc<CockpitState>>,
     target: AuditTargetRequest,
+    force_refresh: Option<bool>,
 ) -> Result<AuditReportDocument, String> {
     let paths = state.paths.clone();
-    let (model, api_base, resolved_key) = tauri::async_runtime::spawn_blocking({
+    let bypass_cache = force_refresh.unwrap_or(false);
+    let (model, api_base, resolved_key, cached_doc) = tauri::async_runtime::spawn_blocking({
         let paths = paths.clone();
-        move || -> Result<(String, String, String), String> {
-            match target {
+        move || -> Result<(String, String, String, Option<AuditReportDocument>), String> {
+            let (model, api_base, resolved_key, ttl_s) = match target {
                 AuditTargetRequest::Slot { slot_index } => {
                     let (cfg, _, _) =
                         load_raw_config(&paths.conf_path).map_err(|e| e.to_string())?;
                     let (m, b, sec) = resolve_slot_audit_target(&cfg, slot_index, None)
                         .map_err(|e| e.to_string())?;
-                    Ok((m, b, sec.value))
+                    let ttl = if slot_index == 0 {
+                        AUDIT_TTL_PRIMARY_S
+                    } else {
+                        AUDIT_TTL_FAILOVER_S
+                    };
+                    (m, b, sec.value, ttl)
                 }
                 AuditTargetRequest::Watch { watch_id } => {
                     let (st, _) =
@@ -747,7 +925,12 @@ pub async fn run_security_audit(
                     if sec.status != SecretStatus::SecretReady {
                         return Err(format!("Watch credential not ready: {:?}", sec.status));
                     }
-                    Ok((rec.model.clone(), rec.api_base.clone(), sec.value))
+                    (
+                        rec.model.clone(),
+                        rec.api_base.clone(),
+                        sec.value,
+                        AUDIT_TTL_FAILOVER_S,
+                    )
                 }
                 AuditTargetRequest::Reserve { index } => {
                     let (st, _) =
@@ -760,13 +943,34 @@ pub async fn run_security_audit(
                     if sec.status != SecretStatus::SecretReady {
                         return Err(format!("Reserve credential not ready: {:?}", sec.status));
                     }
-                    Ok((rec.model.clone(), rec.api_base.clone(), sec.value))
+                    (
+                        rec.model.clone(),
+                        rec.api_base.clone(),
+                        sec.value,
+                        AUDIT_TTL_FAILOVER_S,
+                    )
                 }
-            }
+            };
+            let cached = if bypass_cache {
+                None
+            } else {
+                load_cached_audit_document(
+                    &paths.security_reports_dir,
+                    &api_base,
+                    &model,
+                    &resolved_key,
+                    ttl_s,
+                )
+            };
+            Ok((model, api_base, resolved_key, cached))
         }
     })
     .await
     .map_err(|e| format!("spawn_blocking panicked: {}", e))??;
+
+    if let Some(doc) = cached_doc {
+        return Ok(doc);
+    }
 
     Ok(run_provider_audit(
         &paths.security_reports_dir,

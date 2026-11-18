@@ -6,7 +6,15 @@ pub mod state;
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
+use tauri::{
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, RunEvent, Size,
+    WebviewWindow, Window, WindowEvent,
+};
+
+use cockpit_rs::services::watchlist::{
+    format_window_geometry, load_monitor_state, parse_window_geometry,
+    save_monitor_state_with_live_policy,
+};
 
 use crate::commands::{collect_telemetry_once, run_due_watch_auto_pass};
 use crate::state::{CockpitPaths, CockpitState};
@@ -95,9 +103,108 @@ pub fn dispatch_watch_auto_disabled_balloon(alias: &str, model: &str, status_cod
     let _ = dispatch_tray_balloon("THEO DÕI: Key bị tắt Auto", &body);
 }
 
+fn capture_window_geometry_draft(window: &Window) {
+    if window.label() != "main" || window.is_minimized().unwrap_or(false) {
+        return;
+    }
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let Ok(phys_size) = window.inner_size() else {
+        return;
+    };
+    let logical_size: LogicalSize<u32> = phys_size.to_logical(scale);
+    let logical_pos = window
+        .outer_position()
+        .ok()
+        .map(|p| p.to_logical::<i32>(scale));
+    let Some(geo) = format_window_geometry(
+        logical_size.width,
+        logical_size.height,
+        logical_pos.map(|p| p.x),
+        logical_pos.map(|p| p.y),
+    ) else {
+        return;
+    };
+    if let Some(st) = window
+        .app_handle()
+        .try_state::<std::sync::Arc<CockpitState>>()
+    {
+        if let Ok(mut pending) = st.pending_geometry.lock() {
+            *pending = Some(geo);
+        }
+    }
+}
+
+fn restore_saved_window_geometry(win: &WebviewWindow, mon_path: &std::path::Path) {
+    let Ok((mon_state, _)) = load_monitor_state(mon_path) else {
+        return;
+    };
+    let Some(geo) = parse_window_geometry(&mon_state.geometry) else {
+        return;
+    };
+    let _ = win.set_size(Size::Logical(LogicalSize::new(
+        geo.width as f64,
+        geo.height as f64,
+    )));
+    let (Some(lx), Some(ly)) = (geo.x, geo.y) else {
+        return;
+    };
+    let scale = win.scale_factor().unwrap_or(1.0);
+    let px = ((lx as f64) * scale).round() as i32;
+    let py = ((ly as f64) * scale).round() as i32;
+    let visible_on_any_monitor = win
+        .available_monitors()
+        .ok()
+        .filter(|m| !m.is_empty())
+        .map(|monitors| {
+            monitors.iter().any(|m| {
+                let mpos = m.position();
+                let msize = m.size();
+                let mx2 = mpos.x.saturating_add(msize.width as i32);
+                let my2 = mpos.y.saturating_add(msize.height as i32);
+                px + 120 > mpos.x && px < mx2 - 80 && py + 80 > mpos.y && py < my2 - 80
+            })
+        })
+        .unwrap_or(true);
+    if visible_on_any_monitor {
+        let _ = win.set_position(Position::Logical(LogicalPosition::new(
+            lx as f64, ly as f64,
+        )));
+    } else {
+        let _ = win.center();
+    }
+}
+
+fn persist_geometry_on_shutdown(st: &CockpitState) {
+    let maybe_geo = st.pending_geometry.lock().ok().and_then(|mut g| g.take());
+    let Some(new_geo) = maybe_geo else {
+        return;
+    };
+    if !st.paths.monitor_json_path.is_file() {
+        return;
+    }
+    let Ok(_guard) = st.monitor_lock.try_lock() else {
+        return;
+    };
+    let Ok((mut mon_state, cur_sha)) = load_monitor_state(&st.paths.monitor_json_path) else {
+        return;
+    };
+    if mon_state.geometry == new_geo {
+        return;
+    }
+    mon_state.geometry = new_geo;
+    let _ = save_monitor_state_with_live_policy(
+        &st.paths.monitor_json_path,
+        &st.paths.backups_dir,
+        &mon_state,
+        &cur_sha,
+        true,
+    );
+}
+
 fn quit_application(app: &AppHandle) {
     if let Some(st) = app.try_state::<std::sync::Arc<CockpitState>>() {
         let _ = st.shutdown_tx.send(true);
+        persist_geometry_on_shutdown(&st);
     }
     let _ = app.remove_tray_by_id("main-tray");
     app.exit(0);
@@ -167,16 +274,21 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .manage(cockpit_state.clone())
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { .. } = event {
+        .on_window_event(|window, event| match event {
+            WindowEvent::Resized(_) | WindowEvent::Moved(_) => {
+                capture_window_geometry_draft(window);
+            }
+            WindowEvent::CloseRequested { .. } => {
                 quit_application(window.app_handle());
             }
+            _ => {}
         })
         .setup(move |app| {
             setup_tray(app.handle())?;
 
-            if std::env::args().any(|a| a == "--tray") {
-                if let Some(win) = app.get_webview_window("main") {
+            if let Some(win) = app.get_webview_window("main") {
+                restore_saved_window_geometry(&win, &cockpit_state.paths.monitor_json_path);
+                if std::env::args().any(|a| a == "--tray") {
                     let _ = win.hide();
                 }
             }
@@ -257,6 +369,7 @@ pub fn run() {
             commands::delete_reserve_entry,
             commands::promote_reserve_to_slot,
             commands::copy_reserve_to_watch,
+            commands::copy_watch_to_reserve,
             commands::probe_watch_entry,
             commands::run_security_audit,
         ])

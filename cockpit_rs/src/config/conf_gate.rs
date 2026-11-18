@@ -131,6 +131,8 @@ pub struct SlotSummary {
     pub api_base: String,
     pub secret_status: SecretStatus,
     pub env_var_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_audit_level: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -373,11 +375,37 @@ pub fn summarize_slots(
     config: &OpenVikingConfig,
     env_map: Option<&HashMap<String, String>>,
 ) -> Vec<SlotSummary> {
+    summarize_slots_with_audits(config, env_map, None)
+}
+
+pub fn summarize_slots_with_audits(
+    config: &OpenVikingConfig,
+    env_map: Option<&HashMap<String, String>>,
+    reports_dir: Option<&Path>,
+) -> Vec<SlotSummary> {
     extract_effective_slots(config, env_map)
         .into_iter()
         .enumerate()
         .map(|(idx, s)| {
             let resolved = resolve_secret(&s.raw_key, env_map);
+            let ttl = if idx == 0 {
+                AUDIT_TTL_PRIMARY_S
+            } else {
+                AUDIT_TTL_FAILOVER_S
+            };
+            let cached_audit_level = match (reports_dir, resolved.status) {
+                (Some(dir), SecretStatus::SecretReady) => {
+                    crate::services::auditor_cache::load_cached_audit_verdict(
+                        dir,
+                        &s.api_base,
+                        &s.model,
+                        &resolved.value,
+                        ttl,
+                    )
+                    .map(|v| v.verdict_level)
+                }
+                _ => None,
+            };
             SlotSummary {
                 slot_index: idx,
                 id: s.id,
@@ -391,6 +419,7 @@ pub fn summarize_slots(
                 api_base: s.api_base,
                 secret_status: resolved.status,
                 env_var_name: get_env_var_name(&s.raw_key).or(resolved.env_var_name),
+                cached_audit_level,
             }
         })
         .collect()
@@ -470,7 +499,18 @@ pub fn summarize_config(
     live_vlm: Option<&VlmActiveResult>,
     env_map: Option<&HashMap<String, String>>,
 ) -> ConfigSummary {
-    let slots = summarize_slots(config, env_map);
+    summarize_config_with_audits(conf_path, config, sha256, live_vlm, env_map, None)
+}
+
+pub fn summarize_config_with_audits(
+    conf_path: &Path,
+    config: &OpenVikingConfig,
+    sha256: &str,
+    live_vlm: Option<&VlmActiveResult>,
+    env_map: Option<&HashMap<String, String>>,
+    reports_dir: Option<&Path>,
+) -> ConfigSummary {
+    let slots = summarize_slots_with_audits(config, env_map, reports_dir);
     let drift = compute_slot_drift(&slots, live_vlm);
 
     let dense = config

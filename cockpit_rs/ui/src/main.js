@@ -13,6 +13,8 @@ const state = {
   editingWatchId: null,
   editingReserveIndex: null,
   editingReserveSha: null,
+  activeAuditTarget: null,
+  lastAuditJson: "",
 };
 
 let monitorMutationChain = Promise.resolve();
@@ -114,8 +116,17 @@ function renderTelemetry(snap) {
 
   document.getElementById("metric-server").textContent =
     `${formatEndpointStatus(snap.health_status)} · v${snap.health?.version || "?"}`;
-  document.getElementById("meta-server").textContent =
+  const baseServerMeta =
     `Ready: ${snap.ready?.status || formatEndpointStatus(snap.ready_status)} · ${snap.health_latency_ms} ms`;
+  const life = snap.lifecycle;
+  let lifeSuffix = "";
+  if (life && (life.total_starts > 0 || life.total_crashes > 0)) {
+    lifeSuffix =
+      life.total_crashes > 0
+        ? ` · Khởi chạy: ${life.total_starts} · Crash: ${life.total_crashes} (${life.last_exit_hex || "?"})`
+        : ` · Khởi chạy: ${life.total_starts} · Crash: 0`;
+  }
+  document.getElementById("meta-server").textContent = `${baseServerMeta}${lifeSuffix}`;
 
   const expectedEmb = snap.expected_embedding_model || "qwen3-embedding:0.6b";
   const embReady = snap.embedding_model_ready;
@@ -164,6 +175,32 @@ function createCell(text, mono = false) {
   const td = document.createElement("td");
   if (mono) td.className = "c-mono";
   td.textContent = text;
+  return td;
+}
+
+const AUDIT_LEVEL_TITLES = {
+  1: "Mức 1: Nguy hiểm — Cấm dùng (Tier 0 vi phạm)",
+  2: "Mức 2: Chưa xác minh (Thiếu bằng chứng Tier 0)",
+  3: "Mức 3: Dùng tạm (Chỉ dùng chat/tra cứu, cấm VLM)",
+  4: "Mức 4: Dùng được (Tier 0 sạch, JSON hợp lệ)",
+  5: "Mức 5: Dùng tốt (Xuất sắc cho Slot Chính / VLM)",
+};
+
+function createKeyAndAuditCell(keyText, auditLevel) {
+  const td = document.createElement("td");
+  td.className = "c-mono";
+  td.appendChild(document.createTextNode(keyText));
+  const lvl = Number(auditLevel);
+  if (Number.isInteger(lvl) && lvl >= 1 && lvl <= 5) {
+    td.appendChild(document.createTextNode(" "));
+    const badge = document.createElement("span");
+    const variant =
+      lvl >= 4 ? "c-badge--ok" : lvl >= 2 ? "c-badge--warn" : "c-badge--danger";
+    badge.className = `c-badge ${variant}`;
+    badge.textContent = `[M${lvl}]`;
+    badge.title = AUDIT_LEVEL_TITLES[lvl] || `Mức ${lvl}`;
+    td.appendChild(badge);
+  }
   return td;
 }
 
@@ -216,7 +253,7 @@ function renderConfig(cfg) {
     const keyDesc = slot.env_var_name
       ? `${slot.secret_status} (\${${slot.env_var_name}})`
       : slot.secret_status;
-    tr.appendChild(createCell(keyDesc, true));
+    tr.appendChild(createKeyAndAuditCell(keyDesc, slot.cached_audit_level));
 
     const actTd = document.createElement("td");
     actTd.className = "c-actions";
@@ -311,7 +348,7 @@ function renderReserveTable() {
     tr.appendChild(createCell(String(res.index + 1), true));
     tr.appendChild(createCell(res.model, true));
     tr.appendChild(createCell(res.api_base, true));
-    tr.appendChild(createCell(res.secret_status, true));
+    tr.appendChild(createKeyAndAuditCell(res.secret_status, res.cached_audit_level));
     tr.appendChild(createCell(res.note || "—"));
 
     const actTd = document.createElement("td");
@@ -393,6 +430,8 @@ function renderMonitorState(summary) {
     resetReserveDraft();
   }
 
+  const startupEl = document.getElementById("pref-run-startup");
+  if (startupEl) startupEl.checked = Boolean(summary.run_with_windows);
   const notifyDownEl = document.getElementById("pref-notify-down");
   if (notifyDownEl) notifyDownEl.checked = Boolean(summary.notify_on_down);
   const notifyFailoverEl = document.getElementById("pref-notify-failover");
@@ -453,7 +492,7 @@ function renderMonitorState(summary) {
     tr.appendChild(createCell(row.alias || "—"));
     tr.appendChild(createCell(row.model, true));
     tr.appendChild(createCell(row.api_base, true));
-    tr.appendChild(createCell(row.secret_status, true));
+    tr.appendChild(createKeyAndAuditCell(row.secret_status, row.cached_audit_level));
     const autoLabel = row.auto_enabled
       ? summary.watch_auto_enabled
         ? "Bật"
@@ -478,6 +517,12 @@ function renderMonitorState(summary) {
     autoBtn.className = "c-btn c-btn--sm";
     autoBtn.textContent = row.auto_enabled ? "Tắt Auto" : "Bật Auto";
     autoBtn.addEventListener("click", () => toggleWatchRowAuto(row.id, !row.auto_enabled, autoBtn));
+
+    const toReserveBtn = document.createElement("button");
+    toReserveBtn.type = "button";
+    toReserveBtn.className = "c-btn c-btn--sm";
+    toReserveBtn.textContent = "→ Dự trữ";
+    toReserveBtn.addEventListener("click", () => copyWatchToReserve(row.id, toReserveBtn));
 
     const editWatchBtn = document.createElement("button");
     editWatchBtn.type = "button";
@@ -513,6 +558,7 @@ function renderMonitorState(summary) {
 
     actTd.appendChild(probeBtn);
     actTd.appendChild(autoBtn);
+    actTd.appendChild(toReserveBtn);
     actTd.appendChild(editWatchBtn);
     actTd.appendChild(auditWatchBtn);
     actTd.appendChild(delBtn);
@@ -672,6 +718,24 @@ function copyReserveToWatch(reserveIndex, btn) {
   );
 }
 
+function copyWatchToReserve(watchId, btn) {
+  const statusEl = document.getElementById("watch-status");
+  return enqueueMonitorMutation(
+    btn,
+    statusEl,
+    "Đang sao chép sang Dự trữ (bảo toàn mã hóa DPAPI)…",
+    async () => {
+      try {
+        const summary = await tauriApi.core.invoke("copy_watch_to_reserve", { watchId });
+        renderMonitorState(summary);
+        statusEl.textContent = "Đã sao chép key sang tab Dự trữ (bảo toàn mã hóa DPAPI).";
+      } catch (err) {
+        statusEl.textContent = `Lỗi sao chép sang Dự trữ: ${err}`;
+      }
+    }
+  );
+}
+
 function setupTabs() {
   const tabs = document.querySelectorAll(".c-tab[data-tab]");
   tabs.forEach((btn) => {
@@ -698,38 +762,70 @@ function setupTabs() {
   document.getElementById("audit-modal-close").addEventListener("click", () => {
     document.getElementById("audit-modal-backdrop").hidden = true;
   });
+
+  document.getElementById("audit-modal-rerun").addEventListener("click", () => {
+    if (state.activeAuditTarget) {
+      launchSecurityAudit(state.activeAuditTarget, true);
+    }
+  });
+
+  document.getElementById("audit-copy-json").addEventListener("click", async () => {
+    const copyStatus = document.getElementById("audit-copy-status");
+    if (!state.lastAuditJson) return;
+    try {
+      await navigator.clipboard.writeText(state.lastAuditJson);
+      copyStatus.textContent = "Đã sao chép JSON vào bộ nhớ tạm.";
+    } catch (err) {
+      copyStatus.textContent = `Không thể sao chép: ${err}`;
+    }
+  });
 }
 
-async function launchSecurityAudit(target) {
+async function launchSecurityAudit(target, forceRefresh = false) {
+  state.activeAuditTarget = target;
+  state.lastAuditJson = "";
   const backdrop = document.getElementById("audit-modal-backdrop");
   const badge = document.getElementById("audit-verdict-badge");
+  const rerunBtn = document.getElementById("audit-modal-rerun");
+  const copyStatus = document.getElementById("audit-copy-status");
   const sumEl = document.getElementById("audit-summary-content");
   const inspBody = document.getElementById("audit-inspector-tbody");
   const rawEl = document.getElementById("audit-raw-json");
 
   backdrop.hidden = false;
+  if (rerunBtn) rerunBtn.disabled = true;
+  if (copyStatus) copyStatus.textContent = "";
   badge.className = "c-badge c-badge--warn";
-  badge.textContent = "Đang chạy 7 probe V3.1…";
-  sumEl.textContent = "Đang thực thi bộ kiểm định ranh giới an toàn và tương thích VLM…";
+  badge.textContent = forceRefresh ? "Đang đo lại 7 probe V3.1…" : "Đang mở báo cáo V3.1…";
+  sumEl.textContent = forceRefresh
+    ? "Đang thực thi trực tiếp bộ kiểm định ranh giới an toàn trên mạng…"
+    : "Đang kiểm tra báo cáo lưu sẵn hoặc chạy 7 probe V3.1…";
   inspBody.replaceChildren();
   rawEl.textContent = "";
 
   try {
-    const doc = await tauriApi.core.invoke("run_security_audit", { target });
+    const doc = await tauriApi.core.invoke("run_security_audit", {
+      target,
+      forceRefresh,
+    });
     const v = doc.verdict || {};
+    const fromCache = Boolean(v.from_cache);
     const lvl = Number(v.verdict_level || 2);
     badge.className = `c-badge ${
       lvl >= 4 ? "c-badge--ok" : lvl === 3 ? "c-badge--warn" : "c-badge--danger"
     }`;
-    badge.textContent = `Mức ${lvl} · ${v.level_label || "?"}`;
+    badge.textContent = `Mức ${lvl} · ${v.level_label || "?"}${fromCache ? " (Cache)" : ""}`;
 
     sumEl.replaceChildren();
+    const cacheNote = fromCache
+      ? `Đọc tức thì từ cache (${Math.max(0, Math.round((v.report_age_s || 0) / 60))} phút trước) · Bấm "Đo lại (7 probe)" để đo mạng mới`
+      : `Đo trực tiếp trên mạng (${v.total_duration_s ?? "?"}s)`;
     const lines = [
       `Mục tiêu: ${doc.target?.model || "?"} @ ${doc.target?.api_base || "?"}`,
       `✔ Dùng cho: ${v.use_for || "—"}`,
       `⚠ Cảnh báo / Tránh: ${v.avoid_for || "—"}`,
       `➤ Khuyến nghị: ${v.next_step || "—"} (${v.v31_decision_reason || ""})`,
-      `Thời gian đo: ${v.total_duration_s ?? "?"}s · Tệp lưu: ${doc.saved_report_file || "chưa lưu"}`,
+      `Nguồn báo cáo: ${cacheNote} · Tệp lưu: ${doc.saved_report_file || "chưa lưu"}`,
     ];
     for (const ln of lines) {
       const div = document.createElement("div");
@@ -742,7 +838,7 @@ async function launchSecurityAudit(target) {
       tr.appendChild(createCell(`T${row.tier}`, true));
       tr.appendChild(createCell(row.name));
       tr.appendChild(createCell(row.status, true));
-      tr.appendChild(createCell(row.reason_code, true));
+      tr.appendChild(createCell(row.reason_code || "—", true));
       tr.appendChild(
         createCell(row.latency_ms != null ? `${Math.round(row.latency_ms)} ms` : "—", true)
       );
@@ -750,11 +846,17 @@ async function launchSecurityAudit(target) {
       inspBody.appendChild(tr);
     }
 
-    rawEl.textContent = JSON.stringify(doc, null, 2);
+    state.lastAuditJson = JSON.stringify(doc, null, 2);
+    rawEl.textContent = state.lastAuditJson;
+    if (!fromCache) {
+      await refreshAll();
+    }
   } catch (err) {
     badge.className = "c-badge c-badge--danger";
     badge.textContent = "Lỗi kiểm định";
     sumEl.textContent = `Không thể chạy kiểm định: ${err}`;
+  } finally {
+    if (rerunBtn) rerunBtn.disabled = false;
   }
 }
 
@@ -769,6 +871,18 @@ function setupForms() {
   });
 
   const topbarStatus = document.getElementById("topbar-status");
+
+  document.getElementById("pref-run-startup").addEventListener("change", (ev) => {
+    const toggle = ev.target;
+    const desired = toggle.checked;
+    updateMonitorPrefs(
+      toggle,
+      topbarStatus,
+      "Đang lưu khởi động…",
+      desired ? "Đã bật khởi động cùng Windows (--tray)." : "Đã tắt khởi động cùng Windows.",
+      { runWithWindows: desired }
+    );
+  });
 
   document.getElementById("pref-notify-down").addEventListener("change", (ev) => {
     const toggle = ev.target;

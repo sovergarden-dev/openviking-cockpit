@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
+use std::fs;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroize;
 
@@ -164,6 +167,81 @@ pub enum EndpointStatus {
     Unreachable,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LifecycleSummary {
+    pub total_starts: usize,
+    pub total_crashes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_exit_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_uptime_s: Option<f64>,
+}
+
+/// Reads the trailing 256 KiB of `logs/lifecycle.jsonl` (`ov_lifecycle.py`) to summarize starts and non-zero crashes.
+pub fn read_lifecycle_summary(path: &Path) -> Option<LifecycleSummary> {
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let max_tail: u64 = 262_144;
+    if len > max_tail {
+        let _ = file.seek(SeekFrom::Start(len - max_tail));
+    }
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines = text.lines();
+    if len > max_tail {
+        let _ = lines.next();
+    }
+
+    let mut total_starts = 0usize;
+    let mut total_crashes = 0usize;
+    let mut last_exit_hex = None;
+    let mut last_uptime_s = None;
+    let mut parsed_any = false;
+
+    for ln in lines {
+        let trimmed = ln.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        let Some(ev) = val.get("event").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        parsed_any = true;
+        match ev {
+            "start" => total_starts += 1,
+            "exit" => {
+                let code = val.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
+                if code != 0 {
+                    total_crashes += 1;
+                }
+                last_exit_hex = val
+                    .get("exit_code_hex")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                last_uptime_s = val.get("uptime_s").and_then(|v| v.as_f64());
+            }
+            "spawn-failed" | "resolve-failed" => {
+                total_crashes += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if !parsed_any {
+        return None;
+    }
+    Some(LifecycleSummary {
+        total_starts,
+        total_crashes,
+        last_exit_hex,
+        last_uptime_s,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetrySnapshot {
     pub timestamp_ms: u64,
@@ -197,6 +275,8 @@ pub struct TelemetrySnapshot {
     pub expected_embedding_model: Option<String>,
     #[serde(default)]
     pub embedding_model_ready: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<LifecycleSummary>,
 }
 
 fn default_ollama_status() -> EndpointStatus {
@@ -469,6 +549,7 @@ impl TelemetryClient {
             ollama_latency_ms: ol.2,
             expected_embedding_model: expected.clone(),
             embedding_model_ready: None,
+            lifecycle: None,
         };
 
         if let Some(ref model_name) = expected {
@@ -654,6 +735,7 @@ mod tests {
             ollama_latency_ms: 3,
             expected_embedding_model: Some("qwen3-embedding:0.6b".to_string()),
             embedding_model_ready: Some(true),
+            lifecycle: None,
         };
 
         assert!(snapshot.is_overall_healthy());
@@ -888,6 +970,7 @@ mod tests {
             ollama_latency_ms: 2,
             expected_embedding_model: Some("qwen3-embedding:0.6b".to_string()),
             embedding_model_ready: Some(false),
+            lifecycle: None,
         };
 
         // 1. Missing embedding fires once, then suppresses duplicates until restored
@@ -923,5 +1006,26 @@ mod tests {
         let f1 = evaluate_telemetry_incidents(&mut tracker, &snap, true, true);
         assert_eq!(f1.len(), 1);
         assert!(evaluate_telemetry_incidents(&mut tracker, &snap, true, true).is_empty());
+    }
+
+    #[test]
+    fn test_read_lifecycle_summary_counts_starts_and_crashes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_path = dir.path().join("lifecycle.jsonl");
+        let lines = concat!(
+            r#"{"event":"start","run_id":"r1","child_pid":100}"#,
+            "\n",
+            r#"{"event":"exit","run_id":"r1","exit_code":3,"exit_code_hex":"0x00000003","uptime_s":12.5}"#,
+            "\n",
+            r#"{"event":"start","run_id":"r2","child_pid":101}"#,
+            "\n"
+        );
+        std::fs::write(&log_path, lines).expect("write lifecycle.jsonl");
+
+        let sum = read_lifecycle_summary(&log_path).expect("parse lifecycle summary");
+        assert_eq!(sum.total_starts, 2);
+        assert_eq!(sum.total_crashes, 1);
+        assert_eq!(sum.last_exit_hex.as_deref(), Some("0x00000003"));
+        assert_eq!(sum.last_uptime_s, Some(12.5));
     }
 }

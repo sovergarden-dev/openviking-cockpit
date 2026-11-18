@@ -11,16 +11,133 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::config::conf_gate::AUDIT_TTL_FAILOVER_S;
 use crate::config::safe_write::{
-    safe_atomic_write_text_with_live_policy, sha256_hex, SafeWriteError,
+    apply_restricted_file_acl, safe_atomic_write_text_with_live_policy, sha256_hex, SafeWriteError,
 };
 use crate::secrets::secret_store::{dpapi_protect, resolve_secret, SecretStatus};
+use crate::services::auditor_cache::load_cached_audit_verdict;
 
 pub const MAX_WATCHES: usize = 4;
 pub const LEGACY_MAX_WATCHES: usize = 7;
+pub const MAX_MONITOR_STATE_BACKUPS: usize = 30;
 pub const WATCH_PROBE_TIMEOUT_MS: u64 = 20_000;
 pub const WATCH_MAX_TOKENS: u32 = 64;
 pub const BACKOFF_CAP_SECS: f64 = 3_600.0;
+pub const MIN_WINDOW_WIDTH: u32 = 880;
+pub const MIN_WINDOW_HEIGHT: u32 = 560;
+pub const MAX_WINDOW_WIDTH: u32 = 3840;
+pub const MAX_WINDOW_HEIGHT: u32 = 2160;
+const WINDOW_POS_BOUND: i32 = 16_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowGeometry {
+    pub width: u32,
+    pub height: u32,
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+}
+
+fn parse_signed_offset(input: &str) -> Option<(i32, &str)> {
+    let s = input.strip_prefix('+').unwrap_or(input);
+    let (neg, digits_src) = if let Some(rest) = s.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = s.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, s)
+    };
+    let digit_len = digits_src
+        .bytes()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    if digit_len == 0 {
+        return None;
+    }
+    let mag: i32 = digits_src[..digit_len].parse().ok()?;
+    let val = if neg { -mag } else { mag };
+    Some((val, &digits_src[digit_len..]))
+}
+
+pub fn parse_window_geometry(raw: &str) -> Option<WindowGeometry> {
+    let trimmed = raw.trim();
+    let x_idx = trimmed.find(['x', 'X'])?;
+    let raw_w: u32 = trimmed[..x_idx].parse().ok()?;
+    let after_x = &trimmed[x_idx + 1..];
+    let h_len = after_x.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if h_len == 0 {
+        return None;
+    }
+    let raw_h: u32 = after_x[..h_len].parse().ok()?;
+    if raw_w < 200 || raw_h < 200 {
+        return None;
+    }
+    let width = raw_w.clamp(MIN_WINDOW_WIDTH, MAX_WINDOW_WIDTH);
+    let height = raw_h.clamp(MIN_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT);
+    let rest = &after_x[h_len..];
+    if rest.is_empty() {
+        return Some(WindowGeometry {
+            width,
+            height,
+            x: None,
+            y: None,
+        });
+    }
+    if !rest.starts_with(['+', '-']) {
+        return None;
+    }
+    let (px, rem) = parse_signed_offset(rest)?;
+    if !rem.starts_with(['+', '-']) {
+        return None;
+    }
+    let (py, tail) = parse_signed_offset(rem)?;
+    if !tail.is_empty() {
+        return None;
+    }
+    if px.abs() >= WINDOW_POS_BOUND || py.abs() >= WINDOW_POS_BOUND {
+        return Some(WindowGeometry {
+            width,
+            height,
+            x: None,
+            y: None,
+        });
+    }
+    Some(WindowGeometry {
+        width,
+        height,
+        x: Some(px),
+        y: Some(py),
+    })
+}
+
+pub fn format_window_geometry(
+    width: u32,
+    height: u32,
+    x: Option<i32>,
+    y: Option<i32>,
+) -> Option<String> {
+    if width < 200 || height < 200 {
+        return None;
+    }
+    let w = width.clamp(MIN_WINDOW_WIDTH, MAX_WINDOW_WIDTH);
+    let h = height.clamp(MIN_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT);
+    match (x, y) {
+        (Some(px), Some(py)) => {
+            if px.abs() >= WINDOW_POS_BOUND || py.abs() >= WINDOW_POS_BOUND {
+                return None;
+            }
+            let fmt_coord = |v: i32| {
+                if v >= 0 {
+                    format!("+{}", v)
+                } else {
+                    format!("+-{}", -(v as i64))
+                }
+            };
+            Some(format!("{}x{}{}{}", w, h, fmt_coord(px), fmt_coord(py)))
+        }
+        _ => Some(format!("{}x{}", w, h)),
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum WatchError {
@@ -181,6 +298,8 @@ pub struct WatchRowView {
     pub model: String,
     pub api_base: String,
     pub secret_status: SecretStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_audit_level: Option<u8>,
     pub auto_enabled: bool,
     pub auto_disabled_reason: String,
     pub rev: u64,
@@ -196,12 +315,16 @@ pub struct ReserveRowView {
     pub api_base: String,
     pub note: String,
     pub secret_status: SecretStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_audit_level: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MonitorStateSummary {
     pub sha256: String,
     pub reserves_sha256: String,
+    #[serde(default)]
+    pub run_with_windows: bool,
     pub notify_on_down: bool,
     pub notify_on_failover: bool,
     pub watch_auto_enabled: bool,
@@ -401,12 +524,15 @@ pub fn save_monitor_state_with_live_policy(
                 actual: cur,
             });
         }
-        let state_bak_dir = backups_dir.join("monitor-state").join(&cur);
+        let state_row_root = backups_dir.join("monitor-state");
+        let state_bak_dir = state_row_root.join(&cur);
         if !state_bak_dir.exists() {
             fs::create_dir_all(&state_bak_dir)?;
             let bak_file = state_bak_dir.join("monitor.json");
             fs::copy(path, &bak_file)?;
+            apply_restricted_file_acl(&bak_file)?;
         }
+        prune_monitor_state_backups(&state_row_root, MAX_MONITOR_STATE_BACKUPS);
         Some(expected_sha)
     } else if expected_sha != "<absent>" {
         return Err(WatchError::RevisionConflict {
@@ -427,22 +553,70 @@ pub fn save_monitor_state_with_live_policy(
     Ok(new_sha)
 }
 
+/// Keeps at most `keep` newest `<64-hex-sha>` subdirectories under `backups/monitor-state/`.
+pub fn prune_monitor_state_backups(state_root: &Path, keep: usize) {
+    let Ok(rd) = fs::read_dir(state_root) else {
+        return;
+    };
+    let mut dirs: Vec<(SystemTime, std::path::PathBuf)> = rd
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let ft = e.file_type().ok()?;
+            if !ft.is_dir() || ft.is_symlink() {
+                return None;
+            }
+            let name = e.file_name();
+            let s = name.to_str()?;
+            if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            let mtime = e.metadata().ok()?.modified().ok()?;
+            Some((mtime, e.path()))
+        })
+        .collect();
+    dirs.sort_by_key(|b| std::cmp::Reverse(b.0));
+    for (_, old_path) in dirs.into_iter().skip(keep) {
+        let _ = fs::remove_dir_all(old_path);
+    }
+}
+
 pub fn summarize_monitor_state(
     state: &MonitorState,
     sha256: &str,
     env_map: Option<&HashMap<String, String>>,
+) -> MonitorStateSummary {
+    summarize_monitor_state_with_audits(state, sha256, env_map, None)
+}
+
+pub fn summarize_monitor_state_with_audits(
+    state: &MonitorState,
+    sha256: &str,
+    env_map: Option<&HashMap<String, String>>,
+    reports_dir: Option<&Path>,
 ) -> MonitorStateSummary {
     let watches = state
         .watch_keys
         .iter()
         .map(|w| {
             let resolved = resolve_secret(&w.api_key, env_map);
+            let cached_audit_level = match (reports_dir, resolved.status) {
+                (Some(dir), SecretStatus::SecretReady) => load_cached_audit_verdict(
+                    dir,
+                    &w.api_base,
+                    &w.model,
+                    &resolved.value,
+                    AUDIT_TTL_FAILOVER_S,
+                )
+                .map(|v| v.verdict_level),
+                _ => None,
+            };
             WatchRowView {
                 id: w.id.clone(),
                 alias: w.alias.clone(),
                 model: w.model.clone(),
                 api_base: w.api_base.clone(),
                 secret_status: resolved.status,
+                cached_audit_level,
                 auto_enabled: w.auto_enabled,
                 auto_disabled_reason: w.auto_disabled_reason.clone(),
                 rev: w.rev,
@@ -459,12 +633,24 @@ pub fn summarize_monitor_state(
         .enumerate()
         .map(|(idx, r)| {
             let resolved = resolve_secret(&r.api_key, env_map);
+            let cached_audit_level = match (reports_dir, resolved.status) {
+                (Some(dir), SecretStatus::SecretReady) => load_cached_audit_verdict(
+                    dir,
+                    &r.api_base,
+                    &r.model,
+                    &resolved.value,
+                    AUDIT_TTL_FAILOVER_S,
+                )
+                .map(|v| v.verdict_level),
+                _ => None,
+            };
             ReserveRowView {
                 index: idx,
                 model: r.model.clone(),
                 api_base: r.api_base.clone(),
                 note: r.note.clone(),
                 secret_status: resolved.status,
+                cached_audit_level,
             }
         })
         .collect();
@@ -472,6 +658,7 @@ pub fn summarize_monitor_state(
     MonitorStateSummary {
         sha256: sha256.to_string(),
         reserves_sha256: compute_reserves_sha256(&state.spare_models),
+        run_with_windows: state.run_with_windows,
         notify_on_down: state.notify_on_down,
         notify_on_failover: state.notify_on_failover,
         watch_auto_enabled: state.watch_auto_enabled,
@@ -770,6 +957,67 @@ pub fn copy_reserve_into_watchlist(
     });
 
     Ok(new_id)
+}
+
+/// Clones an existing Watchlist credential into `spare_models` in Rust memory without exposing raw DPAPI keys over IPC.
+pub fn copy_watch_into_reserve(
+    state: &mut MonitorState,
+    watch_id: &str,
+    env_map: Option<&HashMap<String, String>>,
+) -> Result<usize, WatchError> {
+    let watch = state
+        .watch_keys
+        .iter()
+        .find(|w| w.id == watch_id)
+        .ok_or_else(|| WatchError::Validation(format!("Watch '{}' not found", watch_id)))?
+        .clone();
+
+    let api_base = validate_watch_base_url(&watch.api_base)?;
+    let resolved = resolve_secret(&watch.api_key, env_map);
+    if resolved.status != SecretStatus::SecretReady {
+        return Err(WatchError::Validation(format!(
+            "Watch credential is not ready ({:?})",
+            resolved.status
+        )));
+    }
+
+    let target_model = watch.model.trim();
+    if state.spare_models.iter().any(|r| {
+        let same_model = r.model.trim() == target_model;
+        let same_base = validate_watch_base_url(&r.api_base)
+            .map(|b| b == api_base)
+            .unwrap_or_else(|_| r.api_base.trim().trim_end_matches('/') == api_base);
+        if !same_model || !same_base {
+            return false;
+        }
+        if r.api_key.trim() == watch.api_key.trim() {
+            return true;
+        }
+        let r_resolved = resolve_secret(&r.api_key, env_map);
+        r_resolved.status == SecretStatus::SecretReady && r_resolved.value == resolved.value
+    }) {
+        return Err(WatchError::Validation(format!(
+            "Watch credential already exists in Reserve ('{}')",
+            target_model
+        )));
+    }
+
+    let note: String = watch
+        .alias
+        .trim()
+        .chars()
+        .filter(|&c| (c as u32) >= 32 && (c as u32) != 127)
+        .take(120)
+        .collect();
+
+    state.spare_models.push(SpareModelRecord {
+        model: watch.model,
+        api_base,
+        api_key: watch.api_key,
+        note,
+        extra: BTreeMap::new(),
+    });
+    Ok(state.spare_models.len() - 1)
 }
 
 pub fn set_watch_row_auto(
@@ -1206,5 +1454,82 @@ mod tests {
         let cross_salt_dup = copy_reserve_into_watchlist(&mut state, 0, None, None)
             .expect_err("cross-salt identical secret must also be rejected");
         assert!(cross_salt_dup.to_string().contains("Manual same key"));
+
+        let res_idx = copy_watch_into_reserve(&mut state, &wid, None)
+            .expect("copy distinct watch credential into reserve");
+        assert_eq!(state.spare_models[res_idx].model, "m1");
+        assert_eq!(state.spare_models[res_idx].note, "row1");
+        assert!(copy_watch_into_reserve(&mut state, &wid, None).is_err());
+
+        // Verify monitor-state retention pruning caps snapshots at MAX_MONITOR_STATE_BACKUPS
+        let tmp = tempdir().expect("tempdir");
+        let mon_file = tmp.path().join("monitor.json");
+        let bak_dir = tmp.path().join("backups");
+        let mut sha = "<absent>".to_string();
+        for n in 1..=35u32 {
+            state.watch_interval_minutes = n;
+            sha = save_monitor_state(&mon_file, &bak_dir, &state, &sha).expect("save revision");
+        }
+        let kept_count = fs::read_dir(bak_dir.join("monitor-state"))
+            .expect("read monitor-state")
+            .count();
+        assert_eq!(kept_count, MAX_MONITOR_STATE_BACKUPS);
+    }
+
+    #[test]
+    fn test_window_geometry_parse_and_format() {
+        assert_eq!(
+            parse_window_geometry("1020x640"),
+            Some(WindowGeometry {
+                width: 1020,
+                height: 640,
+                x: None,
+                y: None,
+            })
+        );
+        assert_eq!(
+            parse_window_geometry("1280x860+140+90"),
+            Some(WindowGeometry {
+                width: 1280,
+                height: 860,
+                x: Some(140),
+                y: Some(90),
+            })
+        );
+        assert_eq!(
+            parse_window_geometry("1100x720+-480+60"),
+            Some(WindowGeometry {
+                width: 1100,
+                height: 720,
+                x: Some(-480),
+                y: Some(60),
+            })
+        );
+        assert_eq!(
+            parse_window_geometry("640x400+20+30"),
+            Some(WindowGeometry {
+                width: MIN_WINDOW_WIDTH,
+                height: MIN_WINDOW_HEIGHT,
+                x: Some(20),
+                y: Some(30),
+            })
+        );
+        assert_eq!(
+            parse_window_geometry("1200x840+-32000+-32000"),
+            Some(WindowGeometry {
+                width: 1200,
+                height: 840,
+                x: None,
+                y: None,
+            })
+        );
+        assert_eq!(
+            format_window_geometry(1200, 840, Some(-32000), Some(-32000)),
+            None
+        );
+        assert_eq!(
+            format_window_geometry(1200, 840, Some(-320), Some(48)).as_deref(),
+            Some("1200x840+-320+48")
+        );
     }
 }

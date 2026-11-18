@@ -11,8 +11,9 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::conf_gate::CachedAuditVerdict;
+use crate::config::conf_gate::{display_clean_path, CachedAuditVerdict};
 use crate::config::safe_write::sha256_hex;
+use crate::services::auditor::{probe_tier, AuditReportDocument};
 
 pub const CLASSIFIER_VERSION: &str = "3.1.0";
 pub const PROBE_VERSION: &str = "synthetic-probes-2";
@@ -219,6 +220,78 @@ pub fn load_cached_audit_verdict(
     })
 }
 
+/// Loads and validates a full cached `AuditReportDocument` (compatible with both Python and Rust reports)
+/// so the 3-tab Audit Modal can open instantly without spending probe tokens when a report is still fresh.
+pub fn load_cached_audit_document(
+    reports_dir: &Path,
+    api_base: &str,
+    model: &str,
+    api_key: &str,
+    max_age_s: f64,
+) -> Option<AuditReportDocument> {
+    let (scope_id, expected_scope) = compute_audit_scope_id(api_base, model, api_key)?;
+    let file_path = reports_dir.join(format!("audit_{}.json", scope_id));
+    let mut file = fs::File::open(&file_path).ok()?;
+    let mut buf = Vec::new();
+    file.by_ref()
+        .take((REPORT_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut buf)
+        .ok()?;
+    if buf.len() > REPORT_MAX_BYTES {
+        return None;
+    }
+
+    let mut doc: AuditReportDocument = serde_json::from_slice(&buf).ok()?;
+    if doc.cache_scope.as_ref()? != &expected_scope {
+        return None;
+    }
+    if doc.target.get("api_base")?.as_str() != expected_scope.get("endpoint")?.as_str()
+        || doc.target.get("model")?.as_str() != model
+    {
+        return None;
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .ok()?;
+    if !doc.epoch_ts.is_finite() || doc.epoch_ts <= 0.0 || doc.epoch_ts > now + 5.0 {
+        return None;
+    }
+    let age_s = (now - doc.epoch_ts).max(0.0);
+    if age_s > max_age_s {
+        return None;
+    }
+
+    for v in doc.verdict.values_mut() {
+        if let Value::String(s) = v {
+            *s = presentation_sanitize_text(s, Some(api_key));
+        }
+    }
+    for row in &mut doc.results {
+        if row.name.is_empty() {
+            row.name = row.id.clone();
+        }
+        if let Some(t) = probe_tier(&row.id) {
+            row.tier = t;
+        }
+        row.summary = presentation_sanitize_text(&row.summary, Some(api_key));
+        row.evidence = presentation_sanitize_text(&row.evidence, Some(api_key));
+        for f in &mut row.findings {
+            *f = presentation_sanitize_text(f, Some(api_key));
+        }
+    }
+
+    doc.verdict
+        .insert("from_cache".to_string(), Value::Bool(true));
+    doc.verdict.insert(
+        "report_age_s".to_string(),
+        serde_json::json!(age_s.round() as u64),
+    );
+    doc.saved_report_file = Some(display_clean_path(&file_path));
+    Some(doc)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +350,16 @@ mod tests {
         assert_eq!(loaded.verdict_level, 5);
         assert!(loaded.memory_permitted);
         assert!(!loaded.safety_stop);
+
+        // Full document loader must also accept Python-style ProbeRow (without reason_code)
+        let full_doc = load_cached_audit_document(dir.path(), base, model, key, 86_400.0)
+            .expect("load full cached document");
+        assert_eq!(
+            full_doc.verdict.get("from_cache").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(full_doc.results.len(), 1);
+        assert_eq!(full_doc.results[0].id, "transport_routing");
 
         // Wrong API key must miss cache
         assert!(

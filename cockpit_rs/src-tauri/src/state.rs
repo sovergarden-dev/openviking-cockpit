@@ -6,7 +6,9 @@ use std::time::SystemTime;
 use tauri::ipc::Channel;
 use tokio::sync::watch;
 
-use cockpit_rs::services::telemetry::{IncidentTracker, TelemetryClient, TelemetrySnapshot};
+use cockpit_rs::services::telemetry::{
+    IncidentTracker, LifecycleSummary, TelemetryClient, TelemetrySnapshot,
+};
 
 #[derive(Debug, Clone)]
 pub struct TelemetryPollMetaCache {
@@ -15,6 +17,8 @@ pub struct TelemetryPollMetaCache {
     pub monitor_stamp: Option<(SystemTime, u64)>,
     pub notify_on_down: bool,
     pub notify_on_failover: bool,
+    pub lifecycle_stamp: Option<(SystemTime, u64)>,
+    pub lifecycle_summary: Option<LifecycleSummary>,
 }
 
 impl Default for TelemetryPollMetaCache {
@@ -25,6 +29,8 @@ impl Default for TelemetryPollMetaCache {
             monitor_stamp: None,
             notify_on_down: true,
             notify_on_failover: true,
+            lifecycle_stamp: None,
+            lifecycle_summary: None,
         }
     }
 }
@@ -36,6 +42,7 @@ pub struct CockpitPaths {
     pub backups_dir: PathBuf,
     pub monitor_json_path: PathBuf,
     pub security_reports_dir: PathBuf,
+    pub lifecycle_log_path: PathBuf,
 }
 
 impl CockpitPaths {
@@ -54,6 +61,7 @@ impl CockpitPaths {
             backups_dir: ov_home.join("backups"),
             monitor_json_path: ov_home.join("monitor").join("monitor.json"),
             security_reports_dir: ov_home.join("monitor").join("security_reports"),
+            lifecycle_log_path: ov_home.join("logs").join("lifecycle.jsonl"),
             ov_home,
         })
     }
@@ -66,6 +74,7 @@ pub struct CockpitState {
     pub incident_tracker: Mutex<IncidentTracker>,
     pub poll_meta_cache: Mutex<TelemetryPollMetaCache>,
     pub monitor_lock: tokio::sync::Mutex<()>,
+    pub pending_geometry: Mutex<Option<String>>,
     pub subscribers: Mutex<Vec<Channel<TelemetrySnapshot>>>,
     pub shutdown_tx: watch::Sender<bool>,
 }
@@ -87,6 +96,7 @@ impl CockpitState {
             incident_tracker: Mutex::new(IncidentTracker::default()),
             poll_meta_cache: Mutex::new(TelemetryPollMetaCache::default()),
             monitor_lock: tokio::sync::Mutex::new(()),
+            pending_geometry: Mutex::new(None),
             subscribers: Mutex::new(Vec::new()),
             shutdown_tx,
         });

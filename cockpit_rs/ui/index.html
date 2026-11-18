@@ -21,6 +21,10 @@
       </nav>
       <div class="c-actions">
         <span id="topbar-status" class="c-card-meta"></span>
+        <label class="c-check-inline" title="Tự động khởi chạy ẩn dưới khay hệ thống (--tray) khi đăng nhập Windows">
+          <input id="pref-run-startup" type="checkbox" />
+          Khởi động cùng Windows
+        </label>
         <label class="c-check-inline" title="Thông báo khay khi OpenViking (19330) mất kết nối hoặc thiếu model embedding">
           <input id="pref-notify-down" type="checkbox" checked />
           Báo sự cố Server
@@ -260,7 +264,10 @@
             <button class="c-tab" type="button" data-audit-tab="inspector" aria-selected="false">2. Chi tiết Hạng mục</button>
             <button class="c-tab" type="button" data-audit-tab="raw" aria-selected="false">3. Dữ liệu thô JSON</button>
           </nav>
-          <button id="audit-modal-close" type="button" class="c-btn">Đóng</button>
+          <div class="c-actions">
+            <button id="audit-modal-rerun" type="button" class="c-btn c-btn--sm" title="Chạy lại trực tiếp 7 probe V3.1 trên mạng thay vì đọc cache">Đo lại (7 probe)</button>
+            <button id="audit-modal-close" type="button" class="c-btn">Đóng</button>
+          </div>
         </div>
 
         <section id="audit-tab-summary" class="c-panel">
@@ -286,6 +293,10 @@
         </section>
 
         <section id="audit-tab-raw" class="c-panel" hidden>
+          <div class="c-actions">
+            <button id="audit-copy-json" type="button" class="c-btn c-btn--sm">Sao chép JSON</button>
+            <span id="audit-copy-status" class="c-card-meta"></span>
+          </div>
           <pre id="audit-raw-json" class="c-pre"></pre>
         </section>
       </div>
