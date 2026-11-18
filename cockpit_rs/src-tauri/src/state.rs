@@ -98,7 +98,18 @@ impl CockpitState {
             .unwrap_or_else(|_| "http://127.0.0.1:21434".to_string());
         let server_port = extract_port_from_url(&server_url, 19330);
 
-        let telemetry_client = TelemetryClient::new(&server_url).with_ollama_base_url(&ollama_url);
+        let initial_api_key = if paths.conf_path.is_file() {
+            cockpit_rs::config::conf_gate::load_raw_config(&paths.conf_path)
+                .ok()
+                .and_then(|(cfg, _, _)| {
+                    cockpit_rs::config::conf_gate::resolve_server_root_api_key(&cfg, None)
+                })
+        } else {
+            None
+        };
+        let telemetry_client = TelemetryClient::new(&server_url)
+            .with_ollama_base_url(&ollama_url)
+            .with_api_key(initial_api_key);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let state = Arc::new(Self {

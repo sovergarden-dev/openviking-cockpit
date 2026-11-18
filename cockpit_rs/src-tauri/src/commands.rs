@@ -8,8 +8,8 @@ use tauri::{AppHandle, Emitter, State};
 
 use cockpit_rs::config::conf_gate::{
     apply_slot_update_with_live_policy, display_clean_path, load_raw_config,
-    resolve_slot_audit_target, summarize_config_with_audits, ApplySlotOutcome, ConfigSummary,
-    SlotUpdateInput, AUDIT_TTL_FAILOVER_S, AUDIT_TTL_PRIMARY_S,
+    resolve_server_root_api_key, resolve_slot_audit_target, summarize_config_with_audits,
+    ApplySlotOutcome, ConfigSummary, SlotUpdateInput, AUDIT_TTL_FAILOVER_S, AUDIT_TTL_PRIMARY_S,
 };
 use cockpit_rs::secrets::secret_store::{is_env_ref, resolve_secret, SecretStatus};
 use cockpit_rs::services::auditor::{run_provider_audit, AuditReportDocument};
@@ -175,17 +175,21 @@ async fn read_cached_poll_meta(
 
         let expected_emb = if conf_dirty {
             if cur_conf_stamp.is_some() {
-                load_raw_config(&state_ref.paths.conf_path)
-                    .ok()
-                    .and_then(|(cfg, _, _)| {
-                        cfg.embedding
-                            .as_ref()
-                            .and_then(|e| e.get("dense").or(Some(e)))
-                            .and_then(|d| d.get("model"))
-                            .and_then(|m| m.as_str())
-                            .map(|s| s.to_string())
-                    })
+                if let Ok((cfg, _, _)) = load_raw_config(&state_ref.paths.conf_path) {
+                    state_ref
+                        .telemetry_client
+                        .set_api_key(resolve_server_root_api_key(&cfg, None));
+                    cfg.embedding
+                        .as_ref()
+                        .and_then(|e| e.get("dense").or(Some(e)))
+                        .and_then(|d| d.get("model"))
+                        .and_then(|m| m.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                }
             } else {
+                state_ref.telemetry_client.set_api_key(None);
                 None
             }
         } else {

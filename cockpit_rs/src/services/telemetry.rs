@@ -7,6 +7,7 @@ use std::fmt;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroize;
 
@@ -521,7 +522,7 @@ pub enum TelemetryError {
 pub struct TelemetryClient {
     base_url: String,
     ollama_base_url: String,
-    api_key: Option<RedactedApiKey>,
+    api_key: Arc<RwLock<Option<RedactedApiKey>>>,
     http: reqwest::Client,
     search_http: reqwest::Client,
 }
@@ -547,7 +548,7 @@ impl TelemetryClient {
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             ollama_base_url: "http://127.0.0.1:21434".to_string(),
-            api_key: None,
+            api_key: Arc::new(RwLock::new(None)),
             http,
             search_http,
         })
@@ -565,12 +566,28 @@ impl TelemetryClient {
         self
     }
 
-    pub fn with_api_key(mut self, key: Option<String>) -> Self {
-        self.api_key = key
+    pub fn set_api_key(&self, key: Option<String>) {
+        let next = key
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty())
             .map(RedactedApiKey);
+        if let Ok(mut guard) = self.api_key.write() {
+            *guard = next;
+        }
+    }
+
+    pub fn with_api_key(self, key: Option<String>) -> Self {
+        self.set_api_key(key);
         self
+    }
+
+    fn attach_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Ok(guard) = self.api_key.read() {
+            if let Some(ref key) = *guard {
+                return req.header("X-API-Key", &key.0).bearer_auth(&key.0);
+            }
+        }
+        req
     }
 
     async fn probe_url<T: for<'de> Deserialize<'de>>(
@@ -581,9 +598,7 @@ impl TelemetryClient {
         let start = Instant::now();
         let mut req = self.http.get(url);
         if include_auth {
-            if let Some(ref key) = self.api_key {
-                req = req.header("X-API-Key", &key.0).bearer_auth(&key.0);
-            }
+            req = self.attach_auth(req);
         }
 
         let resp = match req.send().await {
@@ -649,13 +664,11 @@ impl TelemetryClient {
         slot_index: usize,
     ) -> Result<VlmActiveResponse, String> {
         let url = format!("{}/api/v1/observer/vlm/active", self.base_url);
-        let mut req = self
-            .http
-            .post(&url)
-            .json(&serde_json::json!({ "index": slot_index }));
-        if let Some(ref key) = self.api_key {
-            req = req.header("X-API-Key", &key.0).bearer_auth(&key.0);
-        }
+        let req = self.attach_auth(
+            self.http
+                .post(&url)
+                .json(&serde_json::json!({ "index": slot_index })),
+        );
         let resp = req.send().await.map_err(|e| {
             if e.is_timeout() {
                 "VLM hot-switch request timed out".to_string()
@@ -708,10 +721,7 @@ impl TelemetryClient {
         }
         let start = Instant::now();
         let url = format!("{}/api/v1/search/find", self.base_url);
-        let mut req = self.search_http.post(&url).json(body);
-        if let Some(ref key) = self.api_key {
-            req = req.header("X-API-Key", &key.0).bearer_auth(&key.0);
-        }
+        let req = self.attach_auth(self.search_http.post(&url).json(body));
         let resp = req.send().await.map_err(|e| {
             if e.is_timeout() {
                 "Semantic search timed out (check OpenViking & Ollama)".to_string()
@@ -746,10 +756,7 @@ impl TelemetryClient {
             "{}/api/v1/content/read?uri={}&limit={}",
             self.base_url, encoded_uri, capped_limit
         );
-        let mut req = self.search_http.get(&url);
-        if let Some(ref key) = self.api_key {
-            req = req.header("X-API-Key", &key.0).bearer_auth(&key.0);
-        }
+        let req = self.attach_auth(self.search_http.get(&url));
         let resp = req.send().await.map_err(|e| {
             if e.is_timeout() {
                 "Content read timed out".to_string()
@@ -775,10 +782,6 @@ impl TelemetryClient {
             .map(|p| p.models.into_iter().map(|m| m.name).collect())
             .unwrap_or_default();
         (status, models, latency)
-    }
-
-    pub async fn fetch_snapshot(&self) -> TelemetrySnapshot {
-        self.fetch_snapshot_with_embedding(None).await
     }
 
     pub async fn fetch_snapshot_with_embedding(
@@ -1345,18 +1348,30 @@ mod tests {
                     let mut buf = [0u8; 4096];
                     let n = socket.read(&mut buf).await.unwrap_or(0);
                     let req_str = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let req_lower = req_str.to_ascii_lowercase();
+                    let authed = req_lower.contains("x-api-key: synthetic_root_key_777\r\n")
+                        && req_lower.contains("authorization: bearer synthetic_root_key_777\r\n");
                     let first_line = req_str.lines().next().unwrap_or("");
-                    let body = if first_line.starts_with("POST /api/v1/search/find ") {
-                        r#"{"status":"ok","result":{"memories":[{"context_type":"memory","uri":"viking://user/default/memories/preferences/pref_1.md","level":2,"score":0.891,"abstract":"DPAPI key policy"}],"resources":[],"skills":[],"total":1}}"#
+                    let (status_line, body) = if !authed {
+                        ("HTTP/1.1 401 Unauthorized", r#"{"status":"unauthorized"}"#)
+                    } else if first_line.starts_with("POST /api/v1/search/find ") {
+                        (
+                            "HTTP/1.1 200 OK",
+                            r#"{"status":"ok","result":{"memories":[{"context_type":"memory","uri":"viking://user/default/memories/preferences/pref_1.md","level":2,"score":0.891,"abstract":"DPAPI key policy"}],"resources":[],"skills":[],"total":1}}"#,
+                        )
                     } else if first_line.starts_with(
                         "GET /api/v1/content/read?uri=viking%3A%2F%2Fuser%2Fdefault%2Fmemories%2Fpref_1.md&limit=512 ",
                     ) {
-                        r##"{"status":"ok","result":"# DPAPI Policy\nNever write plaintext keys."}"##
+                        (
+                            "HTTP/1.1 200 OK",
+                            r##"{"status":"ok","result":"# DPAPI Policy\nNever write plaintext keys."}"##,
+                        )
                     } else {
-                        r#"{"status":"error"}"#
+                        ("HTTP/1.1 400 Bad Request", r#"{"status":"error"}"#)
                     };
                     let resp = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        "{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        status_line,
                         body.len(),
                         body
                     );
@@ -1366,6 +1381,7 @@ mod tests {
         });
 
         let client = TelemetryClient::new(&base_url);
+        client.set_api_key(Some("SYNTHETIC_ROOT_KEY_777".to_string()));
 
         assert!(client
             .search_find(&SearchFindRequest {

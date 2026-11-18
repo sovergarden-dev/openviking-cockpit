@@ -170,6 +170,33 @@ pub fn remove_leftover_data_locks(ov_home: &Path) -> Vec<String> {
 }
 
 #[cfg(windows)]
+fn port_confirmed_closed(netstat: &Path, port: u16, self_pid: u32) -> bool {
+    run_hidden_cmd(netstat, &["-ano", "-p", "tcp"])
+        .map(|(rc, ns)| rc == 0 && parse_listening_pids_on_port(&ns, port, self_pid).is_empty())
+        .unwrap_or(false)
+}
+
+/// Terminates socket-dead `openviking-server` or `ov_lifecycle.py` orphans holding `.openviking.lock` (`WinError 64`).
+#[cfg(windows)]
+fn terminate_cim_server_orphans(self_pid: u32, taskkill: &Path, terminated_pids: &mut Vec<u32>) {
+    let ps_query = "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'openviking[-]server' -or $_.CommandLine -match 'ov_lifecycle\\.py' } | ForEach-Object { $_.ProcessId }";
+    if let Ok((0, ps_out)) = run_hidden_cmd(
+        &system_powershell_exe(),
+        &["-NoProfile", "-NonInteractive", "-Command", ps_query],
+    ) {
+        for pid in parse_numeric_pids(&ps_out, self_pid) {
+            if terminated_pids.contains(&pid) {
+                continue;
+            }
+            let pid_str = pid.to_string();
+            if let Ok((0, _)) = run_hidden_cmd(taskkill, &["/PID", &pid_str, "/T", "/F"]) {
+                terminated_pids.push(pid);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
 fn run_stale_pid_cleaner_if_present(ov_home: &Path) {
     use std::os::windows::process::CommandExt;
     let py = ov_home.join("venv").join("Scripts").join("python.exe");
@@ -206,42 +233,24 @@ pub fn execute_service_step(
         task_end_rc = Some(end_rc);
         std::thread::sleep(std::time::Duration::from_millis(1500));
 
-        if let Ok((_, ns_out)) = run_hidden_cmd(&netstat, &["-ano", "-p", "tcp"]) {
+        if let Ok((0, ns_out)) = run_hidden_cmd(&netstat, &["-ano", "-p", "tcp"]) {
             for pid in parse_listening_pids_on_port(&ns_out, port, self_pid) {
                 let pid_str = pid.to_string();
-                if let Ok((rc, _)) = run_hidden_cmd(&taskkill, &["/PID", &pid_str, "/T", "/F"]) {
-                    if rc == 0 {
-                        terminated_pids.push(pid);
-                    }
+                if let Ok((0, _)) = run_hidden_cmd(&taskkill, &["/PID", &pid_str, "/T", "/F"]) {
+                    terminated_pids.push(pid);
                 }
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(800));
 
-        // Check for hung socket-dead `openviking-server` processes still holding data-dir locks (`WinError 64`).
-        let ps_query = "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'openviking[-]server' -or $_.CommandLine -match 'ov_lifecycle\\.py' } | ForEach-Object { $_.ProcessId }";
-        if let Ok((0, ps_out)) = run_hidden_cmd(
-            &system_powershell_exe(),
-            &["-NoProfile", "-NonInteractive", "-Command", ps_query],
-        ) {
-            for pid in parse_numeric_pids(&ps_out, self_pid) {
-                if terminated_pids.contains(&pid) {
-                    continue;
-                }
-                let pid_str = pid.to_string();
-                if let Ok((rc, _)) = run_hidden_cmd(&taskkill, &["/PID", &pid_str, "/T", "/F"]) {
-                    if rc == 0 {
-                        terminated_pids.push(pid);
-                    }
-                }
-            }
+        terminate_cim_server_orphans(self_pid, &taskkill, &mut terminated_pids);
+        if port_confirmed_closed(&netstat, port, self_pid) {
+            locks_cleaned = remove_leftover_data_locks(ov_home);
         }
-
-        // Verify port is now clear before unlinking `.openviking.lock`.
-        let still_listening = run_hidden_cmd(&netstat, &["-ano", "-p", "tcp"])
-            .map(|(_, ns)| !parse_listening_pids_on_port(&ns, port, self_pid).is_empty())
-            .unwrap_or(true);
-        if !still_listening {
+    } else if port_confirmed_closed(&netstat, port, self_pid) {
+        // On Start when port 19330 has no listener, clear hung WinError 64 orphans and stale locks before schtasks /Run.
+        terminate_cim_server_orphans(self_pid, &taskkill, &mut terminated_pids);
+        if port_confirmed_closed(&netstat, port, self_pid) {
             locks_cleaned = remove_leftover_data_locks(ov_home);
         }
     }

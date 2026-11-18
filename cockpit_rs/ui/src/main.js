@@ -19,6 +19,9 @@ const state = {
   restartConfirmPending: false,
   restartConfirmTimer: null,
   serviceBusy: false,
+  memoryOverviewSeq: 0,
+  searchRequestSeq: 0,
+  previewRequestSeq: 0,
 };
 
 let monitorMutationChain = Promise.resolve();
@@ -1368,23 +1371,27 @@ function renderMemoryOverview(payload) {
 
 async function refreshMemoryOverview() {
   if (!tauriApi?.core?.invoke) return;
+  const reqSeq = ++state.memoryOverviewSeq;
   const statusEl = document.getElementById("memory-overview-status");
   const btn = document.getElementById("btn-refresh-memory-overview");
   if (btn) btn.disabled = true;
   if (statusEl) statusEl.textContent = "Đang đọc phân bổ bộ nhớ & dung lượng…";
   try {
     const payload = await tauriApi.core.invoke("get_memory_overview");
+    if (reqSeq !== state.memoryOverviewSeq) return;
     renderMemoryOverview(payload);
     if (statusEl) statusEl.textContent = "";
   } catch (err) {
+    if (reqSeq !== state.memoryOverviewSeq) return;
     if (statusEl) statusEl.textContent = `Lỗi đọc tổng quan bộ nhớ: ${err}`;
   } finally {
-    if (btn && btn.isConnected) btn.disabled = false;
+    if (reqSeq === state.memoryOverviewSeq && btn && btn.isConnected) btn.disabled = false;
   }
 }
 
 async function openMemoryContentPreview(uri, btn) {
   if (!tauriApi?.core?.invoke) return;
+  const reqSeq = ++state.previewRequestSeq;
   const card = document.getElementById("memory-preview-card");
   const uriEl = document.getElementById("memory-preview-uri");
   const bodyEl = document.getElementById("memory-preview-body");
@@ -1394,9 +1401,11 @@ async function openMemoryContentPreview(uri, btn) {
   bodyEl.textContent = "Đang đọc nội dung chỉ đọc từ OpenViking…";
   try {
     const res = await tauriApi.core.invoke("read_viking_content", { uri });
+    if (reqSeq !== state.previewRequestSeq) return;
     uriEl.textContent = res.uri;
     bodyEl.textContent = res.content || "(Tệp rỗng)";
   } catch (err) {
+    if (reqSeq !== state.previewRequestSeq) return;
     bodyEl.textContent = `Không đọc được nội dung: ${err}`;
   } finally {
     if (btn && btn.isConnected) btn.disabled = false;
@@ -1422,6 +1431,7 @@ function setupMemoryInspector() {
   const closePreviewBtn = document.getElementById("btn-close-memory-preview");
   if (closePreviewBtn) {
     closePreviewBtn.addEventListener("click", () => {
+      state.previewRequestSeq += 1;
       document.getElementById("memory-preview-card").hidden = true;
     });
   }
@@ -1431,6 +1441,7 @@ function setupMemoryInspector() {
     searchForm.addEventListener("submit", async (ev) => {
       ev.preventDefault();
       if (!tauriApi?.core?.invoke) return;
+      const reqSeq = ++state.searchRequestSeq;
       const btn = document.getElementById("memory-search-btn");
       const statusEl = document.getElementById("memory-search-status");
       const query = document.getElementById("memory-search-query").value.trim();
@@ -1444,6 +1455,7 @@ function setupMemoryInspector() {
         const out = await tauriApi.core.invoke("search_memories", {
           input: { query, contextType, targetUri, limit },
         });
+        if (reqSeq !== state.searchRequestSeq) return;
         statusEl.textContent = `Tìm thấy ${out.hits.length} kết quả (tổng khớp: ${out.total}) trong ${out.latency_ms} ms.`;
         searchBody.replaceChildren();
         if (out.hits.length === 0) {
@@ -1473,9 +1485,10 @@ function setupMemoryInspector() {
           searchBody.appendChild(tr);
         }
       } catch (err) {
+        if (reqSeq !== state.searchRequestSeq) return;
         statusEl.textContent = `Lỗi tra cứu ngữ nghĩa: ${err}`;
       } finally {
-        if (btn && btn.isConnected) btn.disabled = false;
+        if (reqSeq === state.searchRequestSeq && btn && btn.isConnected) btn.disabled = false;
       }
     });
   }

@@ -425,6 +425,26 @@ pub fn summarize_slots_with_audits(
         .collect()
 }
 
+/// Resolves `server.root_api_key` from `ov.conf` when configured and secret-ready.
+pub fn resolve_server_root_api_key(
+    config: &OpenVikingConfig,
+    env_map: Option<&HashMap<String, String>>,
+) -> Option<String> {
+    let raw = config
+        .extra
+        .get("server")
+        .and_then(|s| s.get("root_api_key"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let resolved = resolve_secret(raw, env_map);
+    if resolved.status == SecretStatus::SecretReady && !resolved.value.is_empty() {
+        Some(resolved.value)
+    } else {
+        None
+    }
+}
+
 /// Resolves `(model, api_base, ResolvedSecret)` for an existing slot internally on the Rust backend.
 pub fn resolve_slot_audit_target(
     config: &OpenVikingConfig,
@@ -1369,5 +1389,39 @@ mod tests {
         .expect("authorized desktop slot save on fake home");
         assert_eq!(authorized_live.slots[1].model, "authorized-gui-edit");
         assert!(authorized_live.backup_path.is_some());
+    }
+
+    #[test]
+    fn test_resolve_server_root_api_key_resolves_literal_and_env_ref() {
+        let mut env = HashMap::new();
+        env.insert(
+            "OV_ROOT_SECRET".to_string(),
+            "SYNTHETIC_ROOT_API_KEY_555".to_string(),
+        );
+
+        let env_cfg: OpenVikingConfig =
+            serde_json::from_str(r#"{"server":{"port":19330,"root_api_key":"${OV_ROOT_SECRET}"}}"#)
+                .expect("parse env root_api_key");
+        assert_eq!(
+            resolve_server_root_api_key(&env_cfg, Some(&env)).as_deref(),
+            Some("SYNTHETIC_ROOT_API_KEY_555")
+        );
+        assert_eq!(
+            resolve_server_root_api_key(&env_cfg, Some(&HashMap::new())),
+            None
+        );
+
+        let lit_cfg: OpenVikingConfig =
+            serde_json::from_str(r#"{"server":{"root_api_key":"  literal-root-token  "}}"#)
+                .expect("parse literal root_api_key");
+        assert_eq!(
+            resolve_server_root_api_key(&lit_cfg, None).as_deref(),
+            Some("literal-root-token")
+        );
+
+        let dpapi_cfg: OpenVikingConfig =
+            serde_json::from_str(r#"{"server":{"root_api_key":"dpapi:AAA"}}"#)
+                .expect("parse dpapi root_api_key");
+        assert_eq!(resolve_server_root_api_key(&dpapi_cfg, None), None);
     }
 }
