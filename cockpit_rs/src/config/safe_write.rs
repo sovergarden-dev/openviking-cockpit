@@ -291,7 +291,7 @@ pub fn acquire_file_lock(
     }
 }
 
-/// Returns true when `dest_path` targets `%USERPROFILE%\.openviking\ov.conf` without live-write authorization (`COCKPIT_RUST_SPEC` §4.2).
+/// Returns true when `dest_path` targets `%USERPROFILE%\.openviking\ov.conf` or `monitor\monitor.json` without live-write authorization (`COCKPIT_RUST_SPEC` §4.2).
 pub fn is_live_path_protected(
     dest_path: &Path,
     home_dir: Option<&Path>,
@@ -305,24 +305,33 @@ pub fn is_live_path_protected(
         None => return false,
     };
 
-    let live_ov = home.join(".openviking").join("ov.conf");
+    let ov_root = home.join(".openviking");
+    let protected_targets = [
+        ov_root.join("ov.conf"),
+        ov_root.join("monitor").join("monitor.json"),
+    ];
 
-    // Direct canonical comparison if both already exist
-    if let (Ok(cd), Ok(cl)) = (dest_path.canonicalize(), live_ov.canonicalize()) {
-        if cd == cl {
-            return true;
+    for live_target in &protected_targets {
+        if let (Ok(cd), Ok(cl)) = (dest_path.canonicalize(), live_target.canonicalize()) {
+            if cd == cl {
+                return true;
+            }
         }
-    }
 
-    // Canonicalize parent dirs to protect even if destination or live file does not exist yet
-    let can_dest_parent = dest_path.parent().and_then(|p| p.canonicalize().ok());
-    let can_live_parent = live_ov.parent().and_then(|p| p.canonicalize().ok());
+        let can_dest_parent = dest_path.parent().and_then(|p| p.canonicalize().ok());
+        let can_live_parent = live_target.parent().and_then(|p| p.canonicalize().ok());
 
-    if let (Some(dp), Some(lp)) = (can_dest_parent, can_live_parent) {
-        if dp == lp {
-            let dest_name = dest_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let live_name = live_ov.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            return dest_name.eq_ignore_ascii_case(live_name);
+        if let (Some(dp), Some(lp)) = (can_dest_parent, can_live_parent) {
+            if dp == lp {
+                let dest_name = dest_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let live_name = live_target
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                if dest_name.eq_ignore_ascii_case(live_name) {
+                    return true;
+                }
+            }
         }
     }
 
@@ -601,12 +610,25 @@ mod tests {
 
         let fake_ov_conf = fake_ov_dir.join("ov.conf");
         fs::write(&fake_ov_conf, "original content").expect("write fake ov.conf");
+        let fake_mon_dir = fake_ov_dir.join("monitor");
+        fs::create_dir_all(&fake_mon_dir).expect("create fake monitor dir");
+        let fake_mon_json = fake_mon_dir.join("monitor.json");
+        fs::write(&fake_mon_json, "{}").expect("write fake monitor.json");
 
-        // 1. Existing file under fake home must be protected
+        // 1. Existing ov.conf and monitor.json under fake home must both be protected
         assert!(
             is_live_path_protected(&fake_ov_conf, Some(&fake_home), false),
             "Existing ov.conf was not protected!"
         );
+        assert!(
+            is_live_path_protected(&fake_mon_json, Some(&fake_home), false),
+            "Existing monitor.json was not protected!"
+        );
+        assert!(!is_live_path_protected(
+            &fake_mon_json,
+            Some(&fake_home),
+            true
+        ));
 
         // 2. Case-insensitive protection (e.g. OV.CONF)
         let upper_ov_conf = fake_ov_dir.join("OV.CONF");

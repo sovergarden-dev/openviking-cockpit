@@ -19,9 +19,9 @@ use cockpit_rs::services::telemetry::{
 };
 use cockpit_rs::services::watchlist::{
     copy_reserve_into_watchlist, load_monitor_state, probe_watch_credential,
-    record_watch_probe_outcome, save_monitor_state, set_watch_row_auto, summarize_monitor_state,
-    upsert_reserve_record, upsert_watch_record, AutoDisabledAlert, MonitorStateSummary,
-    UpsertReserveInput, UpsertWatchInput,
+    record_watch_probe_outcome, save_monitor_state_with_live_policy, set_watch_row_auto,
+    summarize_monitor_state, upsert_reserve_record, upsert_watch_record, AutoDisabledAlert,
+    MonitorStateSummary, UpsertReserveInput, UpsertWatchInput,
 };
 
 use crate::state::CockpitState;
@@ -173,34 +173,49 @@ pub async fn run_due_watch_auto_pass(app: &AppHandle, state: &Arc<CockpitState>)
     for (wid, model, api_base, raw_key, start_rev, interval_secs) in due_targets {
         let outcome = probe_watch_credential(&model, &api_base, &raw_key, None).await;
         let paths = state.paths.clone();
-        let maybe_alert =
-            tauri::async_runtime::spawn_blocking(move || -> Option<AutoDisabledAlert> {
-                let (mut st, cur_sha) = load_monitor_state(&paths.monitor_json_path).ok()?;
-                if !st.watch_auto_enabled {
-                    return None;
-                }
-                let rec = st
-                    .watch_keys
-                    .iter_mut()
-                    .find(|w| w.id == wid && w.rev == start_rev && w.auto_enabled)?;
-                let alert = record_watch_probe_outcome(rec, outcome, interval_secs);
-                let _ =
-                    save_monitor_state(&paths.monitor_json_path, &paths.backups_dir, &st, &cur_sha);
-                alert
-            })
+        let saved_result = {
+            let _guard = state.monitor_lock.lock().await;
+            tauri::async_runtime::spawn_blocking(
+                move || -> Option<(MonitorStateSummary, Option<AutoDisabledAlert>)> {
+                    let (mut st, cur_sha) = load_monitor_state(&paths.monitor_json_path).ok()?;
+                    if !st.watch_auto_enabled {
+                        return None;
+                    }
+                    let rec = st
+                        .watch_keys
+                        .iter_mut()
+                        .find(|w| w.id == wid && w.rev == start_rev && w.auto_enabled)?;
+                    let alert = record_watch_probe_outcome(rec, outcome, interval_secs);
+                    let new_sha = save_monitor_state_with_live_policy(
+                        &paths.monitor_json_path,
+                        &paths.backups_dir,
+                        &st,
+                        &cur_sha,
+                        true,
+                    )
+                    .ok()?;
+                    let summary = summarize_monitor_state(&st, &new_sha, None);
+                    Some((summary, alert))
+                },
+            )
             .await
             .ok()
-            .flatten();
+            .flatten()
+        };
 
-        if let Some(alert) = maybe_alert {
-            let _ = app.emit("watchlist://auto-disabled", &alert);
-            tauri::async_runtime::spawn_blocking(move || {
-                crate::dispatch_watch_auto_disabled_balloon(
-                    &alert.alias,
-                    &alert.model,
-                    alert.status_code,
-                );
-            });
+        if let Some((summary, maybe_alert)) = saved_result {
+            state.invalidate_poll_meta_cache();
+            let _ = app.emit("monitor://updated", &summary);
+            if let Some(alert) = maybe_alert {
+                let _ = app.emit("watchlist://auto-disabled", &alert);
+                tauri::async_runtime::spawn_blocking(move || {
+                    crate::dispatch_watch_auto_disabled_balloon(
+                        &alert.alias,
+                        &alert.model,
+                        alert.status_code,
+                    );
+                });
+            }
         }
     }
 }
@@ -328,136 +343,211 @@ pub async fn read_monitor_state(
 
 #[tauri::command]
 pub async fn upsert_watch_entry(
+    app: AppHandle,
     state: State<'_, Arc<CockpitState>>,
-    expected_sha: String,
+    expected_sha: Option<String>,
     input: UpsertWatchInput,
 ) -> Result<MonitorStateSummary, String> {
+    let _ = expected_sha;
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let (mut st, _) =
-            load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
-        upsert_watch_record(&mut st, &input).map_err(|e| e.to_string())?;
-        let new_sha = save_monitor_state(
-            &paths.monitor_json_path,
-            &paths.backups_dir,
-            &st,
-            &expected_sha,
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(summarize_monitor_state(&st, &new_sha, None))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking panicked: {}", e))?
+    let summary = {
+        let _guard = state.monitor_lock.lock().await;
+        tauri::async_runtime::spawn_blocking(move || {
+            let (mut st, cur_sha) =
+                load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
+            upsert_watch_record(&mut st, &input).map_err(|e| e.to_string())?;
+            let new_sha = save_monitor_state_with_live_policy(
+                &paths.monitor_json_path,
+                &paths.backups_dir,
+                &st,
+                &cur_sha,
+                true,
+            )
+            .map_err(|e| e.to_string())?;
+            Ok::<MonitorStateSummary, String>(summarize_monitor_state(&st, &new_sha, None))
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking panicked: {}", e))??
+    };
+    state.invalidate_poll_meta_cache();
+    let _ = app.emit("monitor://updated", &summary);
+    Ok(summary)
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorPrefsPatch {
+    #[serde(default, alias = "master_enabled")]
+    pub master_enabled: Option<bool>,
+    #[serde(default, alias = "watch_interval_minutes")]
+    pub watch_interval_minutes: Option<u32>,
+    #[serde(default, alias = "notify_on_down")]
+    pub notify_on_down: Option<bool>,
+    #[serde(default, alias = "notify_on_failover")]
+    pub notify_on_failover: Option<bool>,
+    #[serde(default, alias = "watch_id")]
+    pub watch_id: Option<String>,
+    #[serde(default, alias = "row_enabled")]
+    pub row_enabled: Option<bool>,
 }
 
 #[tauri::command]
 pub async fn set_watch_auto_state(
+    app: AppHandle,
     state: State<'_, Arc<CockpitState>>,
-    expected_sha: String,
-    master_enabled: Option<bool>,
-    watch_id: Option<String>,
-    row_enabled: Option<bool>,
+    expected_sha: Option<String>,
+    patch: MonitorPrefsPatch,
 ) -> Result<MonitorStateSummary, String> {
+    let _ = expected_sha;
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let (mut st, _) =
-            load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
-        if let Some(m) = master_enabled {
-            st.watch_auto_enabled = m;
-        }
-        if let (Some(wid), Some(ren)) = (watch_id, row_enabled) {
-            set_watch_row_auto(&mut st, &wid, ren).map_err(|e| e.to_string())?;
-        }
-        let new_sha = save_monitor_state(
-            &paths.monitor_json_path,
-            &paths.backups_dir,
-            &st,
-            &expected_sha,
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(summarize_monitor_state(&st, &new_sha, None))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking panicked: {}", e))?
+    let summary = {
+        let _guard = state.monitor_lock.lock().await;
+        tauri::async_runtime::spawn_blocking(move || {
+            let (mut st, cur_sha) =
+                load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
+            if let Some(m) = patch.master_enabled {
+                st.watch_auto_enabled = m;
+            }
+            if let Some(mins) = patch.watch_interval_minutes {
+                if !(1..=120).contains(&mins) {
+                    return Err("Watch interval must be between 1 and 120 minutes".to_string());
+                }
+                st.watch_interval_minutes = mins;
+            }
+            if let Some(nd) = patch.notify_on_down {
+                st.notify_on_down = nd;
+            }
+            if let Some(nf) = patch.notify_on_failover {
+                st.notify_on_failover = nf;
+            }
+            if let (Some(wid), Some(ren)) = (patch.watch_id, patch.row_enabled) {
+                set_watch_row_auto(&mut st, &wid, ren).map_err(|e| e.to_string())?;
+            }
+            let new_sha = save_monitor_state_with_live_policy(
+                &paths.monitor_json_path,
+                &paths.backups_dir,
+                &st,
+                &cur_sha,
+                true,
+            )
+            .map_err(|e| e.to_string())?;
+            Ok::<MonitorStateSummary, String>(summarize_monitor_state(&st, &new_sha, None))
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking panicked: {}", e))??
+    };
+    state.invalidate_poll_meta_cache();
+    let _ = app.emit("monitor://updated", &summary);
+    Ok(summary)
 }
 
 #[tauri::command]
 pub async fn delete_watch_entry(
+    app: AppHandle,
     state: State<'_, Arc<CockpitState>>,
-    expected_sha: String,
+    expected_sha: Option<String>,
     watch_id: String,
 ) -> Result<MonitorStateSummary, String> {
+    let _ = expected_sha;
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let (mut st, _) =
-            load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
-        let before_len = st.watch_keys.len();
-        st.watch_keys.retain(|w| w.id != watch_id);
-        if st.watch_keys.len() == before_len {
-            return Err(format!("Watch entry '{}' not found", watch_id));
-        }
-        let new_sha = save_monitor_state(
-            &paths.monitor_json_path,
-            &paths.backups_dir,
-            &st,
-            &expected_sha,
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(summarize_monitor_state(&st, &new_sha, None))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking panicked: {}", e))?
+    let (summary, changed) = {
+        let _guard = state.monitor_lock.lock().await;
+        tauri::async_runtime::spawn_blocking(move || {
+            let (mut st, cur_sha) =
+                load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
+            let before_len = st.watch_keys.len();
+            st.watch_keys.retain(|w| w.id != watch_id);
+            if st.watch_keys.len() == before_len {
+                return Ok::<(MonitorStateSummary, bool), String>((
+                    summarize_monitor_state(&st, &cur_sha, None),
+                    false,
+                ));
+            }
+            let new_sha = save_monitor_state_with_live_policy(
+                &paths.monitor_json_path,
+                &paths.backups_dir,
+                &st,
+                &cur_sha,
+                true,
+            )
+            .map_err(|e| e.to_string())?;
+            Ok((summarize_monitor_state(&st, &new_sha, None), true))
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking panicked: {}", e))??
+    };
+    if changed {
+        state.invalidate_poll_meta_cache();
+        let _ = app.emit("monitor://updated", &summary);
+    }
+    Ok(summary)
 }
 
 #[tauri::command]
 pub async fn upsert_reserve_entry(
+    app: AppHandle,
     state: State<'_, Arc<CockpitState>>,
     expected_sha: String,
     input: UpsertReserveInput,
 ) -> Result<MonitorStateSummary, String> {
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let (mut st, _) =
-            load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
-        upsert_reserve_record(&mut st, &input).map_err(|e| e.to_string())?;
-        let new_sha = save_monitor_state(
-            &paths.monitor_json_path,
-            &paths.backups_dir,
-            &st,
-            &expected_sha,
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(summarize_monitor_state(&st, &new_sha, None))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking panicked: {}", e))?
+    let summary = {
+        let _guard = state.monitor_lock.lock().await;
+        tauri::async_runtime::spawn_blocking(move || {
+            let (mut st, _) =
+                load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
+            upsert_reserve_record(&mut st, &input).map_err(|e| e.to_string())?;
+            let new_sha = save_monitor_state_with_live_policy(
+                &paths.monitor_json_path,
+                &paths.backups_dir,
+                &st,
+                &expected_sha,
+                true,
+            )
+            .map_err(|e| e.to_string())?;
+            Ok::<MonitorStateSummary, String>(summarize_monitor_state(&st, &new_sha, None))
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking panicked: {}", e))??
+    };
+    state.invalidate_poll_meta_cache();
+    let _ = app.emit("monitor://updated", &summary);
+    Ok(summary)
 }
 
 #[tauri::command]
 pub async fn delete_reserve_entry(
+    app: AppHandle,
     state: State<'_, Arc<CockpitState>>,
     expected_sha: String,
     index: usize,
 ) -> Result<MonitorStateSummary, String> {
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let (mut st, _) =
-            load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
-        if index >= st.spare_models.len() {
-            return Err(format!("Reserve index {} out of range", index));
-        }
-        st.spare_models.remove(index);
-        let new_sha = save_monitor_state(
-            &paths.monitor_json_path,
-            &paths.backups_dir,
-            &st,
-            &expected_sha,
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(summarize_monitor_state(&st, &new_sha, None))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking panicked: {}", e))?
+    let summary = {
+        let _guard = state.monitor_lock.lock().await;
+        tauri::async_runtime::spawn_blocking(move || {
+            let (mut st, _) =
+                load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
+            if index >= st.spare_models.len() {
+                return Err(format!("Reserve index {} out of range", index));
+            }
+            st.spare_models.remove(index);
+            let new_sha = save_monitor_state_with_live_policy(
+                &paths.monitor_json_path,
+                &paths.backups_dir,
+                &st,
+                &expected_sha,
+                true,
+            )
+            .map_err(|e| e.to_string())?;
+            Ok::<MonitorStateSummary, String>(summarize_monitor_state(&st, &new_sha, None))
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking panicked: {}", e))??
+    };
+    state.invalidate_poll_meta_cache();
+    let _ = app.emit("monitor://updated", &summary);
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -525,28 +615,36 @@ pub async fn promote_reserve_to_slot(
 
 #[tauri::command]
 pub async fn copy_reserve_to_watch(
+    app: AppHandle,
     state: State<'_, Arc<CockpitState>>,
     expected_sha: String,
     reserve_index: usize,
     alias: Option<String>,
 ) -> Result<MonitorStateSummary, String> {
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let (mut st, _) =
-            load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
-        copy_reserve_into_watchlist(&mut st, reserve_index, alias.as_deref(), None)
+    let summary = {
+        let _guard = state.monitor_lock.lock().await;
+        tauri::async_runtime::spawn_blocking(move || {
+            let (mut st, _) =
+                load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
+            copy_reserve_into_watchlist(&mut st, reserve_index, alias.as_deref(), None)
+                .map_err(|e| e.to_string())?;
+            let new_sha = save_monitor_state_with_live_policy(
+                &paths.monitor_json_path,
+                &paths.backups_dir,
+                &st,
+                &expected_sha,
+                true,
+            )
             .map_err(|e| e.to_string())?;
-        let new_sha = save_monitor_state(
-            &paths.monitor_json_path,
-            &paths.backups_dir,
-            &st,
-            &expected_sha,
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(summarize_monitor_state(&st, &new_sha, None))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking panicked: {}", e))?
+            Ok::<MonitorStateSummary, String>(summarize_monitor_state(&st, &new_sha, None))
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking panicked: {}", e))??
+    };
+    state.invalidate_poll_meta_cache();
+    let _ = app.emit("monitor://updated", &summary);
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -583,27 +681,40 @@ pub async fn probe_watch_entry(
 
     let outcome = probe_watch_credential(&model, &api_base, &raw_key, None).await;
 
-    let (summary, maybe_alert) = tauri::async_runtime::spawn_blocking(
-        move || -> Result<(MonitorStateSummary, Option<AutoDisabledAlert>), String> {
-            let (mut st, cur_sha) =
-                load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
-            let mut alert = None;
-            if let Some(rec) = st
-                .watch_keys
-                .iter_mut()
-                .find(|w| w.id == watch_id && w.rev == start_rev)
-            {
-                alert = record_watch_probe_outcome(rec, outcome, interval_secs);
-                let new_sha =
-                    save_monitor_state(&paths.monitor_json_path, &paths.backups_dir, &st, &cur_sha)
-                        .map_err(|e| e.to_string())?;
-                return Ok((summarize_monitor_state(&st, &new_sha, None), alert));
-            }
-            Ok((summarize_monitor_state(&st, &cur_sha, None), alert))
-        },
-    )
-    .await
-    .map_err(|e| format!("spawn_blocking panicked: {}", e))??;
+    let (summary, maybe_alert, saved) = {
+        let _guard = state.monitor_lock.lock().await;
+        tauri::async_runtime::spawn_blocking(
+            move || -> Result<(MonitorStateSummary, Option<AutoDisabledAlert>, bool), String> {
+                let (mut st, cur_sha) =
+                    load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
+                let mut alert = None;
+                if let Some(rec) = st
+                    .watch_keys
+                    .iter_mut()
+                    .find(|w| w.id == watch_id && w.rev == start_rev)
+                {
+                    alert = record_watch_probe_outcome(rec, outcome, interval_secs);
+                    let new_sha = save_monitor_state_with_live_policy(
+                        &paths.monitor_json_path,
+                        &paths.backups_dir,
+                        &st,
+                        &cur_sha,
+                        true,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    return Ok((summarize_monitor_state(&st, &new_sha, None), alert, true));
+                }
+                Ok((summarize_monitor_state(&st, &cur_sha, None), alert, false))
+            },
+        )
+        .await
+        .map_err(|e| format!("spawn_blocking panicked: {}", e))??
+    };
+
+    if saved {
+        state.invalidate_poll_meta_cache();
+        let _ = app.emit("monitor://updated", &summary);
+    }
 
     if let Some(alert) = maybe_alert {
         let _ = app.emit("watchlist://auto-disabled", &alert);

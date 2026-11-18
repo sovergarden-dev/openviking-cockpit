@@ -65,6 +65,7 @@ pub struct CockpitState {
     pub latest_snapshot: RwLock<Option<TelemetrySnapshot>>,
     pub incident_tracker: Mutex<IncidentTracker>,
     pub poll_meta_cache: Mutex<TelemetryPollMetaCache>,
+    pub monitor_lock: tokio::sync::Mutex<()>,
     pub subscribers: Mutex<Vec<Channel<TelemetrySnapshot>>>,
     pub shutdown_tx: watch::Sender<bool>,
 }
@@ -85,6 +86,7 @@ impl CockpitState {
             latest_snapshot: RwLock::new(None),
             incident_tracker: Mutex::new(IncidentTracker::default()),
             poll_meta_cache: Mutex::new(TelemetryPollMetaCache::default()),
+            monitor_lock: tokio::sync::Mutex::new(()),
             subscribers: Mutex::new(Vec::new()),
             shutdown_tx,
         });

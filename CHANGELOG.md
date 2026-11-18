@@ -2,6 +2,23 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
+## [Unreleased]
+
+### Added
+- Added instant NFC-normalized client-side Reserve filtering in `cockpit_rs/ui/` (`#reserve-filter-query`, `#reserve-filter-endpoint`, and `#reserve-filter-clear`) preserving backend `spare_models` indices across filtered views.
+- Added top-bar tray alert switches (`notify_on_down`, `notify_on_failover`) and an inline Watchlist Auto-probe interval selector (`watch_auto_minutes`: `1` / `5` / `10` minutes) in `cockpit_rs`, wired through `MonitorStateSummary` and `set_watch_auto_state`.
+
+### Changed
+- Moved the `THEO DÕI` (`Watchlist`) panel in `cockpit_rs/ui/` into the `Tổng quan` (`Overview`) tab directly below the 5 status cards, converted the 3rd tab into a dedicated full-width `Dự trữ` (`Reserve`) view, and lowered the `cockpit_rs` watchlist capacity to `MAX_WATCHES = 4` (while preserving `LEGACY_MAX_WATCHES = 7` on load and shrink so legacy 5–7 key `monitor.json` files remain readable and deletable).
+- Replaced invalid TOML syntax in `config/ov.conf.example` with OpenViking's actual JSON configuration schema using `${ENV_VAR}` credential placeholders, and aligned `config/monitor.json.example` with `watch_auto_enabled`, `watch_auto_minutes`, and `watch_keys`.
+
+### Fixed
+- Eliminated `monitor.json` Watchlist/Reserve deletion and toggle race conditions in `cockpit_rs` by serializing state writes behind `CockpitState::monitor_lock`, making `delete_watch_entry` idempotent against double-clicks, broadcasting `monitor://updated` after every IPC mutation and background `run_due_watch_auto_pass` probe, and adding a frontend FIFO mutation queue with immediate button disable states and compact tokenized table actions.
+- Mapped `MonitorState::watch_interval_minutes` to `"watch_auto_minutes"` (with serde alias `"watch_interval_minutes"` and legacy `extra` key cleanup) so Rust and Python share the same persisted probe-interval field in `monitor.json`.
+
+### Security
+- Extended `is_live_path_protected()` in `cockpit_rs/src/config/safe_write.rs` to block unauthorized writes (`allow_live_write == false`) to `.openviking/monitor/monitor.json` in addition to `.openviking/ov.conf`.
+
 ## [1.4.0] - 2026-11-18
 
 ### Added

@@ -27,7 +27,7 @@ Hệ thống được thiết kế theo triết lý **Disaster Recovery Engineer
 - **Cache Đo Lường 24 Giờ:** Tự động ghi nhớ báo cáo kiểm định gần nhất trong 24h; cho phép mở xem lại tức thì mà không cần chạy lại mạng.
 
 ### Theo Dõi Key Độc Lập
-- Khung **THEO DÕI** trong tab **Tổng quan**, tối đa **7 key**, không tìm kiếm. Hai key cùng endpoint/model vẫn là hai bản ghi riêng.
+- Khung **THEO DÕI** trong tab **Tổng quan** (tách riêng khỏi tab **Dự trữ**), giới hạn tối đa **4 key** trên bản Rust/Tauri V2 (`cockpit_rs`, vẫn đọc tương thích và cho phép thu gọn tối đa 7 key từ bản Python legacy), không tìm kiếm. Hai key cùng endpoint/model vẫn là hai bản ghi riêng.
 - Tên gợi nhớ, model thử, kết quả, độ trễ, lần thử và Auto từng dòng; công tắc Auto tổng mặc định **tắt**, chu kỳ 1 hoặc 10 phút.
 - Key lưu bằng **Windows DPAPI**. Lấy từ Dự trữ/slot là sao chép chủ động, độc lập; không tự kế thừa key theo endpoint. Trong Dự trữ, chọn một dòng rồi **Đưa sang Theo dõi** ở menu chuột phải hoặc hàng nút; editor điền sẵn, chỉ **Lưu** mới thêm, giữ nguồn và Auto tắt.
 - Auto dòng chờ công tắc tổng hiện **Chờ tổng**. Kết quả cũ hơn 10 phút hoặc hai chu kỳ (lấy ngưỡng lớn hơn) được đánh dấu **Cũ**, không tự suy diễn key hỏng.
@@ -102,7 +102,7 @@ openviking-cockpit/
 ├── cockpit_rs/                         # Phân hệ Rust / Tauri V2 độc lập (openviking-cockpit.exe)
 │   ├── src/                            # Lõi DPAPI, DACL Safe Write, Config Gate, Telemetry, Watchlist, Auditor V3.1
 │   ├── src-tauri/                      # Tauri V2 Desktop Host, Tray Balloon & 16 lệnh IPC async
-│   └── ui/                             # Giao diện Dark Dashboard & 3-Tab Audit Modal (Design Tokens)
+│   └── ui/                             # Giao diện Dark Dashboard (Tổng quan + Theo dõi 4 key, Định tuyến Slot, Dự trữ có lọc nhanh, Công tắc thông báo & Chu kỳ Auto) & 3-Tab Audit Modal
 ├── ops/                                # Trình khởi chạy ẩn watchdog & bọc vòng đời tiến trình (ov_lifecycle.py)
 ├── scripts/                            # Tiện ích vận hành chạy từ repo (retrofit ACL, retention, sync)
 ├── config/

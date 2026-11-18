@@ -1,4 +1,4 @@
-//! Bounded credential watchlist (`MAX_WATCHES = 7`), DPAPI reserve pool state (`monitor.json`),
+//! Bounded credential watchlist (`MAX_WATCHES = 4`), DPAPI reserve pool state (`monitor.json`),
 //! and sequential probe worker with consecutive 401/403 auto-disable policy.
 
 use serde::{Deserialize, Serialize};
@@ -11,10 +11,13 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::config::safe_write::{safe_atomic_write_text, sha256_hex, SafeWriteError};
+use crate::config::safe_write::{
+    safe_atomic_write_text_with_live_policy, sha256_hex, SafeWriteError,
+};
 use crate::secrets::secret_store::{dpapi_protect, resolve_secret, SecretStatus};
 
-pub const MAX_WATCHES: usize = 7;
+pub const MAX_WATCHES: usize = 4;
+pub const LEGACY_MAX_WATCHES: usize = 7;
 pub const WATCH_PROBE_TIMEOUT_MS: u64 = 20_000;
 pub const WATCH_MAX_TOKENS: u32 = 64;
 pub const BACKOFF_CAP_SECS: f64 = 3_600.0;
@@ -114,7 +117,7 @@ impl fmt::Debug for SpareModelRecord {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MonitorState {
     #[serde(default)]
     pub run_with_windows: bool,
@@ -128,7 +131,11 @@ pub struct MonitorState {
     pub geometry: String,
     #[serde(default)]
     pub watch_auto_enabled: bool,
-    #[serde(default = "default_watch_minutes")]
+    #[serde(
+        rename = "watch_auto_minutes",
+        alias = "watch_interval_minutes",
+        default = "default_watch_minutes"
+    )]
     pub watch_interval_minutes: u32,
     #[serde(default)]
     pub watch_keys: Vec<WatchRecord>,
@@ -136,6 +143,23 @@ pub struct MonitorState {
     pub spare_models: Vec<SpareModelRecord>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+impl Default for MonitorState {
+    fn default() -> Self {
+        Self {
+            run_with_windows: false,
+            notify_on_down: default_true(),
+            notify_on_failover: default_true(),
+            always_on_top: false,
+            geometry: default_geometry(),
+            watch_auto_enabled: false,
+            watch_interval_minutes: default_watch_minutes(),
+            watch_keys: Vec::new(),
+            spare_models: Vec::new(),
+            extra: BTreeMap::new(),
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -177,6 +201,8 @@ pub struct ReserveRowView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MonitorStateSummary {
     pub sha256: String,
+    pub notify_on_down: bool,
+    pub notify_on_failover: bool,
     pub watch_auto_enabled: bool,
     pub watch_interval_minutes: u32,
     pub watches: Vec<WatchRowView>,
@@ -260,11 +286,14 @@ pub fn validate_watch_base_url(raw: &str) -> Result<String, WatchError> {
     Ok(trimmed.trim_end_matches('/').to_string())
 }
 
-pub fn validate_watch_records(items: &[WatchRecord]) -> Result<(), WatchError> {
-    if items.len() > MAX_WATCHES {
+pub fn validate_watch_records_with_cap(
+    items: &[WatchRecord],
+    cap: usize,
+) -> Result<(), WatchError> {
+    if items.len() > cap {
         return Err(WatchError::Validation(format!(
             "Watchlist exceeds maximum capacity of {}",
-            MAX_WATCHES
+            cap
         )));
     }
     let mut seen = HashSet::new();
@@ -287,6 +316,10 @@ pub fn validate_watch_records(items: &[WatchRecord]) -> Result<(), WatchError> {
     Ok(())
 }
 
+pub fn validate_watch_records(items: &[WatchRecord]) -> Result<(), WatchError> {
+    validate_watch_records_with_cap(items, MAX_WATCHES)
+}
+
 /// Loads `monitor.json` fail-closed: damaged existing files error instead of silently resetting to empty defaults.
 pub fn load_monitor_state(path: &Path) -> Result<(MonitorState, String), WatchError> {
     if !path.exists() {
@@ -304,9 +337,10 @@ pub fn load_monitor_state(path: &Path) -> Result<(MonitorState, String), WatchEr
             "monitor.json root must be a JSON object".to_string(),
         ));
     }
-    let state: MonitorState = serde_json::from_value(val)
+    let mut state: MonitorState = serde_json::from_value(val)
         .map_err(|_| WatchError::CorruptedState("monitor.json schema mismatch".to_string()))?;
-    validate_watch_records(&state.watch_keys)?;
+    state.extra.remove("watch_interval_minutes");
+    validate_watch_records_with_cap(&state.watch_keys, LEGACY_MAX_WATCHES)?;
     Ok((state, sha))
 }
 
@@ -316,7 +350,28 @@ pub fn save_monitor_state(
     state: &MonitorState,
     expected_sha: &str,
 ) -> Result<String, WatchError> {
-    validate_watch_records(&state.watch_keys)?;
+    save_monitor_state_with_live_policy(path, backups_dir, state, expected_sha, false)
+}
+
+pub fn save_monitor_state_with_live_policy(
+    path: &Path,
+    backups_dir: &Path,
+    state: &MonitorState,
+    expected_sha: &str,
+    allow_live_write: bool,
+) -> Result<String, WatchError> {
+    let mut effective_cap = MAX_WATCHES;
+    if path.exists() {
+        if let Ok((existing, _)) = load_monitor_state(path) {
+            if state.watch_keys.len() <= existing.watch_keys.len() {
+                effective_cap = existing
+                    .watch_keys
+                    .len()
+                    .clamp(MAX_WATCHES, LEGACY_MAX_WATCHES);
+            }
+        }
+    }
+    validate_watch_records_with_cap(&state.watch_keys, effective_cap)?;
 
     let prev_sha = if path.exists() {
         let cur = sha256_hex(&fs::read(path)?);
@@ -342,10 +397,13 @@ pub fn save_monitor_state(
         None
     };
 
-    let payload = serde_json::to_string_pretty(state)
+    let mut clean_state = state.clone();
+    clean_state.extra.remove("watch_interval_minutes");
+    let payload = serde_json::to_string_pretty(&clean_state)
         .map_err(|e| WatchError::CorruptedState(e.to_string()))?
         + "\n";
-    let new_sha = safe_atomic_write_text(path, &payload, true, prev_sha)?;
+    let new_sha =
+        safe_atomic_write_text_with_live_policy(path, &payload, true, prev_sha, allow_live_write)?;
     Ok(new_sha)
 }
 
@@ -393,6 +451,8 @@ pub fn summarize_monitor_state(
 
     MonitorStateSummary {
         sha256: sha256.to_string(),
+        notify_on_down: state.notify_on_down,
+        notify_on_failover: state.notify_on_failover,
         watch_auto_enabled: state.watch_auto_enabled,
         watch_interval_minutes: state.watch_interval_minutes,
         watches,
@@ -918,21 +978,57 @@ mod tests {
                     api_key: Some(format!("SYNTHETIC_WATCH_SECRET_{}", idx)),
                 },
             )
-            .expect("insert watch up to 7");
+            .expect("insert watch up to 4");
         }
 
-        // 8th credential must fail closed
+        // 5th credential must fail closed
         let overflow = upsert_watch_record(
             &mut state,
             &UpsertWatchInput {
                 id: None,
-                alias: "k8".to_string(),
+                alias: "k5".to_string(),
                 model: "m-local".to_string(),
                 api_base: "http://127.0.0.1:20128/v1".to_string(),
-                api_key: Some("SYNTHETIC_WATCH_SECRET_8".to_string()),
+                api_key: Some("SYNTHETIC_WATCH_SECRET_5".to_string()),
             },
         );
         assert!(overflow.is_err());
+
+        // Legacy 6-key file must still load cleanly and allow shrinking via delete
+        let dir = tempdir().expect("tempdir");
+        let mon_path = dir.path().join("monitor.json");
+        let bk_dir = dir.path().join("backups");
+        let mut legacy = MonitorState {
+            watch_interval_minutes: 15,
+            ..MonitorState::default()
+        };
+        for idx in 0..6 {
+            legacy.watch_keys.push(WatchRecord {
+                id: format!("watch-legacy-{}", idx),
+                alias: format!("Legacy {}", idx),
+                model: "m-leg".to_string(),
+                api_base: "https://api.example.com/v1".to_string(),
+                api_key: "SYNTHETIC_LEG".to_string(),
+                auto_enabled: false,
+                auto_disabled_reason: String::new(),
+                rev: 1,
+                fail_streak: 0,
+                auth_fail_streak: 0,
+                next_probe_at: 0.0,
+                cooldown_until: 0.0,
+                last_probe: None,
+                extra: BTreeMap::new(),
+            });
+        }
+        let raw_legacy = serde_json::to_string_pretty(&legacy).unwrap();
+        assert!(raw_legacy.contains("\"watch_auto_minutes\": 15"));
+        fs::write(&mon_path, &raw_legacy).unwrap();
+        let (mut loaded_leg, leg_sha) = load_monitor_state(&mon_path).expect("load 6-key legacy");
+        assert_eq!(loaded_leg.watch_keys.len(), 6);
+        assert_eq!(loaded_leg.watch_interval_minutes, 15);
+        loaded_leg.watch_keys.pop();
+        save_monitor_state(&mon_path, &bk_dir, &loaded_leg, &leg_sha)
+            .expect("shrinking legacy 6 -> 5 must succeed");
 
         // Stored keys on Windows must be DPAPI-encrypted and never leak in summary JSON
         #[cfg(windows)]
@@ -1043,6 +1139,9 @@ mod tests {
         assert!(state.watch_keys[0].auto_enabled);
 
         let summary = summarize_monitor_state(&state, "sha-r", None);
+        assert!(summary.notify_on_down);
+        assert!(summary.notify_on_failover);
+        assert_eq!(summary.watch_interval_minutes, 10);
         assert_eq!(summary.reserves.len(), 1);
         assert_eq!(summary.reserves[0].model, "spare-v1");
         let serialized = serde_json::to_string(&summary).unwrap();

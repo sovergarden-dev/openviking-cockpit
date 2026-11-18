@@ -17,10 +17,18 @@
       <nav class="c-tabs" role="tablist">
         <button class="c-tab" role="tab" data-tab="overview" aria-selected="true">Tổng quan</button>
         <button class="c-tab" role="tab" data-tab="slots" aria-selected="false">Định tuyến Slot</button>
-        <button class="c-tab" role="tab" data-tab="watch" aria-selected="false">Theo dõi &amp; Dự trữ</button>
+        <button class="c-tab" role="tab" data-tab="reserve" aria-selected="false">Dự trữ</button>
       </nav>
       <div class="c-actions">
-        <button id="btn-refresh" class="c-btn">Làm mới</button>
+        <label class="c-check-inline" title="Thông báo khay khi OpenViking (19330) mất kết nối hoặc thiếu model embedding">
+          <input id="pref-notify-down" type="checkbox" checked />
+          Báo sự cố Server
+        </label>
+        <label class="c-check-inline" title="Thông báo khay khi VLM tự động chuyển mạch sang Slot dự phòng">
+          <input id="pref-notify-failover" type="checkbox" checked />
+          Báo Failover
+        </label>
+        <button id="btn-refresh" class="c-btn c-btn--sm">Làm mới</button>
       </div>
     </header>
 
@@ -55,6 +63,65 @@
             <div id="meta-memories" class="c-card-meta">Chưa có dữ liệu</div>
           </article>
         </div>
+
+        <article class="c-card">
+          <div class="c-actions">
+            <span class="c-card-title">THEO DÕI (Tối đa 4 key độc lập — DPAPI)</span>
+            <span id="watch-count-badge" class="c-badge c-badge--ok">0 / 4 key</span>
+            <label class="c-check-inline">
+              <input id="watch-master-auto" type="checkbox" />
+              Công tắc Auto tổng
+            </label>
+            <label class="c-check-inline" for="watch-auto-minutes">
+              Chu kỳ:
+              <select id="watch-auto-minutes" class="c-input c-input--sm">
+                <option value="1">1 phút</option>
+                <option value="5">5 phút</option>
+                <option value="10" selected>10 phút</option>
+              </select>
+            </label>
+          </div>
+          <div class="c-table-wrap">
+            <table class="c-table">
+              <thead>
+                <tr>
+                  <th>Tên gợi nhớ</th>
+                  <th>Model</th>
+                  <th>Endpoint</th>
+                  <th>Key</th>
+                  <th>Auto</th>
+                  <th>Lần thử gần nhất</th>
+                  <th>Thao tác</th>
+                </tr>
+              </thead>
+              <tbody id="watch-tbody"></tbody>
+            </table>
+          </div>
+
+          <form id="watch-form" class="c-form">
+            <div class="c-field">
+              <label for="watch-alias">Tên gợi nhớ</label>
+              <input id="watch-alias" class="c-input" type="text" placeholder="Gateway dự phòng" />
+            </div>
+            <div class="c-field">
+              <label for="watch-model">Model thử</label>
+              <input id="watch-model" class="c-input" type="text" required />
+            </div>
+            <div class="c-field">
+              <label for="watch-base">Base URL (/v1)</label>
+              <input id="watch-base" class="c-input" type="url" placeholder="https://api.example.com/v1" required />
+            </div>
+            <div class="c-field">
+              <label id="watch-key-label" for="watch-key">API Key / ${ENV_VAR}</label>
+              <input id="watch-key" class="c-input" type="password" autocomplete="off" required />
+            </div>
+            <div class="c-actions">
+              <button id="watch-submit-btn" type="submit" class="c-btn c-btn--primary">+ Thêm Theo dõi</button>
+              <button id="watch-cancel-edit" type="button" class="c-btn" hidden>Hủy sửa</button>
+            </div>
+          </form>
+          <div id="watch-status" class="c-card-meta"></div>
+        </article>
       </section>
 
       <section id="panel-slots" class="c-panel" hidden>
@@ -108,66 +175,30 @@
         </article>
       </section>
 
-      <section id="panel-watch" class="c-panel" hidden>
-        <article class="c-card">
-          <div class="c-actions">
-            <span class="c-card-title">THEO DÕI (Tối đa 7 key độc lập — DPAPI)</span>
-            <label class="c-card-meta">
-              <input id="watch-master-auto" type="checkbox" />
-              Công tắc Auto tổng
-            </label>
-          </div>
-          <div class="c-table-wrap">
-            <table class="c-table">
-              <thead>
-                <tr>
-                  <th>Tên gợi nhớ</th>
-                  <th>Model</th>
-                  <th>Endpoint</th>
-                  <th>Key</th>
-                  <th>Auto</th>
-                  <th>Lần thử gần nhất</th>
-                  <th>Thao tác</th>
-                </tr>
-              </thead>
-              <tbody id="watch-tbody"></tbody>
-            </table>
-          </div>
-
-          <form id="watch-form" class="c-form">
-            <div class="c-field">
-              <label for="watch-alias">Tên gợi nhớ</label>
-              <input id="watch-alias" class="c-input" type="text" placeholder="Gateway dự phòng" />
-            </div>
-            <div class="c-field">
-              <label for="watch-model">Model thử</label>
-              <input id="watch-model" class="c-input" type="text" required />
-            </div>
-            <div class="c-field">
-              <label for="watch-base">Base URL (/v1)</label>
-              <input id="watch-base" class="c-input" type="url" placeholder="https://api.example.com/v1" required />
-            </div>
-            <div class="c-field">
-              <label id="watch-key-label" for="watch-key">API Key / ${ENV_VAR}</label>
-              <input id="watch-key" class="c-input" type="password" autocomplete="off" required />
-            </div>
-            <div class="c-actions">
-              <button id="watch-submit-btn" type="submit" class="c-btn c-btn--primary">+ Thêm Theo dõi</button>
-              <button id="watch-cancel-edit" type="button" class="c-btn" hidden>Hủy sửa</button>
-            </div>
-          </form>
-          <div id="watch-status" class="c-card-meta"></div>
-        </article>
-
+      <section id="panel-reserve" class="c-panel" hidden>
         <article class="c-card">
           <div class="c-actions">
             <span class="c-card-title">DỰ TRỮ (Spare Models Pool — DPAPI)</span>
-            <label class="c-card-meta" for="reserve-target-slot">Slot đích:</label>
-            <select id="reserve-target-slot" class="c-input">
-              <option value="0">Slot #0 (Chính)</option>
-              <option value="1" selected>Slot #1 (Dự phòng)</option>
+            <span id="reserve-count-badge" class="c-badge c-badge--ok">0 model</span>
+            <input
+              id="reserve-filter-query"
+              class="c-input c-input--sm"
+              type="search"
+              placeholder="Lọc model, endpoint, ghi chú…"
+              aria-label="Lọc danh sách dự trữ"
+            />
+            <select id="reserve-filter-endpoint" class="c-input c-input--sm" aria-label="Lọc theo endpoint">
+              <option value="">Mọi endpoint</option>
             </select>
-            <label class="c-card-meta">
+            <button id="reserve-filter-clear" type="button" class="c-btn c-btn--sm" hidden>Xóa lọc</button>
+            <label class="c-check-inline" for="reserve-target-slot">
+              Slot đích:
+              <select id="reserve-target-slot" class="c-input c-input--sm">
+                <option value="0">Slot #0 (Chính)</option>
+                <option value="1" selected>Slot #1 (Dự phòng)</option>
+              </select>
+            </label>
+            <label class="c-check-inline">
               <input id="reserve-allow-unaudited" type="checkbox" />
               Cho phép chưa kiểm định (Slot ≥ 1)
             </label>

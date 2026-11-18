@@ -1,12 +1,50 @@
 const tauriApi = window.__TAURI__;
+const MAX_WATCHES = 4;
 
 const state = {
   confSha: "",
   monitorSha: "",
   slots: [],
+  watchCount: 0,
+  lastMonitorSummary: null,
+  reserveQuery: "",
+  reserveEndpoint: "",
   editingWatchId: null,
   editingReserveIndex: null,
 };
+
+let monitorMutationChain = Promise.resolve();
+
+function enqueueMonitorMutation(btn, statusEl, busyText, taskFn) {
+  if (btn) btn.disabled = true;
+  if (statusEl && busyText) statusEl.textContent = busyText;
+  const run = monitorMutationChain.then(taskFn, taskFn);
+  monitorMutationChain = run.catch(() => {});
+  return run.finally(() => {
+    if (btn && btn.isConnected) btn.disabled = false;
+    syncWatchCapUi();
+  });
+}
+
+function syncWatchCapUi() {
+  const badge = document.getElementById("watch-count-badge");
+  if (badge) {
+    badge.textContent = `${state.watchCount} / ${MAX_WATCHES} key`;
+    badge.className = `c-badge ${state.watchCount >= MAX_WATCHES ? "c-badge--warn" : "c-badge--ok"}`;
+  }
+  const submitBtn = document.getElementById("watch-submit-btn");
+  if (!submitBtn) return;
+  if (state.editingWatchId !== null) {
+    submitBtn.disabled = false;
+    submitBtn.textContent = "Lưu cập nhật Theo dõi";
+  } else if (state.watchCount >= MAX_WATCHES) {
+    submitBtn.disabled = true;
+    submitBtn.textContent = `Đã đủ tối đa ${MAX_WATCHES} key`;
+  } else {
+    submitBtn.disabled = false;
+    submitBtn.textContent = "+ Thêm Theo dõi";
+  }
+}
 
 function resetWatchDraft() {
   state.editingWatchId = null;
@@ -17,8 +55,8 @@ function resetWatchDraft() {
   keyInput.value = "";
   keyInput.required = true;
   document.getElementById("watch-key-label").textContent = "API Key / ${ENV_VAR}";
-  document.getElementById("watch-submit-btn").textContent = "+ Thêm Theo dõi";
   document.getElementById("watch-cancel-edit").hidden = true;
+  syncWatchCapUi();
 }
 
 function resetReserveDraft() {
@@ -126,6 +164,16 @@ function createCell(text, mono = false) {
   return td;
 }
 
+function createEmptyRow(colSpan, text) {
+  const tr = document.createElement("tr");
+  const td = document.createElement("td");
+  td.colSpan = colSpan;
+  td.className = "c-empty-cell";
+  td.textContent = text;
+  tr.appendChild(td);
+  return tr;
+}
+
 function renderConfig(cfg) {
   if (!cfg) return;
   state.confSha = cfg.sha256;
@@ -172,13 +220,13 @@ function renderConfig(cfg) {
 
     const switchBtn = document.createElement("button");
     switchBtn.type = "button";
-    switchBtn.className = "c-btn";
+    switchBtn.className = "c-btn c-btn--sm";
     switchBtn.textContent = "Chuyển nóng";
-    switchBtn.addEventListener("click", () => hotSwitchSlot(slot.slot_index));
+    switchBtn.addEventListener("click", () => hotSwitchSlot(slot.slot_index, switchBtn));
 
     const editBtn = document.createElement("button");
     editBtn.type = "button";
-    editBtn.className = "c-btn";
+    editBtn.className = "c-btn c-btn--sm";
     editBtn.textContent = "Nạp vào form";
     editBtn.addEventListener("click", () => {
       document.getElementById("slot-index").value = String(slot.slot_index);
@@ -192,7 +240,7 @@ function renderConfig(cfg) {
 
     const auditSlotBtn = document.createElement("button");
     auditSlotBtn.type = "button";
-    auditSlotBtn.className = "c-btn";
+    auditSlotBtn.className = "c-btn c-btn--sm";
     auditSlotBtn.textContent = "Kiểm định";
     auditSlotBtn.addEventListener("click", () =>
       launchSecurityAudit({ source: "slot", slot_index: slot.slot_index })
@@ -204,14 +252,189 @@ function renderConfig(cfg) {
   }
 }
 
+function normalizeSearchText(text) {
+  return String(text || "")
+    .normalize("NFC")
+    .toLocaleLowerCase();
+}
+
+function renderReserveTable() {
+  const summary = state.lastMonitorSummary;
+  if (!summary) return;
+  const reserves = summary.reserves || [];
+  const watches = summary.watches || [];
+  const q = normalizeSearchText(state.reserveQuery.trim());
+  const ep = state.reserveEndpoint;
+  const isFiltered = Boolean(q || ep);
+
+  const clearBtn = document.getElementById("reserve-filter-clear");
+  if (clearBtn) clearBtn.hidden = !isFiltered;
+
+  const filtered = reserves.filter((res) => {
+    if (ep && res.api_base !== ep) return false;
+    if (!q) return true;
+    const haystack = normalizeSearchText(
+      `${res.model} ${res.api_base} ${res.note || ""} ${res.secret_status}`
+    );
+    return haystack.includes(q);
+  });
+
+  const reserveBadge = document.getElementById("reserve-count-badge");
+  if (reserveBadge) {
+    reserveBadge.textContent = isFiltered
+      ? `${filtered.length} / ${reserves.length} model`
+      : `${reserves.length} model`;
+  }
+
+  const rBody = document.getElementById("reserve-tbody");
+  rBody.replaceChildren();
+  if (reserves.length === 0) {
+    rBody.appendChild(
+      createEmptyRow(
+        6,
+        "Chưa có model dự trữ nào. Thêm model dự phòng bên dưới để mã hóa lưu trữ bằng DPAPI."
+      )
+    );
+    return;
+  }
+  if (filtered.length === 0) {
+    rBody.appendChild(createEmptyRow(6, "Không có model dự trữ nào khớp bộ lọc hiện tại."));
+    return;
+  }
+
+  const watchFull = watches.length >= MAX_WATCHES;
+  for (const res of filtered) {
+    const tr = document.createElement("tr");
+    tr.appendChild(createCell(String(res.index + 1), true));
+    tr.appendChild(createCell(res.model, true));
+    tr.appendChild(createCell(res.api_base, true));
+    tr.appendChild(createCell(res.secret_status, true));
+    tr.appendChild(createCell(res.note || "—"));
+
+    const actTd = document.createElement("td");
+    actTd.className = "c-actions";
+    const toSlotBtn = document.createElement("button");
+    toSlotBtn.type = "button";
+    toSlotBtn.className = "c-btn c-btn--sm";
+    toSlotBtn.textContent = "Đưa vào Slot";
+    toSlotBtn.addEventListener("click", () => promoteReserveToSlot(res.index, toSlotBtn));
+
+    const toWatchBtn = document.createElement("button");
+    toWatchBtn.type = "button";
+    toWatchBtn.className = "c-btn c-btn--sm";
+    toWatchBtn.textContent = "→ Theo dõi";
+    toWatchBtn.disabled = watchFull;
+    if (watchFull) {
+      toWatchBtn.title = `Bảng Theo dõi đã đạt tối đa ${MAX_WATCHES} key`;
+    }
+    toWatchBtn.addEventListener("click", () => copyReserveToWatch(res.index, toWatchBtn));
+
+    const editResBtn = document.createElement("button");
+    editResBtn.type = "button";
+    editResBtn.className = "c-btn c-btn--sm";
+    editResBtn.textContent = "Sửa";
+    editResBtn.addEventListener("click", () => {
+      state.editingReserveIndex = res.index;
+      document.getElementById("reserve-model").value = res.model;
+      document.getElementById("reserve-base").value = res.api_base;
+      document.getElementById("reserve-note").value = res.note || "";
+      const keyInput = document.getElementById("reserve-key");
+      keyInput.value = "";
+      keyInput.required = false;
+      document.getElementById("reserve-key-label").textContent =
+        "API Key / ${ENV_VAR} (để trống = giữ nguyên)";
+      document.getElementById("reserve-submit-btn").textContent = "Lưu cập nhật Dự trữ";
+      document.getElementById("reserve-cancel-edit").hidden = false;
+    });
+
+    const auditResBtn = document.createElement("button");
+    auditResBtn.type = "button";
+    auditResBtn.className = "c-btn c-btn--sm";
+    auditResBtn.textContent = "Kiểm định";
+    auditResBtn.addEventListener("click", () =>
+      launchSecurityAudit({ source: "reserve", index: res.index })
+    );
+
+    const delResBtn = document.createElement("button");
+    delResBtn.type = "button";
+    delResBtn.className = "c-btn c-btn--sm c-btn--danger";
+    delResBtn.textContent = "Xóa";
+    delResBtn.addEventListener("click", () => deleteReserve(res.index, delResBtn));
+
+    actTd.appendChild(toSlotBtn);
+    actTd.appendChild(toWatchBtn);
+    actTd.appendChild(editResBtn);
+    actTd.appendChild(auditResBtn);
+    actTd.appendChild(delResBtn);
+    tr.appendChild(actTd);
+    rBody.appendChild(tr);
+  }
+}
+
 function renderMonitorState(summary) {
   if (!summary) return;
+  const watches = summary.watches || [];
+  const reserves = summary.reserves || [];
+  state.lastMonitorSummary = summary;
   state.monitorSha = summary.sha256;
+  state.watchCount = watches.length;
+
+  const notifyDownEl = document.getElementById("pref-notify-down");
+  if (notifyDownEl) notifyDownEl.checked = Boolean(summary.notify_on_down);
+  const notifyFailoverEl = document.getElementById("pref-notify-failover");
+  if (notifyFailoverEl) notifyFailoverEl.checked = Boolean(summary.notify_on_failover);
+
   document.getElementById("watch-master-auto").checked = Boolean(summary.watch_auto_enabled);
+
+  const minsSelect = document.getElementById("watch-auto-minutes");
+  if (minsSelect) {
+    const minsStr = String(summary.watch_interval_minutes || 10);
+    if (!Array.from(minsSelect.options).some((o) => o.value === minsStr)) {
+      const customOpt = document.createElement("option");
+      customOpt.value = minsStr;
+      customOpt.textContent = `${minsStr} phút`;
+      minsSelect.appendChild(customOpt);
+    }
+    minsSelect.value = minsStr;
+  }
+
+  if (state.editingWatchId && !watches.some((w) => w.id === state.editingWatchId)) {
+    resetWatchDraft();
+  } else {
+    syncWatchCapUi();
+  }
+
+  const epSelect = document.getElementById("reserve-filter-endpoint");
+  if (epSelect) {
+    const endpoints = Array.from(new Set(reserves.map((r) => r.api_base).filter(Boolean))).sort();
+    epSelect.replaceChildren();
+    const allOpt = document.createElement("option");
+    allOpt.value = "";
+    allOpt.textContent = "Mọi endpoint";
+    epSelect.appendChild(allOpt);
+    for (const ep of endpoints) {
+      const opt = document.createElement("option");
+      opt.value = ep;
+      opt.textContent = ep;
+      epSelect.appendChild(opt);
+    }
+    if (state.reserveEndpoint && !endpoints.includes(state.reserveEndpoint)) {
+      state.reserveEndpoint = "";
+    }
+    epSelect.value = state.reserveEndpoint;
+  }
 
   const wBody = document.getElementById("watch-tbody");
   wBody.replaceChildren();
-  for (const row of summary.watches || []) {
+  if (watches.length === 0) {
+    wBody.appendChild(
+      createEmptyRow(
+        7,
+        'Chưa có key theo dõi nào (tối đa 4 key). Thêm bên dưới hoặc chọn "→ Theo dõi" từ tab Dự trữ.'
+      )
+    );
+  }
+  for (const row of watches) {
     const tr = document.createElement("tr");
     tr.appendChild(createCell(row.alias || "—"));
     tr.appendChild(createCell(row.model, true));
@@ -232,19 +455,19 @@ function renderMonitorState(summary) {
     actTd.className = "c-actions";
     const probeBtn = document.createElement("button");
     probeBtn.type = "button";
-    probeBtn.className = "c-btn";
+    probeBtn.className = "c-btn c-btn--sm";
     probeBtn.textContent = "Thử ngay";
-    probeBtn.addEventListener("click", () => probeWatch(row.id));
+    probeBtn.addEventListener("click", () => probeWatch(row.id, probeBtn));
 
     const autoBtn = document.createElement("button");
     autoBtn.type = "button";
-    autoBtn.className = "c-btn";
+    autoBtn.className = "c-btn c-btn--sm";
     autoBtn.textContent = row.auto_enabled ? "Tắt Auto" : "Bật Auto";
-    autoBtn.addEventListener("click", () => toggleWatchRowAuto(row.id, !row.auto_enabled));
+    autoBtn.addEventListener("click", () => toggleWatchRowAuto(row.id, !row.auto_enabled, autoBtn));
 
     const editWatchBtn = document.createElement("button");
     editWatchBtn.type = "button";
-    editWatchBtn.className = "c-btn";
+    editWatchBtn.className = "c-btn c-btn--sm";
     editWatchBtn.textContent = "Sửa";
     editWatchBtn.addEventListener("click", () => {
       state.editingWatchId = row.id;
@@ -256,99 +479,34 @@ function renderMonitorState(summary) {
       keyInput.required = false;
       document.getElementById("watch-key-label").textContent =
         "API Key / ${ENV_VAR} (để trống = giữ nguyên)";
-      document.getElementById("watch-submit-btn").textContent = "Lưu cập nhật Theo dõi";
       document.getElementById("watch-cancel-edit").hidden = false;
+      syncWatchCapUi();
     });
-
-    const delBtn = document.createElement("button");
-    delBtn.type = "button";
-    delBtn.className = "c-btn";
-    delBtn.textContent = "Xóa";
-    delBtn.addEventListener("click", () => deleteWatch(row.id));
-
-    actTd.appendChild(probeBtn);
-    actTd.appendChild(autoBtn);
-    actTd.appendChild(editWatchBtn);
 
     const auditWatchBtn = document.createElement("button");
     auditWatchBtn.type = "button";
-    auditWatchBtn.className = "c-btn";
+    auditWatchBtn.className = "c-btn c-btn--sm";
     auditWatchBtn.textContent = "Kiểm định";
     auditWatchBtn.addEventListener("click", () =>
       launchSecurityAudit({ source: "watch", watch_id: row.id })
     );
-    actTd.appendChild(auditWatchBtn);
 
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "c-btn c-btn--sm c-btn--danger";
+    delBtn.textContent = "Xóa";
+    delBtn.addEventListener("click", () => deleteWatch(row.id, delBtn));
+
+    actTd.appendChild(probeBtn);
+    actTd.appendChild(autoBtn);
+    actTd.appendChild(editWatchBtn);
+    actTd.appendChild(auditWatchBtn);
     actTd.appendChild(delBtn);
     tr.appendChild(actTd);
     wBody.appendChild(tr);
   }
 
-  const rBody = document.getElementById("reserve-tbody");
-  rBody.replaceChildren();
-  for (const res of summary.reserves || []) {
-    const tr = document.createElement("tr");
-    tr.appendChild(createCell(String(res.index + 1), true));
-    tr.appendChild(createCell(res.model, true));
-    tr.appendChild(createCell(res.api_base, true));
-    tr.appendChild(createCell(res.secret_status, true));
-    tr.appendChild(createCell(res.note || "—"));
-
-    const actTd = document.createElement("td");
-    actTd.className = "c-actions";
-    const toSlotBtn = document.createElement("button");
-    toSlotBtn.type = "button";
-    toSlotBtn.className = "c-btn";
-    toSlotBtn.textContent = "Đưa vào Slot";
-    toSlotBtn.addEventListener("click", () => promoteReserveToSlot(res.index));
-
-    const toWatchBtn = document.createElement("button");
-    toWatchBtn.type = "button";
-    toWatchBtn.className = "c-btn";
-    toWatchBtn.textContent = "→ Theo dõi";
-    toWatchBtn.addEventListener("click", () => copyReserveToWatch(res.index));
-
-    const editResBtn = document.createElement("button");
-    editResBtn.type = "button";
-    editResBtn.className = "c-btn";
-    editResBtn.textContent = "Sửa";
-    editResBtn.addEventListener("click", () => {
-      state.editingReserveIndex = res.index;
-      document.getElementById("reserve-model").value = res.model;
-      document.getElementById("reserve-base").value = res.api_base;
-      document.getElementById("reserve-note").value = res.note || "";
-      const keyInput = document.getElementById("reserve-key");
-      keyInput.value = "";
-      keyInput.required = false;
-      document.getElementById("reserve-key-label").textContent =
-        "API Key / ${ENV_VAR} (để trống = giữ nguyên)";
-      document.getElementById("reserve-submit-btn").textContent = "Lưu cập nhật Dự trữ";
-      document.getElementById("reserve-cancel-edit").hidden = false;
-    });
-
-    const delResBtn = document.createElement("button");
-    delResBtn.type = "button";
-    delResBtn.className = "c-btn";
-    delResBtn.textContent = "Xóa";
-    delResBtn.addEventListener("click", () => deleteReserve(res.index));
-
-    actTd.appendChild(toSlotBtn);
-    actTd.appendChild(toWatchBtn);
-    actTd.appendChild(editResBtn);
-
-    const auditResBtn = document.createElement("button");
-    auditResBtn.type = "button";
-    auditResBtn.className = "c-btn";
-    auditResBtn.textContent = "Kiểm định";
-    auditResBtn.addEventListener("click", () =>
-      launchSecurityAudit({ source: "reserve", index: res.index })
-    );
-    actTd.appendChild(auditResBtn);
-
-    actTd.appendChild(delResBtn);
-    tr.appendChild(actTd);
-    rBody.appendChild(tr);
-  }
+  renderReserveTable();
 }
 
 async function refreshAll() {
@@ -363,8 +521,9 @@ async function refreshAll() {
   if (mon.status === "fulfilled") renderMonitorState(mon.value);
 }
 
-async function hotSwitchSlot(slotIndex) {
+async function hotSwitchSlot(slotIndex, btn) {
   const statusEl = document.getElementById("slot-status");
+  if (btn) btn.disabled = true;
   statusEl.textContent = `Đang chuyển nóng sang Slot #${slotIndex}…`;
   try {
     const res = await tauriApi.core.invoke("switch_active_slot", { slotIndex });
@@ -373,74 +532,95 @@ async function hotSwitchSlot(slotIndex) {
     await refreshAll();
   } catch (err) {
     statusEl.textContent = `Lỗi chuyển nóng: ${err}`;
+  } finally {
+    if (btn && btn.isConnected) btn.disabled = false;
   }
 }
 
-async function toggleWatchRowAuto(watchId, enabled) {
-  const statusEl = document.getElementById("watch-status");
-  try {
-    const res = await tauriApi.core.invoke("set_watch_auto_state", {
-      expectedSha: state.monitorSha,
-      masterEnabled: null,
-      watchId,
-      rowEnabled: enabled,
-    });
-    renderMonitorState(res);
-  } catch (err) {
-    statusEl.textContent = `Lỗi: ${err}`;
-  }
+function updateMonitorPrefs(btn, statusEl, busyMsg, doneMsg, patch) {
+  return enqueueMonitorMutation(btn, statusEl, busyMsg, async () => {
+    try {
+      const res = await tauriApi.core.invoke("set_watch_auto_state", {
+        expectedSha: state.monitorSha,
+        patch,
+      });
+      renderMonitorState(res);
+      if (statusEl && doneMsg) statusEl.textContent = doneMsg;
+    } catch (err) {
+      if (statusEl) statusEl.textContent = `Lỗi: ${err}`;
+    }
+  });
 }
 
-async function probeWatch(watchId) {
+function toggleWatchRowAuto(watchId, enabled, btn) {
   const statusEl = document.getElementById("watch-status");
-  statusEl.textContent = `Đang thử ${watchId}…`;
+  return updateMonitorPrefs(
+    btn,
+    statusEl,
+    "Đang cập nhật trạng thái Auto…",
+    enabled ? "Đã bật Auto cho key theo dõi." : "Đã tắt Auto cho key theo dõi.",
+    { watchId, rowEnabled: enabled }
+  );
+}
+
+async function probeWatch(watchId, btn) {
+  const statusEl = document.getElementById("watch-status");
+  if (btn) btn.disabled = true;
+  statusEl.textContent = `Đang thử kết nối (${watchId})…`;
   try {
     const res = await tauriApi.core.invoke("probe_watch_entry", { watchId });
     renderMonitorState(res);
     statusEl.textContent = "Đã cập nhật kết quả thử.";
   } catch (err) {
     statusEl.textContent = `Lỗi: ${err}`;
+  } finally {
+    if (btn && btn.isConnected) btn.disabled = false;
   }
 }
 
-async function deleteWatch(watchId) {
+function deleteWatch(watchId, btn) {
   const statusEl = document.getElementById("watch-status");
-  try {
-    const res = await tauriApi.core.invoke("delete_watch_entry", {
-      expectedSha: state.monitorSha,
-      watchId,
-    });
-    if (state.editingWatchId === watchId) {
-      resetWatchDraft();
+  return enqueueMonitorMutation(btn, statusEl, "Đang xóa key theo dõi…", async () => {
+    try {
+      const res = await tauriApi.core.invoke("delete_watch_entry", {
+        expectedSha: state.monitorSha,
+        watchId,
+      });
+      if (state.editingWatchId === watchId) {
+        resetWatchDraft();
+      }
+      renderMonitorState(res);
+      statusEl.textContent = "Đã xóa bản ghi theo dõi.";
+    } catch (err) {
+      statusEl.textContent = `Lỗi: ${err}`;
     }
-    renderMonitorState(res);
-    statusEl.textContent = "Đã xóa bản ghi theo dõi.";
-  } catch (err) {
-    statusEl.textContent = `Lỗi: ${err}`;
-  }
+  });
 }
 
-async function deleteReserve(index) {
+function deleteReserve(index, btn) {
   const statusEl = document.getElementById("reserve-status");
-  try {
-    const res = await tauriApi.core.invoke("delete_reserve_entry", {
-      expectedSha: state.monitorSha,
-      index,
-    });
-    if (state.editingReserveIndex !== null) {
-      resetReserveDraft();
+  return enqueueMonitorMutation(btn, statusEl, "Đang xóa model dự trữ…", async () => {
+    try {
+      const res = await tauriApi.core.invoke("delete_reserve_entry", {
+        expectedSha: state.monitorSha,
+        index,
+      });
+      if (state.editingReserveIndex !== null) {
+        resetReserveDraft();
+      }
+      renderMonitorState(res);
+      statusEl.textContent = "Đã xóa model dự trữ.";
+    } catch (err) {
+      statusEl.textContent = `Lỗi: ${err}`;
     }
-    renderMonitorState(res);
-    statusEl.textContent = "Đã xóa model dự trữ.";
-  } catch (err) {
-    statusEl.textContent = `Lỗi: ${err}`;
-  }
+  });
 }
 
-async function promoteReserveToSlot(reserveIndex) {
+async function promoteReserveToSlot(reserveIndex, btn) {
   const statusEl = document.getElementById("reserve-status");
   const slotIndex = Number(document.getElementById("reserve-target-slot")?.value ?? 1);
   const allowUnaudited = Boolean(document.getElementById("reserve-allow-unaudited")?.checked);
+  if (btn) btn.disabled = true;
   statusEl.textContent = `Đang chuyển trực tiếp sang Slot #${slotIndex} (giải mã nội bộ Rust)…`;
   try {
     const out = await tauriApi.core.invoke("promote_reserve_to_slot", {
@@ -454,23 +634,32 @@ async function promoteReserveToSlot(reserveIndex) {
     await refreshAll();
   } catch (err) {
     statusEl.textContent = `Từ chối đưa vào Slot #${slotIndex}: ${err}`;
+  } finally {
+    if (btn && btn.isConnected) btn.disabled = false;
   }
 }
 
-async function copyReserveToWatch(reserveIndex) {
+function copyReserveToWatch(reserveIndex, btn) {
   const statusEl = document.getElementById("reserve-status");
-  statusEl.textContent = "Đang sao chép sang Theo dõi (bảo toàn mã hóa DPAPI)…";
-  try {
-    const summary = await tauriApi.core.invoke("copy_reserve_to_watch", {
-      expectedSha: state.monitorSha,
-      reserveIndex,
-      alias: null,
-    });
-    renderMonitorState(summary);
-    statusEl.textContent = "Đã sao chép sang bảng THEO DÕI (Auto mặc định tắt).";
-  } catch (err) {
-    statusEl.textContent = `Lỗi sao chép sang Theo dõi: ${err}`;
-  }
+  return enqueueMonitorMutation(
+    btn,
+    statusEl,
+    "Đang sao chép sang Theo dõi (bảo toàn mã hóa DPAPI)…",
+    async () => {
+      try {
+        const summary = await tauriApi.core.invoke("copy_reserve_to_watch", {
+          expectedSha: state.monitorSha,
+          reserveIndex,
+          alias: null,
+        });
+        renderMonitorState(summary);
+        statusEl.textContent =
+          "Đã sao chép sang khung THEO DÕI ở tab Tổng quan (Auto mặc định tắt).";
+      } catch (err) {
+        statusEl.textContent = `Lỗi sao chép sang Theo dõi: ${err}`;
+      }
+    }
+  );
 }
 
 function setupTabs() {
@@ -481,7 +670,7 @@ function setupTabs() {
       tabs.forEach((b) => b.setAttribute("aria-selected", String(b === btn)));
       document.getElementById("panel-overview").hidden = target !== "overview";
       document.getElementById("panel-slots").hidden = target !== "slots";
-      document.getElementById("panel-watch").hidden = target !== "watch";
+      document.getElementById("panel-reserve").hidden = target !== "reserve";
     });
   });
 
@@ -562,24 +751,78 @@ async function launchSecurityAudit(target) {
 function setupForms() {
   document.getElementById("btn-refresh").addEventListener("click", refreshAll);
 
-  document.getElementById("watch-master-auto").addEventListener("change", async (ev) => {
-    const statusEl = document.getElementById("watch-status");
-    try {
-      const res = await tauriApi.core.invoke("set_watch_auto_state", {
-        expectedSha: state.monitorSha,
-        masterEnabled: ev.target.checked,
-        watchId: null,
-        rowEnabled: null,
-      });
-      renderMonitorState(res);
-    } catch (err) {
-      statusEl.textContent = `Lỗi: ${err}`;
-    }
+  document.getElementById("pref-notify-down").addEventListener("change", (ev) => {
+    const toggle = ev.target;
+    const desired = toggle.checked;
+    updateMonitorPrefs(
+      toggle,
+      document.getElementById("watch-status"),
+      "Đang lưu cài đặt thông báo sự cố Server…",
+      desired ? "Đã bật thông báo sự cố Server." : "Đã tắt thông báo sự cố Server.",
+      { notifyOnDown: desired }
+    );
+  });
+
+  document.getElementById("pref-notify-failover").addEventListener("change", (ev) => {
+    const toggle = ev.target;
+    const desired = toggle.checked;
+    updateMonitorPrefs(
+      toggle,
+      document.getElementById("watch-status"),
+      "Đang lưu cài đặt thông báo Failover…",
+      desired ? "Đã bật thông báo chuyển mạch Failover." : "Đã tắt thông báo chuyển mạch Failover.",
+      { notifyOnFailover: desired }
+    );
+  });
+
+  document.getElementById("watch-master-auto").addEventListener("change", (ev) => {
+    const toggle = ev.target;
+    const desired = toggle.checked;
+    updateMonitorPrefs(
+      toggle,
+      document.getElementById("watch-status"),
+      "Đang lưu công tắc Auto tổng…",
+      desired ? "Đã bật Auto tổng." : "Đã tắt Auto tổng.",
+      { masterEnabled: desired }
+    );
+  });
+
+  document.getElementById("watch-auto-minutes").addEventListener("change", (ev) => {
+    const sel = ev.target;
+    const mins = Number(sel.value);
+    updateMonitorPrefs(
+      sel,
+      document.getElementById("watch-status"),
+      "Đang lưu chu kỳ Auto…",
+      `Đã đặt chu kỳ thử tự động là ${mins} phút.`,
+      { watchIntervalMinutes: mins }
+    );
+  });
+
+  const reserveQueryInput = document.getElementById("reserve-filter-query");
+  reserveQueryInput.addEventListener("input", (ev) => {
+    state.reserveQuery = ev.target.value;
+    renderReserveTable();
+  });
+
+  const reserveEndpointSelect = document.getElementById("reserve-filter-endpoint");
+  reserveEndpointSelect.addEventListener("change", (ev) => {
+    state.reserveEndpoint = ev.target.value;
+    renderReserveTable();
+  });
+
+  document.getElementById("reserve-filter-clear").addEventListener("click", () => {
+    state.reserveQuery = "";
+    state.reserveEndpoint = "";
+    reserveQueryInput.value = "";
+    reserveEndpointSelect.value = "";
+    renderReserveTable();
   });
 
   document.getElementById("slot-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const statusEl = document.getElementById("slot-status");
+    const submitBtn = ev.submitter;
     const rawKey = document.getElementById("slot-key").value.trim();
     const input = {
       slot_index: Number(document.getElementById("slot-index").value),
@@ -589,6 +832,7 @@ function setupForms() {
       allow_unaudited: document.getElementById("slot-allow-unaudited").checked,
       manual_save: false,
     };
+    if (submitBtn) submitBtn.disabled = true;
     statusEl.textContent = "Đang kiểm tra và ghi nguyên tử…";
     try {
       const out = await tauriApi.core.invoke("apply_slot", {
@@ -601,6 +845,8 @@ function setupForms() {
       await refreshAll();
     } catch (err) {
       statusEl.textContent = `Từ chối ghi: ${err}`;
+    } finally {
+      if (submitBtn && submitBtn.isConnected) submitBtn.disabled = false;
     }
   });
 
@@ -612,9 +858,10 @@ function setupForms() {
     resetReserveDraft();
   });
 
-  document.getElementById("watch-form").addEventListener("submit", async (ev) => {
+  document.getElementById("watch-form").addEventListener("submit", (ev) => {
     ev.preventDefault();
     const statusEl = document.getElementById("watch-status");
+    const submitBtn = document.getElementById("watch-submit-btn");
     const rawKey = document.getElementById("watch-key").value.trim();
     const input = {
       id: state.editingWatchId,
@@ -623,22 +870,25 @@ function setupForms() {
       api_base: document.getElementById("watch-base").value.trim(),
       api_key: rawKey || null,
     };
-    try {
-      const summary = await tauriApi.core.invoke("upsert_watch_entry", {
-        expectedSha: state.monitorSha,
-        input,
-      });
-      resetWatchDraft();
-      renderMonitorState(summary);
-      statusEl.textContent = "Đã lưu key theo dõi (mã hóa DPAPI).";
-    } catch (err) {
-      statusEl.textContent = `Lỗi: ${err}`;
-    }
+    enqueueMonitorMutation(submitBtn, statusEl, "Đang mã hóa DPAPI và lưu key theo dõi…", async () => {
+      try {
+        const summary = await tauriApi.core.invoke("upsert_watch_entry", {
+          expectedSha: state.monitorSha,
+          input,
+        });
+        resetWatchDraft();
+        renderMonitorState(summary);
+        statusEl.textContent = "Đã lưu key theo dõi (mã hóa DPAPI).";
+      } catch (err) {
+        statusEl.textContent = `Lỗi: ${err}`;
+      }
+    });
   });
 
-  document.getElementById("reserve-form").addEventListener("submit", async (ev) => {
+  document.getElementById("reserve-form").addEventListener("submit", (ev) => {
     ev.preventDefault();
     const statusEl = document.getElementById("reserve-status");
+    const submitBtn = document.getElementById("reserve-submit-btn");
     const rawKey = document.getElementById("reserve-key").value.trim();
     const input = {
       index: state.editingReserveIndex,
@@ -647,17 +897,19 @@ function setupForms() {
       api_key: rawKey || null,
       note: document.getElementById("reserve-note").value.trim(),
     };
-    try {
-      const summary = await tauriApi.core.invoke("upsert_reserve_entry", {
-        expectedSha: state.monitorSha,
-        input,
-      });
-      resetReserveDraft();
-      renderMonitorState(summary);
-      statusEl.textContent = "Đã lưu model dự trữ (mã hóa DPAPI).";
-    } catch (err) {
-      statusEl.textContent = `Lỗi: ${err}`;
-    }
+    enqueueMonitorMutation(submitBtn, statusEl, "Đang mã hóa DPAPI và lưu model dự trữ…", async () => {
+      try {
+        const summary = await tauriApi.core.invoke("upsert_reserve_entry", {
+          expectedSha: state.monitorSha,
+          input,
+        });
+        resetReserveDraft();
+        renderMonitorState(summary);
+        statusEl.textContent = "Đã lưu model dự trữ (mã hóa DPAPI).";
+      } catch (err) {
+        statusEl.textContent = `Lỗi: ${err}`;
+      }
+    });
   });
 }
 
@@ -669,6 +921,7 @@ async function setupStreaming() {
 
   if (tauriApi.event?.listen) {
     await tauriApi.event.listen("telemetry://snapshot", (ev) => renderTelemetry(ev.payload));
+    await tauriApi.event.listen("monitor://updated", (ev) => renderMonitorState(ev.payload));
     await tauriApi.event.listen("watchlist://auto-disabled", (ev) => {
       const p = ev.payload;
       setBanner(
