@@ -1,0 +1,13 @@
+{
+  "name": "openviking-memory",
+  "displayName": "OpenViking Shared Memory",
+  "version": "1.7.0",
+  "description": "Safe shared long-term memory bridge connecting Antigravity to local OpenViking (127.0.0.1:19330) with broad semantic recall and curated peer-scoped writes.",
+  "logo": "assets/logo.svg",
+  "repository": "https://github.com/sovergarden-dev/openviking-cockpit",
+  "suggestedPrompts": [
+    "Tra cứu bộ nhớ OpenViking về các quy tắc và ưu tiên dự án hiện tại",
+    "Kiểm tra tình trạng sức khỏe và số lượng vector của OpenViking",
+    "Ghi nhớ quyết định kiến trúc quan trọng vừa thống nhất vào OpenViking"
+  ]
+}
