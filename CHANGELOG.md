@@ -2,7 +2,7 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
-## [Unreleased]
+## [1.5.1] - 2026-11-18
 
 ### Changed
 - Removed the unused `list_slots` Tauri IPC command and 3 unreferenced CSS custom properties (`--space-6`, `--text-base`, `--z-banner`), added an explicit `Ẩn khay` top-bar button for minimizing to the system tray, and synchronized `docs/specs/COCKPIT_RUST_SPEC.md` with the shipped crate layout.
