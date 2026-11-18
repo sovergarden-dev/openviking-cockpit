@@ -2,7 +2,7 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
-## [Unreleased]
+## [1.5.0] - 2026-11-18
 
 ### Added
 - Added instant NFC-normalized client-side Reserve filtering in `cockpit_rs/ui/` (`#reserve-filter-query`, `#reserve-filter-endpoint`, and `#reserve-filter-clear`) preserving backend `spare_models` indices across filtered views.
