@@ -10,10 +10,11 @@ Provides:
 from __future__ import annotations
 
 import contextlib
+import ctypes
+from ctypes import wintypes
 import hashlib
 import json
 import os
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -22,60 +23,259 @@ from typing import Generator, Optional, Union
 if sys.platform == "win32":
     import msvcrt
 
+    _TOKEN_QUERY = 0x0008
+    _TOKEN_USER_CLASS = 1
+    _SDDL_REVISION_1 = 1
+    _SE_FILE_OBJECT = 1
+    _DACL_SECURITY_INFORMATION = 0x00000004
+    _PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
+    _SE_DACL_PROTECTED = 0x1000
+    _ACL_SIZE_INFORMATION_CLASS = 2
+    _ACCESS_ALLOWED_ACE_TYPE = 0
+    _FILE_ALL_ACCESS = 0x001F01FF
+
+    class _SID_AND_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD)]
+
+    class _TOKEN_USER(ctypes.Structure):
+        _fields_ = [("User", _SID_AND_ATTRIBUTES)]
+
+    class _ACL_SIZE_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("AceCount", wintypes.DWORD),
+            ("AclBytesInUse", wintypes.DWORD),
+            ("AclBytesFree", wintypes.DWORD),
+        ]
+
+    _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _k32.GetCurrentProcess.argtypes = []
+    _k32.GetCurrentProcess.restype = wintypes.HANDLE
+    _k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _k32.CloseHandle.restype = wintypes.BOOL
+    _k32.LocalFree.argtypes = [wintypes.HLOCAL]
+    _k32.LocalFree.restype = wintypes.HLOCAL
+
+    _adv32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    _adv32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    _adv32.OpenProcessToken.restype = wintypes.BOOL
+    _adv32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _adv32.GetTokenInformation.restype = wintypes.BOOL
+    _adv32.ConvertSidToStringSidW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    _adv32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    _adv32.ConvertStringSidToSidW.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    _adv32.ConvertStringSidToSidW.restype = wintypes.BOOL
+    _adv32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.ULONG),
+    ]
+    _adv32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    _adv32.GetSecurityDescriptorDacl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    _adv32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    _adv32.SetNamedSecurityInfoW.argtypes = [
+        wintypes.LPWSTR,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    _adv32.SetNamedSecurityInfoW.restype = wintypes.DWORD
+    _adv32.GetNamedSecurityInfoW.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    _adv32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    _adv32.GetSecurityDescriptorControl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _adv32.GetSecurityDescriptorControl.restype = wintypes.BOOL
+    _adv32.GetAclInformation.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_int,
+    ]
+    _adv32.GetAclInformation.restype = wintypes.BOOL
+    _adv32.GetAce.argtypes = [
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    _adv32.GetAce.restype = wintypes.BOOL
+    _adv32.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _adv32.EqualSid.restype = wintypes.BOOL
+
+    def _current_user_sid_string() -> Optional[str]:
+        token = wintypes.HANDLE()
+        if not _adv32.OpenProcessToken(_k32.GetCurrentProcess(), _TOKEN_QUERY, ctypes.byref(token)):
+            return None
+        try:
+            needed = wintypes.DWORD(0)
+            _adv32.GetTokenInformation(token, _TOKEN_USER_CLASS, None, 0, ctypes.byref(needed))
+            if needed.value == 0:
+                return None
+            qwords = (needed.value + 7) // 8
+            buf = (ctypes.c_uint64 * qwords)()
+            if not _adv32.GetTokenInformation(
+                token, _TOKEN_USER_CLASS, buf, needed.value, ctypes.byref(needed)
+            ):
+                return None
+            tu = ctypes.cast(buf, ctypes.POINTER(_TOKEN_USER)).contents
+            sid_ptr = ctypes.c_void_p()
+            if not _adv32.ConvertSidToStringSidW(tu.User.Sid, ctypes.byref(sid_ptr)):
+                return None
+            try:
+                return ctypes.wstring_at(sid_ptr.value)
+            finally:
+                _k32.LocalFree(sid_ptr.value)
+        finally:
+            _k32.CloseHandle(token)
+
+
 def apply_restricted_file_acl(target_path: Union[str, Path]) -> bool:
-    """Explicitly set non-inherited ACL on target file: SYSTEM(F), Administrators(F), CurrentUser(F).
-    
-    Removes any inherited or broad grants (e.g. CodexSandboxUsers).
-    """
+    """Explicitly set non-inherited ACL on target file: SYSTEM(F), Administrators(F), CurrentUser(F)."""
     if sys.platform != "win32":
         return True
-    script = r"""
-$ErrorActionPreference = 'Stop'
-$p = ConvertFrom-Json ([Console]::In.ReadToEnd())
-$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$sddl = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;$sid)"
-$section = [System.Security.AccessControl.AccessControlSections]::Access
-$isDir = (Get-Item -LiteralPath $p -Force).PSIsContainer
-$acl = if ($isDir) {
-    New-Object System.Security.AccessControl.DirectorySecurity
-} else {
-    New-Object System.Security.AccessControl.FileSecurity
-}
-$acl.SetSecurityDescriptorSddlForm($sddl, $section)
-if ($isDir) {
-    [System.IO.Directory]::SetAccessControl($p, $acl)
-} else {
-    [System.IO.File]::SetAccessControl($p, $acl)
-}
-$readBack = Get-Acl -LiteralPath $p
-if (-not $readBack.AreAccessRulesProtected) { throw 'ACL inheritance not protected' }
-$allowed = @('S-1-5-18', 'S-1-5-32-544', $sid) | Select-Object -Unique
-$seen = @()
-foreach ($rule in $readBack.Access) {
-    if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) {
-        throw 'Unexpected non-Allow ACE'
-    }
-    $ruleSid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
-    if ($allowed -notcontains $ruleSid) {
-        throw "Unexpected principal SID: $ruleSid"
-    }
-    $fc = [System.Security.AccessControl.FileSystemRights]::FullControl
-    if (($rule.FileSystemRights -band $fc) -ne $fc) {
-        throw 'Missing FullControl right'
-    }
-    $seen += $ruleSid
-}
-foreach ($reqSid in $allowed) {
-    if ($seen -notcontains $reqSid) { throw "Missing required SID: $reqSid" }
-}
-"""
     try:
-        res = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-            input=json.dumps(str(Path(target_path).absolute())), capture_output=True,
-            text=True, check=False, timeout=15.0, creationflags=subprocess.CREATE_NO_WINDOW)
-        return res.returncode == 0
-    except (OSError, subprocess.SubprocessError):
+        resolved_str = str(Path(target_path).absolute())
+        if not os.path.exists(resolved_str):
+            return False
+        user_sid = _current_user_sid_string()
+        if not user_sid:
+            return False
+
+        sddl = f"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{user_sid})"
+        sec_desc = ctypes.c_void_p()
+        if not _adv32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl, _SDDL_REVISION_1, ctypes.byref(sec_desc), None
+        ):
+            return False
+        try:
+            present = wintypes.BOOL(0)
+            dacl_ptr = ctypes.c_void_p()
+            defaulted = wintypes.BOOL(0)
+            if not _adv32.GetSecurityDescriptorDacl(
+                sec_desc, ctypes.byref(present), ctypes.byref(dacl_ptr), ctypes.byref(defaulted)
+            ) or not present.value:
+                return False
+            rc = _adv32.SetNamedSecurityInfoW(
+                resolved_str,
+                _SE_FILE_OBJECT,
+                _DACL_SECURITY_INFORMATION | _PROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                dacl_ptr,
+                None,
+            )
+            if rc != 0:
+                return False
+        finally:
+            _k32.LocalFree(sec_desc.value)
+
+        read_dacl = ctypes.c_void_p()
+        read_sd = ctypes.c_void_p()
+        rc_get = _adv32.GetNamedSecurityInfoW(
+            resolved_str,
+            _SE_FILE_OBJECT,
+            _DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            ctypes.byref(read_dacl),
+            None,
+            ctypes.byref(read_sd),
+        )
+        if rc_get != 0 or not read_sd.value or not read_dacl.value:
+            if read_sd.value:
+                _k32.LocalFree(read_sd.value)
+            return False
+
+        expected_sids: list[ctypes.c_void_p] = []
+        try:
+            ctrl = wintypes.WORD(0)
+            rev = wintypes.DWORD(0)
+            if not _adv32.GetSecurityDescriptorControl(
+                read_sd, ctypes.byref(ctrl), ctypes.byref(rev)
+            ):
+                return False
+            if (ctrl.value & _SE_DACL_PROTECTED) == 0:
+                return False
+
+            for sid_str in dict.fromkeys(("S-1-5-18", "S-1-5-32-544", user_sid)):
+                psid = ctypes.c_void_p()
+                if not _adv32.ConvertStringSidToSidW(sid_str, ctypes.byref(psid)):
+                    return False
+                expected_sids.append(psid)
+
+            info = _ACL_SIZE_INFORMATION()
+            if not _adv32.GetAclInformation(
+                read_dacl,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
+                _ACL_SIZE_INFORMATION_CLASS,
+            ):
+                return False
+            if info.AceCount == 0:
+                return False
+
+            matched = [False] * len(expected_sids)
+            for idx in range(info.AceCount):
+                ace_ptr = ctypes.c_void_p()
+                if not _adv32.GetAce(read_dacl, idx, ctypes.byref(ace_ptr)) or not ace_ptr.value:
+                    return False
+                addr = ace_ptr.value
+                ace_type = ctypes.c_ubyte.from_address(addr).value
+                ace_mask = wintypes.DWORD.from_address(addr + 4).value
+                ace_sid = ctypes.c_void_p(addr + 8)
+                if ace_type != _ACCESS_ALLOWED_ACE_TYPE:
+                    return False
+                if (ace_mask & _FILE_ALL_ACCESS) != _FILE_ALL_ACCESS:
+                    return False
+                hit = False
+                for e_idx, exp_sid in enumerate(expected_sids):
+                    if _adv32.EqualSid(ace_sid, exp_sid):
+                        matched[e_idx] = True
+                        hit = True
+                if not hit:
+                    return False
+            return all(matched)
+        finally:
+            for psid in expected_sids:
+                if psid.value:
+                    _k32.LocalFree(psid.value)
+            _k32.LocalFree(read_sd.value)
+    except OSError:
         return False
 
 
