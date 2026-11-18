@@ -28,6 +28,7 @@ class TestBackupRetention(unittest.TestCase):
     def test_protected_patterns(self):
         """Protected patterns must match key archives and never be candidate for pruning."""
         protected_names = [
+            "pre-0.5.5-20261118-030029",
             "cleanup-mem-ticks-20261026-004827",
             "OpenViking-Autostart-20260926-130755.xml",
             "ov.conf-CONTAMINATED-20261026-165527.json.bak",
@@ -129,6 +130,40 @@ class TestBackupRetention(unittest.TestCase):
         self.assertTrue((batch / "snap-0.json").is_file())
         self.assertTrue((batch / "snap-1.json").is_file())
         self.assertTrue((batch / "quarantine-manifest.json").is_file())
+
+    def test_monitor_state_sha_dirs_pruned_and_quarantined_preserving_subdirs(self):
+        import time
+        now = time.time()
+        mon_root = self.root / "monitor-state"
+        mon_root.mkdir()
+        for i in range(5):
+            sha_name = f"{i:064x}"
+            d = mon_root / sha_name
+            d.mkdir()
+            (d / "monitor.json").write_text(f'{{"rev": {i}}}', encoding="utf-8")
+            os.utime(d, (now - (5 - i) * 60, now - (5 - i) * 60))
+
+        pre_dir = self.root / "pre-0.5.5-20261118-030029"
+        pre_dir.mkdir()
+        (pre_dir / "ov.conf").write_text("{}", encoding="utf-8")
+
+        plan = scan_backups(self.root, keep_recent=10, keep_monitor_state=3)
+        self.assertIn("pre-0.5.5-20261118-030029", plan["kept"])
+        self.assertEqual(plan["monitor_state_kept_count"], 3)
+        self.assertEqual(plan["candidates_count"], 2)
+        cand_names = [c["name"] for c in plan["candidates"]]
+        self.assertEqual(
+            sorted(cand_names),
+            [f"monitor-state/{0:064x}", f"monitor-state/{1:064x}"],
+        )
+
+        receipt = apply_quarantine(self.root, cand_names)
+        self.assertEqual(receipt["moved_count"], 2)
+        self.assertFalse((mon_root / f"{0:064x}").exists())
+        self.assertTrue((mon_root / f"{4:064x}").is_dir())
+        batches = list((self.root / "quarantine").glob("batch-*"))
+        self.assertEqual(len(batches), 1)
+        self.assertTrue((batches[0] / "monitor-state" / f"{0:064x}" / "monitor.json").is_file())
 
 if __name__ == "__main__":
     unittest.main()

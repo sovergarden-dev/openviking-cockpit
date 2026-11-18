@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  windows-verify:
+    name: Rust Cockpit & Python Core Verification (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry & target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            cockpit_rs -> cockpit_rs/target
+            cockpit_rs/src-tauri -> cockpit_rs/src-tauri/target
+
+      - name: Check Rust formatting
+        run: |
+          cargo fmt --manifest-path cockpit_rs/Cargo.toml -- --check
+          cargo fmt --manifest-path cockpit_rs/src-tauri/Cargo.toml -- --check
+
+      - name: Run Clippy (-D warnings)
+        run: |
+          cargo clippy --manifest-path cockpit_rs/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path cockpit_rs/src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Run Rust unit & contract tests
+        run: cargo test --manifest-path cockpit_rs/Cargo.toml
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run isolated Python core & security suites
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = ""
+          $suites = @(
+            "monitor/tests/test_reference_core_v31.py",
+            "monitor/tests/test_provider_security_auditor.py",
+            "monitor/tests/test_conf_target_gate.py",
+            "monitor/tests/test_secret_store.py",
+            "monitor/tests/test_safe_write.py",
+            "monitor/tests/test_writeback_invariants.py",
+            "scripts/tests/test_backup_retention.py",
+            "scripts/tests/test_deploy_safety.py"
+          )
+          foreach ($s in $suites) {
+            python -X utf8 monitor/tests/suite_bootstrap.py $s
+            if ($LASTEXITCODE -ne 0) { throw "Python suite failed: $s" }
+          }

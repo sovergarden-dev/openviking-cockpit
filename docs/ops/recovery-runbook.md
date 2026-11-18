@@ -106,11 +106,11 @@ Dry-run by default; non-destructively moves expired snapshots into `backups/quar
 
 ```powershell
 $env:PYTHONPATH = ""
-& "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe" scripts/backup_retention.py --keep-recent 10
+& "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe" scripts/backup_retention.py --keep-recent 10 --keep-monitor-state 30
 ```
 
-- **Prunable categories:** Only top-level `ov.conf-before-*` and `monitor-sync-*` items beyond `--keep-recent` are eligible.
-- **Never pruned automatically:** Items whose filename matches any substring in `PERMANENTLY_PROTECTED_PATTERNS` (`cleanup-mem-`, `OpenViking-Autostart-`, `CONTAMINATED`, `.REJECTED`, `live_safe_memories_`, `mem-phase`, `monitor-json-recovery`, `quarantine`) and uncategorized items such as `monitor-state/` (`other`) are always kept.
+- **Prunable categories:** Top-level `ov.conf-before-*` and `monitor-sync-*` items beyond `--keep-recent`, plus `monitor-state/<64-hex>` snapshot directories beyond `--keep-monitor-state` (matching `MAX_MONITOR_STATE_BACKUPS = 30` in `cockpit_rs`).
+- **Never pruned automatically:** Items whose filename matches any substring in `PERMANENTLY_PROTECTED_PATTERNS` (`pre-`, `cleanup-mem-`, `OpenViking-Autostart-`, `CONTAMINATED`, `.REJECTED`, `live_safe_memories_`, `mem-phase`, `monitor-json-recovery`, `quarantine`) and uncategorized top-level items (`other`) are always kept.
 
 ---
 

@@ -20,6 +20,7 @@ Files:
 |---|---|
 | `start-openviking-hidden.vbs` | Window-style-0 launcher invoked by the task |
 | `start-openviking-hidden.cmd` | Authoritative watchdog (windowless-safe waits + `OLLAMA_KEEP_ALIVE=30m`) |
+| `ov_stale_lock_clean.py` | Pre-launch PID/cmdline guard removing stale `data-qwen06b/.openviking.pid` locks |
 | `ov_lifecycle.py` | Sanitized one-run child wrapper recording PID, hex exit code, and monotonic uptime to `logs/lifecycle.jsonl` |
 | `start-openviking.cmd` | Legacy visible-console watchdog; not referenced by the task |
 | `backups/task-xml/` | Pre-change task XML and legacy cmd snapshot |
