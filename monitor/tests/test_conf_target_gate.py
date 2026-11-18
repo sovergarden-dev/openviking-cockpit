@@ -129,8 +129,7 @@ else:
     raise AssertionError("un-audited failover must raise AuditRequired")
 print("PASS un-audited failover rejected with AuditRequired (secret-free)")
 
-# 7. Replacing a broken failover slot: the old backup identity is grandfathered
-#    but the replacement still needs its own report (the dead-lock this fixes).
+# 7. Replacing a broken failover slot grandfathers the old backup identity while requiring a report for the replacement.
 fresh()
 REPORTS[(poor[1], poor[0], poor[2])] = verdict(3, False, why="FAILED_QUALITY")
 broken = ("qwen/qwen3.8-omni-flash:free", "https://api.xkiro.com/v1", "key-qwen")

@@ -1272,8 +1272,7 @@ def _save_report(report: Dict[str, Any], *, api_key=None, deadline=None, stop_ev
                     os.fsync(stream.fileno())
             os.replace(temp_path, report_file)
             temp_path = None
-            # Cancellation may arrive during replace. Keep the file untrusted and
-            # avoid publishing a stale success in that case.
+            # Cancellation may arrive during replace; keep the file untrusted and avoid publishing a stale success.
             if _recheck_publication(report, deadline, stop_event):
                 raise RuntimeError("publication interrupted")
             report["saved_report_file"] = str(report_file)

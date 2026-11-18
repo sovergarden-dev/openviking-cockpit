@@ -4,26 +4,21 @@
   "notify_on_failover": true,
   "always_on_top": false,
   "geometry": "1020x640",
+  "watch_auto_enabled": false,
+  "watch_auto_minutes": 10,
+  "watch_keys": [],
+  "spare_models": [
+    {
+      "model": "deepseek/deepseek-v4.1-flash",
+      "api_base": "https://backup.example.com/v1",
+      "api_key": "${BACKUP_VLM_API_KEY}",
+      "note": "Example reserve model"
+    }
+  ],
   "last_toast_down": 0.0,
   "last_toast_failover": 0.0,
   "probe": {},
   "model_lists": {},
-  "auto_probe_enabled": false,
-  "auto_probe_minutes": 10,
-  "spare_models": [
-    {
-      "model": "deepseek/deepseek-v4.1-flash",
-      "api_base": "https://api.devora.my.id/v1",
-      "api_key": "sk-placeholder-spare-key-1",
-      "note": "Example reserve model"
-    },
-    {
-      "model": "qwen/qwen3.8-omni-flash:free",
-      "api_base": "https://api.xkiro.com/v1",
-      "api_key": "sk-placeholder-spare-key-2",
-      "note": "Free tier test"
-    }
-  ],
   "reserve_layout": {},
   "reserve_split": 320,
   "geometry_autofit": true,

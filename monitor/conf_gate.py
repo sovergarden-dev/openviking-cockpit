@@ -173,8 +173,7 @@ def classify_conf_targets(before: dict, after: dict) -> dict:
             admitted.append({"slot": index, "model": model, "api_base": base})
             continue
 
-        # 2. Resolve the key before audit. Never treat DPAPI ciphertext or unresolved
-        # environment references as provider credentials.
+        # 2. Resolve the key before audit; never treat DPAPI ciphertext or unresolved env refs as provider credentials.
         api_key = _resolved_key(item.get("api_key"))
         if not api_key:
             blocked.append({
@@ -186,8 +185,7 @@ def classify_conf_targets(before: dict, after: dict) -> dict:
             })
             continue
 
-        # 3. Audit report query under a finite age sentinel.
-        # so slot-specific TTL policy is applied here, not hidden in the auditor default.
+        # 3. Query audit report with a finite age sentinel so slot-specific TTL policy applies here, not in the auditor default.
         report = None
         try:
             from provider_security_auditor import get_latest_audit_report

@@ -6,13 +6,9 @@ from datetime import datetime
 
 class ReserveTable(tk.Frame):
     columns = ('model', 'endpoint', 'status', 'ms', 'at', 'note')
-    # 'status' chỉ mang LÝ DO lỗi (trạng thái), 'ms' mang con số độ trễ thuần.
-    # Trước đây cột status nhét luôn "1568 ms" khi OK nên lặp đúng cột ms — đã tách.
+    # 'status' holds error/verdict state only while 'ms' holds pure latency so the two columns never repeat.
     titles = ('Model', 'Endpoint', 'Trạng thái', 'Độ trễ (ms)', 'Lần thử', 'Ghi chú')
-    # Only this column may absorb leftover width; the rest keep the width the
-    # autofit computed, so no cell is ever squeezed and a manual drag is
-    # detectable (a stretched column changes width without a drag).
-    # A real drag moves a column by much more than this tolerance.
+    # Only stretch_columns absorb leftover width; others keep autofit width so manual column drags remain detectable.
     drag_tolerance_px = 12
     stretch_columns = ('model',)
 
@@ -31,12 +27,7 @@ class ReserveTable(tk.Frame):
         bar = ttk.Frame(self)
         bar.pack(fill='x', pady=(0, 6))
         self.optional = tk.BooleanVar(value=self.preferences.get('show_note', False))
-        # Grid, not place: the row is laid out by Tk itself, so it is visible
-        # immediately and never depends on a <Configure> callback arriving
-        # (that dependence once left the whole row invisible on Tk 8.6).
-        # Ô Tìm có weight nhưng bị chặn trần nên không nuốt hàng lọc;
-        # trước đây nó kéo dài chiếm phần lớn bề ngang rồi đẩy 4 control
-        # lọc dốn sang góc phải, tạo khoảng chết trống lớn giữa bảng.
+        # Tk grid lays out immediately without waiting for <Configure> (Tk 8.6 visibility bug), with column 1 capped from swallowing filters.
         bar.columnconfigure(1, weight=1, minsize=140)
         bar.columnconfigure(2, weight=0, minsize=0)
         ttk.Label(bar, text='Tìm:').grid(row=0, column=0, sticky='w', padx=(0, 6), pady=3)
@@ -182,8 +173,7 @@ class ReserveTable(tk.Frame):
             at = probe.get('at', '')
             if isinstance(at, (float, int)):
                 at = datetime.fromtimestamp(at).strftime('%d/%m %H:%M')
-            # Tách trạng thái khỏi độ trễ: cột status chỉ giữ lý do lỗi/kết quả,
-            # cột ms mang con số thuần nên hai cột không lặp nội dung nhau.
+            # Keep status separate from latency so the status and ms columns never duplicate content.
             if not probe:
                 status_cell = 'Chưa thử'
                 tone_tag = 'status_untested'
@@ -258,8 +248,7 @@ class ReserveTable(tk.Frame):
                 if idx < len(vals):
                     need = max(need, fnt.measure(str(vals[idx])))
             want = max(self.floors[col], min(self.caps[col], need + 18))
-            # Cột giãn được phép nới rộng nhưng KHÔNG được co lại dưới cỡ nội dung,
-            # nếu không Tk sẽ bóp nó khi cửa sổ hẹp và chữ bị cắt.
+            # Stretch columns may grow above content width, never shrink below it, preventing narrow-window text clipping.
             floor = want if col in self.stretch_columns else max(self.floors[col], min(self.caps[col], hfnt.measure(self.titles[idx]) + 14))
             self.tree.column(col, width=want, minwidth=floor)
             self._auto_widths[col] = want
