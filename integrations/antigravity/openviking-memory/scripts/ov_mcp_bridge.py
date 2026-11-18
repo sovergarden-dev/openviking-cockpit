@@ -19,7 +19,7 @@ import urllib.request
 from io import TextIOWrapper
 
 SERVER_NAME = "openviking-memory"
-SERVER_VERSION = "1.7.0"
+SERVER_VERSION = "1.7.1"
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", "2024-11-05"}
 DEFAULT_PROTOCOL_VERSION = "2025-03-26"
 MAX_READ_CHARS = 32_000

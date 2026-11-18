@@ -2,6 +2,19 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
+## [1.7.1] - 2026-11-18
+
+### Changed
+- Removed the unreferenced `TelemetryClient::fetch_snapshot` wrapper in `cockpit_rs/src/services/telemetry.rs` and consolidated request authentication header attachment (`X-API-Key` and `Bearer`) into `TelemetryClient::attach_auth`.
+
+### Fixed
+- Extended `ServiceAction::Start` in `cockpit_rs/src/services/service_control.rs` to clear hung socket-dead `openviking-server` / `ov_lifecycle.py` processes and stale `data-*/.openviking.lock` files whenever TCP port `19330` has no active listener (`WinError 64` socket-hang self-healing on `Chạy Server`).
+- Added monotonic request sequence guards (`memoryOverviewSeq`, `searchRequestSeq`, `previewRequestSeq`) across `refreshMemoryOverview`, `search_memories`, `openMemoryContentPreview`, and `#btn-close-memory-preview` in `cockpit_rs/ui/src/main.js` so out-of-order async IPC completions cannot overwrite newer results or reopen a closed preview card.
+
+### Security
+- Wired `server.root_api_key` resolution from `ov.conf` (`resolve_server_root_api_key` supporting `${ENV_VAR}` placeholders) into `CockpitState` initialization, `(mtime, size)` poll-cache reloads (`TelemetryClient::set_api_key`), and `scripts/ov_storage_hygiene.py` (`resolve_ov_api_key`).
+- Added loopback-only URL boundary validation (`validate_ov_base_url` enforcing `127.0.0.1`, `localhost`, or `::1` unless `OPENVIKING_ALLOW_REMOTE=1`, with credential/query/fragment rejection) at the entry of `apply_hygiene_plan` in `scripts/ov_storage_hygiene.py` before any filesystem mutation.
+
 ## [1.7.0] - 2026-11-18
 
 ### Added
