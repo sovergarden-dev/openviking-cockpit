@@ -13,7 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::conf_gate::{display_clean_path, CachedAuditVerdict};
 use crate::config::safe_write::sha256_hex;
-use crate::services::auditor::{probe_tier, AuditReportDocument};
+use crate::services::auditor::{
+    evaluate_v31_decision, probe_tier, AuditReportDocument, ProbeRow, SecurityLatch,
+};
 
 pub const CLASSIFIER_VERSION: &str = "3.1.0";
 pub const PROBE_VERSION: &str = "synthetic-probes-2";
@@ -205,9 +207,30 @@ pub fn load_cached_audit_verdict(
     }
 
     let verdict = obj.get("verdict")?.as_object()?;
+    let mut rows: Vec<ProbeRow> = serde_json::from_value(obj.get("results")?.clone()).ok()?;
+    if rows.is_empty() {
+        return None;
+    }
+    for r in &mut rows {
+        if let Some(t) = probe_tier(&r.id) {
+            r.tier = t;
+        }
+    }
+    let expected = evaluate_v31_decision(&rows, &mut SecurityLatch::default());
     let level = verdict.get("verdict_level")?.as_u64()? as u8;
     let memory_permitted = verdict.get("memory_permitted")?.as_bool()?;
     let safety_stop = verdict.get("safety_stop")?.as_bool()?;
+    if level != expected.level
+        || memory_permitted != expected.memory_allowed
+        || safety_stop != expected.safety_stop
+    {
+        return None;
+    }
+    if let Some(reason) = verdict.get("v31_decision_reason").and_then(|v| v.as_str()) {
+        if reason != expected.reason.as_str() {
+            return None;
+        }
+    }
     let raw_why = verdict.get("why").and_then(|v| v.as_str()).unwrap_or("");
     let why = presentation_sanitize_text(raw_why, Some(api_key));
 
@@ -242,6 +265,9 @@ pub fn load_cached_audit_document(
     }
 
     let mut doc: AuditReportDocument = serde_json::from_slice(&buf).ok()?;
+    if doc.results.is_empty() {
+        return None;
+    }
     if doc.cache_scope.as_ref()? != &expected_scope {
         return None;
     }
@@ -263,11 +289,6 @@ pub fn load_cached_audit_document(
         return None;
     }
 
-    for v in doc.verdict.values_mut() {
-        if let Value::String(s) = v {
-            *s = presentation_sanitize_text(s, Some(api_key));
-        }
-    }
     for row in &mut doc.results {
         if row.name.is_empty() {
             row.name = row.id.clone();
@@ -279,6 +300,32 @@ pub fn load_cached_audit_document(
         row.evidence = presentation_sanitize_text(&row.evidence, Some(api_key));
         for f in &mut row.findings {
             *f = presentation_sanitize_text(f, Some(api_key));
+        }
+    }
+
+    let expected = evaluate_v31_decision(&doc.results, &mut SecurityLatch::default());
+    let level = doc.verdict.get("verdict_level")?.as_u64()? as u8;
+    let memory_permitted = doc.verdict.get("memory_permitted")?.as_bool()?;
+    let safety_stop = doc.verdict.get("safety_stop")?.as_bool()?;
+    if level != expected.level
+        || memory_permitted != expected.memory_allowed
+        || safety_stop != expected.safety_stop
+    {
+        return None;
+    }
+    if let Some(reason) = doc
+        .verdict
+        .get("v31_decision_reason")
+        .and_then(|v| v.as_str())
+    {
+        if reason != expected.reason.as_str() {
+            return None;
+        }
+    }
+
+    for v in doc.verdict.values_mut() {
+        if let Value::String(s) = v {
+            *s = presentation_sanitize_text(s, Some(api_key));
         }
     }
 
@@ -336,11 +383,20 @@ mod tests {
             "epoch_ts": now - 60.0,
             "verdict": {
                 "verdict_level": 5,
+                "v31_decision_reason": "VERIFIED_FAST",
                 "memory_permitted": true,
                 "safety_stop": false,
                 "why": "Tier 0 clean"
             },
-            "results": [{"id": "transport_routing", "status": "PASS"}]
+            "results": [
+                {"id": "transport_routing", "status": "PASS"},
+                {"id": "ansi_control_hygiene", "status": "PASS"},
+                {"id": "tool_call_hijack", "status": "PASS"},
+                {"id": "canary_isolation", "status": "PASS"},
+                {"id": "strict_json_vlm", "status": "PASS"},
+                {"id": "prompt_boundary", "status": "PASS"},
+                {"id": "operational_latency", "status": "PASS", "latency_ms": 420.0}
+            ]
         });
         let path = dir.path().join(format!("audit_{}.json", scope_id));
         fs::write(&path, serde_json::to_vec(&report).unwrap()).expect("write report");
@@ -358,12 +414,19 @@ mod tests {
             full_doc.verdict.get("from_cache").and_then(|v| v.as_bool()),
             Some(true)
         );
-        assert_eq!(full_doc.results.len(), 1);
+        assert_eq!(full_doc.results.len(), 7);
         assert_eq!(full_doc.results[0].id, "transport_routing");
 
         // Wrong API key must miss cache
         assert!(
             load_cached_audit_verdict(dir.path(), base, model, "DIFFERENT_KEY", 86_400.0).is_none()
         );
+
+        // Forged verdict_level inconsistent with incomplete/failed results must be rejected
+        let mut tampered = report.clone();
+        tampered["results"] = json!([{"id": "transport_routing", "status": "PASS"}]);
+        fs::write(&path, serde_json::to_vec(&tampered).unwrap()).expect("write tampered report");
+        assert!(load_cached_audit_verdict(dir.path(), base, model, key, 86_400.0).is_none());
+        assert!(load_cached_audit_document(dir.path(), base, model, key, 86_400.0).is_none());
     }
 }

@@ -13,7 +13,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::conf_gate::AUDIT_TTL_FAILOVER_S;
 use crate::config::safe_write::{
-    apply_restricted_file_acl, safe_atomic_write_text_with_live_policy, sha256_hex, SafeWriteError,
+    apply_restricted_file_acl, safe_atomic_write_text_with_live_policy, sha256_hex,
+    write_restricted_bytes_atomic, SafeWriteError,
 };
 use crate::secrets::secret_store::{dpapi_protect, resolve_secret, SecretStatus};
 use crate::services::auditor_cache::load_cached_audit_verdict;
@@ -517,7 +518,8 @@ pub fn save_monitor_state_with_live_policy(
     validate_watch_records_with_cap(&state.watch_keys, effective_cap)?;
 
     let prev_sha = if path.exists() {
-        let cur = sha256_hex(&fs::read(path)?);
+        let prev_bytes = fs::read(path)?;
+        let cur = sha256_hex(&prev_bytes);
         if cur != expected_sha {
             return Err(WatchError::RevisionConflict {
                 expected: expected_sha.to_string(),
@@ -528,9 +530,9 @@ pub fn save_monitor_state_with_live_policy(
         let state_bak_dir = state_row_root.join(&cur);
         if !state_bak_dir.exists() {
             fs::create_dir_all(&state_bak_dir)?;
+            apply_restricted_file_acl(&state_bak_dir)?;
             let bak_file = state_bak_dir.join("monitor.json");
-            fs::copy(path, &bak_file)?;
-            apply_restricted_file_acl(&bak_file)?;
+            write_restricted_bytes_atomic(&bak_file, &prev_bytes)?;
         }
         prune_monitor_state_backups(&state_row_root, MAX_MONITOR_STATE_BACKUPS);
         Some(expected_sha)

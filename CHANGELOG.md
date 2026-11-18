@@ -4,8 +4,16 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 
 ## [Unreleased]
 
+### Changed
+- Unified legacy backup ACL inspection in `scripts/retrofit_ov_conf_backup_acl.py` onto `monitor/safe_write.py` `inspect_file_acl()` (accepting Rust `OW` Owner Rights ACEs alongside `SY`/`BA`/CurrentUser without spawning `powershell.exe`), added `test_retrofit_ov_conf_backup_acl.py` to `.github/workflows/ci.yml`, and opted GitHub Actions JavaScript steps into Node 24 (`FORCE_JAVASCRIPT_ACTIONS_TO_NODE24`).
+
 ### Fixed
 - Replaced the `powershell.exe` subprocess inside `monitor/safe_write.py` `apply_restricted_file_acl()` with direct 64-bit Win32 `advapi32` FFI (`SetNamedSecurityInfoW`, `GetNamedSecurityInfoW`, `GetSecurityDescriptorControl`, and `EqualSid`), eliminating PowerShell module-autoload failures under isolated `USERPROFILE` test sandboxes on `windows-latest` CI runners and speeding up ACL-verified writes by ~50x.
+- Populated `cached_audit_level` on `ApplySlotOutcome.slots` returned directly by `apply_slot_update_with_live_policy` in `cockpit_rs/src/config/conf_gate.rs`.
+
+### Security
+- Made `safe_atomic_write_text()` in `monitor/safe_write.py` fail closed (`PermissionError`) when `apply_restricted_file_acl()` returns `False`, and routed `ov.conf-before-*` and `backups/monitor-state/<sha256>/monitor.json` snapshot creation in `cockpit_rs` through `write_restricted_bytes_atomic()` so restrictive Windows DACLs are applied on an empty staging file before any sensitive bytes touch disk.
+- Enforced Taxonomy V3.1 decision-projection verification (`evaluate_v31_decision`) inside `load_cached_audit_verdict()` and `load_cached_audit_document()` in `cockpit_rs/src/services/auditor_cache.rs`, rejecting cached `audit_<scope_id>.json` files whose stored `verdict` fields disagree with `results`.
 
 ## [1.6.0] - 2026-11-18
 

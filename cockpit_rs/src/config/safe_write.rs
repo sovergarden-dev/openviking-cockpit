@@ -548,6 +548,111 @@ pub(crate) fn safe_atomic_write_text_internal(
     Ok(actual_sha)
 }
 
+/// Writes `raw_bytes` to `dest_path` by restricting DACLs on an empty staging file BEFORE writing sensitive bytes,
+/// fsyncing, verifying SHA-256 readback, and atomically moving into place (`COCKPIT_RUST_SPEC` §4.2).
+pub fn write_restricted_bytes_atomic(
+    dest_path: &Path,
+    raw_bytes: &[u8],
+) -> Result<String, SafeWriteError> {
+    let parent = dest_path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let expected_sha = sha256_hex(raw_bytes);
+
+    let temp_name = format!(
+        ".{}.tmp.{}",
+        dest_path
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let temp_path = parent.join(temp_name);
+
+    struct TempCleanup<'a>(&'a Path, bool);
+    impl<'a> Drop for TempCleanup<'a> {
+        fn drop(&mut self) {
+            if self.1 {
+                let _ = fs::remove_file(self.0);
+            }
+        }
+    }
+
+    let mut temp_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)?;
+    let mut temp_guard = TempCleanup(&temp_path, true);
+
+    apply_restricted_file_acl(&temp_path)?;
+
+    temp_file.write_all(raw_bytes)?;
+    temp_file.flush()?;
+    temp_file.sync_all()?;
+    drop(temp_file);
+
+    let temp_sha = sha256_hex(&fs::read(&temp_path)?);
+    if temp_sha != expected_sha {
+        return Err(SafeWriteError::IntegrityMismatch {
+            file: dest_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            expected: expected_sha,
+            actual: temp_sha,
+        });
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::GetLastError;
+        use windows_sys::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+
+        let wide_from: Vec<u16> = temp_path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let wide_to: Vec<u16> = dest_path.as_os_str().encode_wide().chain(Some(0)).collect();
+
+        unsafe {
+            let ok = MoveFileExW(
+                wide_from.as_ptr(),
+                wide_to.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            );
+            if ok == 0 {
+                let err = GetLastError();
+                return Err(SafeWriteError::Io(io::Error::from_raw_os_error(err as i32)));
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        fs::rename(&temp_path, dest_path)?;
+    }
+
+    temp_guard.1 = false;
+
+    let actual_sha = sha256_hex(&fs::read(dest_path)?);
+    if actual_sha != expected_sha {
+        return Err(SafeWriteError::IntegrityMismatch {
+            file: dest_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            expected: expected_sha,
+            actual: actual_sha,
+        });
+    }
+
+    apply_restricted_file_acl(dest_path)?;
+    Ok(actual_sha)
+}
+
 /// Serializes and atomically writes JSON data.
 pub fn safe_atomic_write_json<T: serde::Serialize>(
     dest_path: &Path,
@@ -680,5 +785,15 @@ mod tests {
         // After drop, should succeed
         let lock3 = acquire_file_lock(&lock_path, Duration::from_millis(50)).expect("acquire 3");
         drop(lock3);
+    }
+
+    #[test]
+    fn test_write_restricted_bytes_atomic_roundtrip() {
+        let dir = tempdir().expect("create tempdir");
+        let dest = dir.path().join("restricted_snapshot.json");
+        let payload = b"{\"api_key\":\"dpapi:SYNTHETIC\"}\r\n";
+        let sha = write_restricted_bytes_atomic(&dest, payload).expect("write restricted bytes");
+        assert_eq!(sha, sha256_hex(payload));
+        assert_eq!(fs::read(&dest).expect("readback"), payload);
     }
 }

@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::safe_write::{apply_restricted_file_acl, sha256_hex, SafeWriteError};
+use super::safe_write::{sha256_hex, write_restricted_bytes_atomic, SafeWriteError};
 use crate::secrets::secret_store::{get_env_var_name, resolve_secret, SecretStatus};
 use crate::services::telemetry::VlmActiveResult;
 
@@ -734,18 +734,21 @@ where
         expected_sha,
         input,
         env_map,
+        None,
         false,
         lookup_audit,
     )
 }
 
 /// Applies a single slot edit onto `conf_path` with explicit `allow_live_write` policy for the production desktop host.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_slot_update_with_live_policy<F>(
     conf_path: &Path,
     backups_dir: &Path,
     expected_sha: &str,
     input: &SlotUpdateInput,
     env_map: Option<&HashMap<String, String>>,
+    reports_dir: Option<&Path>,
     allow_live_write: bool,
     lookup_audit: F,
 ) -> Result<ApplySlotOutcome, ConfGateError>
@@ -760,6 +763,7 @@ where
         expected_sha,
         input,
         env_map,
+        reports_dir,
         home_path,
         allow_live_write,
         lookup_audit,
@@ -773,6 +777,7 @@ fn apply_slot_update_internal<F>(
     expected_sha: &str,
     input: &SlotUpdateInput,
     env_map: Option<&HashMap<String, String>>,
+    reports_dir: Option<&Path>,
     home_dir: Option<&Path>,
     allow_live_write: bool,
     lookup_audit: F,
@@ -890,7 +895,7 @@ where
         home_dir,
         allow_live_write,
     )?;
-    let slots = summarize_slots(&after, env_map);
+    let slots = summarize_slots_with_audits(&after, env_map, reports_dir);
 
     Ok(ApplySlotOutcome {
         new_sha256: new_sha,
@@ -954,18 +959,7 @@ pub fn create_pre_write_backup(
     let backup_filename = format!("ov.conf-before-{}Z-{}.bak", now_secs, hash_prefix);
     let backup_path = backups_dir.join(backup_filename);
 
-    fs::write(&backup_path, &raw_bytes)?;
-    apply_restricted_file_acl(&backup_path)?;
-
-    let backup_readback = fs::read(&backup_path)?;
-    let backup_sha = sha256_hex(&backup_readback);
-    if backup_sha != sha {
-        let _ = fs::remove_file(&backup_path);
-        return Err(ConfGateError::Validation(format!(
-            "Backup integrity check failed: written SHA {} != source SHA {}",
-            backup_sha, sha
-        )));
-    }
+    write_restricted_bytes_atomic(&backup_path, &raw_bytes)?;
 
     Ok(backup_path)
 }
@@ -1343,6 +1337,7 @@ mod tests {
                 manual_save: false,
             },
             Some(&env),
+            None,
             Some(&fake_home),
             false,
             |_, _, _| None,
@@ -1366,6 +1361,7 @@ mod tests {
                 manual_save: false,
             },
             Some(&env),
+            None,
             Some(&fake_home),
             true,
             |_, _, _| None,

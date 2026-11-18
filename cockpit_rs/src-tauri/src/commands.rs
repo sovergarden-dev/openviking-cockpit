@@ -421,6 +421,7 @@ pub async fn apply_slot(
             &expected_sha,
             &input,
             None,
+            Some(&paths.security_reports_dir),
             true,
             |api_base, model, resolved_key| {
                 load_cached_audit_verdict(
@@ -710,6 +711,7 @@ pub async fn promote_reserve_to_slot(
             &expected_conf_sha,
             &input,
             None,
+            Some(&paths.security_reports_dir),
             true,
             |api_base, model, resolved_key| {
                 load_cached_audit_verdict(
