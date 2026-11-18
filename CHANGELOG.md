@@ -2,7 +2,7 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
-## [Unreleased]
+## [1.6.0] - 2026-11-18
 
 ### Added
 - Added cached `[M1]..[M5]` Taxonomy V3.1 safety badges (`cached_audit_level`) across Slot, Watchlist, and Reserve tables in `cockpit_rs`, backed by 0ms cached report opening (`load_cached_audit_document` when `force_refresh` is false), an explicit `Đo lại (7 probe)` live rerun button (`#audit-modal-rerun`), and a `Sao chép JSON` button (`#audit-copy-json`) in the 3-Tab Audit Modal.
