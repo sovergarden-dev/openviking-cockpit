@@ -2,6 +2,17 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
+## [1.7.0] - 2026-11-18
+
+### Added
+- Added guarded OpenViking service lifecycle controls (`control_openviking_service` for `start` and `restart` with 2-step UI confirmation, socket-hang orphan cleanup, `ov_stale_lock_clean.py` preflight, and `open_logs_folder`) plus a live `Extraction Queue` status card (`/api/v1/observer/queue?format=json`) on the `Tổng quan` tab in `cockpit_rs`.
+- Added a read-only 4th tab `Bộ nhớ & Tra cứu` (`Memory & Vector Inspector`) in `cockpit_rs` (`get_memory_overview`, `search_memories`, `read_viking_content`), displaying Retrieval quality metrics, category/hotness distributions, per-peer namespace and disk storage footprints (`vectordb/`, `memories/`, `peers/`, `sessions/`, `backups/quarantine/`), and a live local-embedding semantic recall tester with sanitized content preview.
+- Added the `openviking-memory` Antigravity plugin bundle (`integrations/antigravity/openviking-memory/` and `scripts/install_antigravity_plugin.py`) with a stdlib-only MCP Stdio bridge (`ov_mcp_bridge.py`) exposing 5 safe tools (`ov_recall`, `ov_read`, `ov_list`, `ov_stats`, `ov_remember` under `X-OpenViking-Actor-Peer: antigravity`) while omitting destructive `forget`/`set_acl` operations by construction.
+- Added plan-first storage hygiene auditor `scripts/ov_storage_hygiene.py` (`--dry-run` default, SHA-256 `--plan-file` verification, protected `ov.conf` and `backups/pre-*` baselines, non-destructive `monitor-scratch` archiving, inactive `cron_*` session pruning, and synchronous `wait=true` API-backed `tick-events` pruning with milestone filename protection), along with isolated CI suites `test_antigravity_mcp_bridge.py` and `test_ov_storage_hygiene.py`.
+
+### Changed
+- Extended `scripts/deploy_to_live.ps1` with `-SyncAntigravityPlugin` for per-file atomic plugin synchronization alongside `openviking-cockpit.exe` and `ops/` deployment.
+
 ## [1.6.1] - 2026-11-18
 
 ### Changed
