@@ -2,7 +2,7 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
-## [Unreleased]
+## [1.6.1] - 2026-11-18
 
 ### Changed
 - Unified legacy backup ACL inspection in `scripts/retrofit_ov_conf_backup_acl.py` onto `monitor/safe_write.py` `inspect_file_acl()` (accepting Rust `OW` Owner Rights ACEs alongside `SY`/`BA`/CurrentUser without spawning `powershell.exe`), added `test_retrofit_ov_conf_backup_acl.py` to `.github/workflows/ci.yml`, and opted GitHub Actions JavaScript steps into Node 24 (`FORCE_JAVASCRIPT_ACTIONS_TO_NODE24`).
