@@ -87,6 +87,14 @@ if sys.platform == "win32":
         ctypes.POINTER(wintypes.ULONG),
     ]
     _adv32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    _adv32.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.ULONG),
+    ]
+    _adv32.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = wintypes.BOOL
     _adv32.GetSecurityDescriptorDacl.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(wintypes.BOOL),
@@ -164,6 +172,115 @@ if sys.platform == "win32":
             _k32.CloseHandle(token)
 
 
+def inspect_file_acl(target_path: Union[str, Path]) -> dict:
+    """Read Windows DACL state via Win32 advapi32 without spawning PowerShell."""
+    resolved_str = str(Path(target_path).resolve())
+    if sys.platform != "win32":
+        return {"path": resolved_str, "protected": True, "exact_dacl": True, "sddl_access": ""}
+    if not os.path.exists(resolved_str):
+        raise FileNotFoundError(resolved_str)
+    user_sid = _current_user_sid_string()
+    if not user_sid:
+        raise OSError("Unable to resolve current process token SID")
+
+    read_dacl = ctypes.c_void_p()
+    read_sd = ctypes.c_void_p()
+    rc_get = _adv32.GetNamedSecurityInfoW(
+        resolved_str,
+        _SE_FILE_OBJECT,
+        _DACL_SECURITY_INFORMATION,
+        None,
+        None,
+        ctypes.byref(read_dacl),
+        None,
+        ctypes.byref(read_sd),
+    )
+    if rc_get != 0 or not read_sd.value or not read_dacl.value:
+        if read_sd.value:
+            _k32.LocalFree(read_sd.value)
+        raise OSError(f"GetNamedSecurityInfoW failed with error {rc_get}")
+
+    required_sids: list[ctypes.c_void_p] = []
+    owner_rights_sid = ctypes.c_void_p()
+    sddl_ptr = ctypes.c_void_p()
+    try:
+        ctrl = wintypes.WORD(0)
+        rev = wintypes.DWORD(0)
+        if not _adv32.GetSecurityDescriptorControl(
+            read_sd, ctypes.byref(ctrl), ctypes.byref(rev)
+        ):
+            raise OSError("GetSecurityDescriptorControl failed")
+        protected = bool(ctrl.value & _SE_DACL_PROTECTED)
+
+        if not _adv32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            read_sd,
+            _SDDL_REVISION_1,
+            _DACL_SECURITY_INFORMATION,
+            ctypes.byref(sddl_ptr),
+            None,
+        ) or not sddl_ptr.value:
+            raise OSError("ConvertSecurityDescriptorToStringSecurityDescriptorW failed")
+        sddl_access = ctypes.wstring_at(sddl_ptr.value)
+
+        for sid_str in dict.fromkeys(("S-1-5-18", "S-1-5-32-544", user_sid)):
+            psid = ctypes.c_void_p()
+            if not _adv32.ConvertStringSidToSidW(sid_str, ctypes.byref(psid)):
+                raise OSError("ConvertStringSidToSidW failed")
+            required_sids.append(psid)
+        _adv32.ConvertStringSidToSidW("S-1-3-4", ctypes.byref(owner_rights_sid))
+
+        info = _ACL_SIZE_INFORMATION()
+        if not _adv32.GetAclInformation(
+            read_dacl,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+            _ACL_SIZE_INFORMATION_CLASS,
+        ):
+            raise OSError("GetAclInformation failed")
+
+        matched = [False] * len(required_sids)
+        all_aces_valid = info.AceCount > 0
+        for idx in range(info.AceCount):
+            ace_ptr = ctypes.c_void_p()
+            if not _adv32.GetAce(read_dacl, idx, ctypes.byref(ace_ptr)) or not ace_ptr.value:
+                all_aces_valid = False
+                break
+            addr = ace_ptr.value
+            ace_type = ctypes.c_ubyte.from_address(addr).value
+            ace_mask = wintypes.DWORD.from_address(addr + 4).value
+            ace_sid = ctypes.c_void_p(addr + 8)
+            if ace_type != _ACCESS_ALLOWED_ACE_TYPE or (ace_mask & _FILE_ALL_ACCESS) != _FILE_ALL_ACCESS:
+                all_aces_valid = False
+                break
+            hit = False
+            for e_idx, req_sid in enumerate(required_sids):
+                if _adv32.EqualSid(ace_sid, req_sid):
+                    matched[e_idx] = True
+                    hit = True
+            if not hit and owner_rights_sid.value and _adv32.EqualSid(ace_sid, owner_rights_sid):
+                hit = True
+            if not hit:
+                all_aces_valid = False
+                break
+
+        exact_dacl = bool(protected and all_aces_valid and all(matched))
+        return {
+            "path": resolved_str,
+            "protected": protected,
+            "exact_dacl": exact_dacl,
+            "sddl_access": sddl_access,
+        }
+    finally:
+        if sddl_ptr.value:
+            _k32.LocalFree(sddl_ptr.value)
+        if owner_rights_sid.value:
+            _k32.LocalFree(owner_rights_sid.value)
+        for psid in required_sids:
+            if psid.value:
+                _k32.LocalFree(psid.value)
+        _k32.LocalFree(read_sd.value)
+
+
 def apply_restricted_file_acl(target_path: Union[str, Path]) -> bool:
     """Explicitly set non-inherited ACL on target file: SYSTEM(F), Administrators(F), CurrentUser(F)."""
     if sys.platform != "win32":
@@ -204,77 +321,8 @@ def apply_restricted_file_acl(target_path: Union[str, Path]) -> bool:
         finally:
             _k32.LocalFree(sec_desc.value)
 
-        read_dacl = ctypes.c_void_p()
-        read_sd = ctypes.c_void_p()
-        rc_get = _adv32.GetNamedSecurityInfoW(
-            resolved_str,
-            _SE_FILE_OBJECT,
-            _DACL_SECURITY_INFORMATION,
-            None,
-            None,
-            ctypes.byref(read_dacl),
-            None,
-            ctypes.byref(read_sd),
-        )
-        if rc_get != 0 or not read_sd.value or not read_dacl.value:
-            if read_sd.value:
-                _k32.LocalFree(read_sd.value)
-            return False
-
-        expected_sids: list[ctypes.c_void_p] = []
-        try:
-            ctrl = wintypes.WORD(0)
-            rev = wintypes.DWORD(0)
-            if not _adv32.GetSecurityDescriptorControl(
-                read_sd, ctypes.byref(ctrl), ctypes.byref(rev)
-            ):
-                return False
-            if (ctrl.value & _SE_DACL_PROTECTED) == 0:
-                return False
-
-            for sid_str in dict.fromkeys(("S-1-5-18", "S-1-5-32-544", user_sid)):
-                psid = ctypes.c_void_p()
-                if not _adv32.ConvertStringSidToSidW(sid_str, ctypes.byref(psid)):
-                    return False
-                expected_sids.append(psid)
-
-            info = _ACL_SIZE_INFORMATION()
-            if not _adv32.GetAclInformation(
-                read_dacl,
-                ctypes.byref(info),
-                ctypes.sizeof(info),
-                _ACL_SIZE_INFORMATION_CLASS,
-            ):
-                return False
-            if info.AceCount == 0:
-                return False
-
-            matched = [False] * len(expected_sids)
-            for idx in range(info.AceCount):
-                ace_ptr = ctypes.c_void_p()
-                if not _adv32.GetAce(read_dacl, idx, ctypes.byref(ace_ptr)) or not ace_ptr.value:
-                    return False
-                addr = ace_ptr.value
-                ace_type = ctypes.c_ubyte.from_address(addr).value
-                ace_mask = wintypes.DWORD.from_address(addr + 4).value
-                ace_sid = ctypes.c_void_p(addr + 8)
-                if ace_type != _ACCESS_ALLOWED_ACE_TYPE:
-                    return False
-                if (ace_mask & _FILE_ALL_ACCESS) != _FILE_ALL_ACCESS:
-                    return False
-                hit = False
-                for e_idx, exp_sid in enumerate(expected_sids):
-                    if _adv32.EqualSid(ace_sid, exp_sid):
-                        matched[e_idx] = True
-                        hit = True
-                if not hit:
-                    return False
-            return all(matched)
-        finally:
-            for psid in expected_sids:
-                if psid.value:
-                    _k32.LocalFree(psid.value)
-            _k32.LocalFree(read_sd.value)
+        verified = inspect_file_acl(resolved_str)
+        return bool(verified["protected"] and verified["exact_dacl"])
     except OSError:
         return False
 
@@ -342,12 +390,15 @@ def safe_atomic_write_text(
     fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".tmp", dir=str(dest.parent))
     tmp_path = Path(tmp_name)
 
+    fd_closed = False
     try:
-        # 2. Restrict ACL on temp file BEFORE writing any sensitive bytes
+        # 2. Restrict ACL on temp file BEFORE writing any sensitive bytes (fail-closed)
         if restrict_acl and sys.platform == "win32":
-            apply_restricted_file_acl(tmp_path)
+            if not apply_restricted_file_acl(tmp_path):
+                raise PermissionError(f"Failed to enforce restricted staging ACL on {dest.name}")
 
         # 3. Write data, flush buffers, fsync to disk
+        fd_closed = True
         with os.fdopen(fd, "wb") as handle:
             handle.write(raw_bytes)
             handle.flush()
@@ -364,10 +415,16 @@ def safe_atomic_write_text(
 
         # 6. Re-apply restricted ACL post-replace to ensure DACL persisted
         if restrict_acl and sys.platform == "win32":
-            apply_restricted_file_acl(dest)
+            if not apply_restricted_file_acl(dest):
+                raise PermissionError(f"Failed to verify restricted destination ACL on {dest.name}")
 
         return actual_sha
     finally:
+        if not fd_closed:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         if tmp_path.exists():
             try:
                 tmp_path.unlink()

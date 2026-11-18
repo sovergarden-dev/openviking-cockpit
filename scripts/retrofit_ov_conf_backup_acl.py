@@ -11,7 +11,6 @@ import argparse
 import hashlib
 import json
 import os
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,7 +19,7 @@ MONITOR_DIR = Path(__file__).resolve().parents[1] / "monitor"
 if str(MONITOR_DIR) not in sys.path:
     sys.path.insert(0, str(MONITOR_DIR))
 
-from safe_write import apply_restricted_file_acl  # noqa: E402
+from safe_write import apply_restricted_file_acl, inspect_file_acl  # noqa: E402
 
 DEFAULT_BACKUP_DIR = Path.home() / ".openviking" / "backups"
 
@@ -44,45 +43,16 @@ def _read_acl(paths: list[Path]) -> dict[str, dict]:
         return {}
     if os.name != "nt":
         raise OSError("ACL inspection requires Windows")
-    resolved = [str(p.resolve()) for p in paths]
-    ps = r"""
-$ErrorActionPreference = 'Stop'
-# UTF8 (not UTF-8): hyphen form throws under $ErrorActionPreference='Stop'.
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$paths = ConvertFrom-Json ([Console]::In.ReadToEnd())
-$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$expected = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;$sid)"
-$items = @()
-foreach ($p in @($paths)) {
-    $acl = Get-Acl -LiteralPath $p
-    $sddl = $acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access)
-    $items += @{
-        path = $p
-        protected = [bool]$acl.AreAccessRulesProtected
-        exact_dacl = (($sddl -replace '^D:PAI', 'D:P') -eq $expected)
-        sddl_access = $sddl
-    }
-}
-ConvertTo-Json -Compress -Depth 3 -InputObject @{ items = @($items) }
-"""
-    res = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
-        input=json.dumps(resolved),
-        capture_output=True, text=True, encoding="utf-8", timeout=30,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    )
-    if res.returncode != 0:
-        # Never include res.stderr: PowerShell error text can expose raw SDDL/SID strings.
-        raise RuntimeError(f"PowerShell ACL read failed (exit {res.returncode})")
-    raw = json.loads(res.stdout.lstrip("\ufeff"))
-    items = raw.get("items") if isinstance(raw, dict) else None
-    if not isinstance(items, list) or len(items) != len(resolved):
-        raise RuntimeError("Unexpected ACL response length from PowerShell")
     out: dict[str, dict] = {}
-    for expected_path, entry in zip(resolved, items):
-        if not isinstance(entry, dict) or os.path.normcase(str(entry.get("path") or "")) != os.path.normcase(expected_path):
-            raise RuntimeError("ACL response path alignment mismatch from PowerShell")
-        out[expected_path] = entry
+    for p in paths:
+        resolved = str(p.resolve())
+        info = inspect_file_acl(resolved)
+        out[resolved] = {
+            "path": resolved,
+            "protected": bool(info["protected"]),
+            "exact_dacl": bool(info["exact_dacl"]),
+            "sddl_access": str(info["sddl_access"]),
+        }
     return out
 
 

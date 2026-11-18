@@ -80,5 +80,16 @@ class TestSafeWrite(unittest.TestCase):
         self.assertTrue(apply_restricted_file_acl(target_dir))
         self.assertTrue(apply_restricted_file_acl(target_file))
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows DACL fail-closed test")
+    def test_acl_failure_aborts_before_publishing_destination(self):
+        from unittest.mock import patch
+
+        target = self.root / "never_written.json"
+        with patch.object(safe_write, "apply_restricted_file_acl", return_value=False):
+            with self.assertRaises(PermissionError):
+                safe_atomic_write_text(target, '{"secret": "SYNTHETIC"}', restrict_acl=True)
+        self.assertFalse(target.exists())
+        self.assertEqual(list(self.root.glob(".*.tmp")), [])
+
 if __name__ == "__main__":
     unittest.main()
