@@ -2,6 +2,19 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
+## [1.9.0] - 2026-11-21
+
+### Added
+- Added self-healing loopback `/health` watchdog inside `ops/ov_lifecycle.py` (`--health-url`, `--health-grace-s`, `--health-interval-s`, `--health-max-failures`, `--data-lock`) wired through `ops/start-openviking-hidden.cmd` to terminate `WinError 64` socket-hung `openviking-server` process trees, clean `data-qwen06b/.openviking.lock`, and emit sanitized `hang-killed` lifecycle telemetry automatically even when the desktop UI is closed.
+- Added guided V3.1 security audit resolution (`runGuidedSlotAuditWorkflow` with 3-choice confirmation in `components/confirm.js`) across `reserve.js`, `slots.js`, and `components/drawer.js` when a Slot mutation requires a V3.1 audit.
+- Added read-only interactive Memory Directory Explorer (`TelemetryClient::list_dir`, Tauri IPC `list_viking_dir`, clickable Category & Peer rows, `cases`/`profile.md` scope options, dynamic peer scopes, and `Chép URI`/`Chép nội dung` actions in `panels/memory.js`).
+- Added dynamic live-status System Tray tooltips (`format_tray_tooltip`) plus quick Tray menu actions (`Xem nhật ký Server (server.log)` via `tray://open-log` and `Khởi động lại OpenViking Server`) in `cockpit_rs/src-tauri/src/lib.rs`.
+- Added 1-tap clickable `[M1..M5]` / `Chưa kiểm định` audit badges (`createAuditBadgeElement`) and double-click row editing (`dblclick`) across `Theo dõi`, `Định tuyến Slot`, and `Dự trữ` tables, a `Thử tất cả` toolbar action on `THEO DÕI`, interactive `Ollama` / `Extraction Queue` log jumps, `Slot #X` / `Dự trữ` / `Theo dõi` membership tags and `+ Lưu tất cả model OK vào Dự trữ` batch saving in `provider_tester.js`, and global `F5` / `Ctrl+R` / `Alt+1..4` keyboard shortcuts.
+
+### Changed
+- Localized Slot drift banner text to Vietnamese in `cockpit_rs/src/config/conf_gate.rs`, added live runtime drift detection against `state.liveVlm` in `cockpit_rs/ui/src/panels/slots.js`, and attached an inline `Áp dụng ngay (Khởi động lại Server)` button directly on `#drift-banner`.
+- Added `scripts/tests/test_launcher_contract.py` and `scripts/tests/test_launcher_lifecycle.py` (including new loopback hang-kill and non-loopback rejection tests) to `.github/workflows/ci.yml` and updated `docs/specs/COCKPIT_RUST_SPEC.md` and `README.md` to 35 async IPC commands.
+
 ## [1.8.1] - 2026-11-21
 
 ### Changed

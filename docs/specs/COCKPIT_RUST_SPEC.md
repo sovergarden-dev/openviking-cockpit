@@ -70,21 +70,21 @@ G:/AI/openviking-cockpit/
     │       ├── main.rs          # Single-instance Win32 mutex & window activation
     │       ├── lib.rs           # System tray, NIF_INFO balloon, geometry persistence & clean X-close exit
     │       ├── state.rs         # CockpitState, monitor_lock, service_lock, geometry draft & mtime poll cache
-    │       └── commands.rs      # 34 async Tauri IPC commands wrapping spawn_blocking, Provider Explorer/Benchmark, Slot lifecycle, Log Tail & Startup .lnk sync
+    │       └── commands.rs      # 35 async Tauri IPC commands wrapping spawn_blocking, Provider Explorer/Benchmark, Slot lifecycle, Log Tail, Memory Directory List & Startup .lnk sync
     └── ui/                      # Vanilla ES Modules + CSS Design Token Frontend
         ├── package.json
-        ├── index.html           # 4-Tab UI: Overview, Slots (active highlight), Reserve, Memory & Hygiene Dry-run; Slide-over Drawer, Settings Popover, Audit/Provider/Log Modals
+        ├── index.html           # 4-Tab UI: Overview (live cards & Watch probe-all), Slots (active highlight & live drift restart), Reserve (guided V3.1 slot flow), Memory (interactive directory explorer & Hygiene Dry-run); Slide-over Drawer, Settings Popover, Audit/Provider/Log Modals
         ├── styles/
         │   ├── tokens.css       # Single source of visual tokens
         │   └── app.css          # Component pattern & modifier classes
         └── src/                 # Native ES modules: main.js, api.js, state.js, utils/, components/, modals/, panels/
-            ├── main.js          # App bootstrap, Topbar/Settings popover, event wiring & keyboard shortcuts
+            ├── main.js          # App bootstrap, Topbar/Settings popover, tray log events & keyboard shortcuts (Esc/F5/Alt+1..4/Ctrl+K)
             ├── api.js           # Tauri IPC wrappers & event subscriptions
             ├── state.js         # Client store & FIFO queue
-            ├── utils/           # Formatting & pure helpers
-            ├── components/      # Toast stack, context menu, confirm modal & Slide-over Drawer
-            ├── modals/          # 3-Tab Audit Modal, Provider Explorer/Benchmark Modal & Log Tail Viewer Modal
-            └── panels/          # Overview, Slots, Reserve & Memory + Hygiene Dry-run tab controllers
+            ├── utils/           # Formatting, interactive audit badge DOM builder & error helpers
+            ├── components/      # Toast stack, context menu, 2/3-action confirm modal & Slide-over Drawer
+            ├── modals/          # 3-Tab Audit Modal & guided slot flow, Provider Explorer/Benchmark Modal (membership badges & batch save OK) & Log Tail Viewer Modal
+            └── panels/          # Overview, Slots, Reserve & Interactive Memory Browser + Hygiene Dry-run tab controllers
 ```
 
 ---
