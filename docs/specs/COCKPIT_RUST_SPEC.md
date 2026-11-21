@@ -54,10 +54,11 @@ G:/AI/openviking-cockpit/
     │   ├── secrets/
     │   │   └── secret_store.rs  # Native 64-bit Windows DPAPI & strict ${ENV} secret resolver
     │   └── services/
-    │       ├── telemetry.rs         # Async server, queue, retrieval, semantic search, Ollama & lifecycle.jsonl polling + incident debouncer
+    │       ├── telemetry.rs         # Async server, queue, retrieval, semantic search, Ollama & lifecycle.jsonl polling + incident debouncer (with 75s cold-boot grace)
     │       ├── service_control.rs   # Guarded OpenViking Autostart task start/restart, socket-hang orphan cleanup & lock hygiene
-    │       ├── storage_inspector.rs # Read-only local storage & peer namespace footprint scanner
-    │       ├── watchlist.rs         # Bounded 4-key watchlist, reserves_sha256 CAS, 30-snapshot cap & probe worker
+    │       ├── storage_inspector.rs # Read-only storage & peer namespace footprint scanner, Hygiene Dry-run & 4-file allowlisted Log Tail reader
+    │       ├── provider_probe.rs    # OpenAI-compatible /v1/models discovery, chat liveness probe & cancellable 1–5 round benchmark
+    │       ├── watchlist.rs         # Bounded 4-key watchlist, persistent last_probe outcomes, reserve batch probing, reserves_sha256 CAS & 30-snapshot cap
     │       ├── auditor.rs           # Taxonomy V3.1 active 7-probe suite & rescue ladder
     │       └── auditor_cache.rs     # 24h/7d HMAC-free scope cache, 0ms cached doc loader & sanitizer
     ├── src-tauri/
@@ -69,15 +70,21 @@ G:/AI/openviking-cockpit/
     │       ├── main.rs          # Single-instance Win32 mutex & window activation
     │       ├── lib.rs           # System tray, NIF_INFO balloon, geometry persistence & clean X-close exit
     │       ├── state.rs         # CockpitState, monitor_lock, service_lock, geometry draft & mtime poll cache
-    │       └── commands.rs      # 21 async Tauri IPC commands wrapping spawn_blocking + Startup .lnk sync
-    └── ui/                      # Vanilla JS + CSS Design Token Frontend
+    │       └── commands.rs      # 34 async Tauri IPC commands wrapping spawn_blocking, Provider Explorer/Benchmark, Slot lifecycle, Log Tail & Startup .lnk sync
+    └── ui/                      # Vanilla ES Modules + CSS Design Token Frontend
         ├── package.json
-        ├── index.html           # 4-Tab UI: Overview (6 cards + Service Control + 4-key Watchlist), Slots, Reserve, Memory & Recall Inspector, Audit Modal
+        ├── index.html           # 4-Tab UI: Overview, Slots (active highlight), Reserve, Memory & Hygiene Dry-run; Slide-over Drawer, Settings Popover, Audit/Provider/Log Modals
         ├── styles/
         │   ├── tokens.css       # Single source of visual tokens
         │   └── app.css          # Component pattern & modifier classes
-        └── src/
-            └── main.js          # Streaming telemetry, [M1..M5] badges, Watch↔Reserve copy & NFC filter
+        └── src/                 # Native ES modules: main.js, api.js, state.js, utils/, components/, modals/, panels/
+            ├── main.js          # App bootstrap, Topbar/Settings popover, event wiring & keyboard shortcuts
+            ├── api.js           # Tauri IPC wrappers & event subscriptions
+            ├── state.js         # Client store & FIFO queue
+            ├── utils/           # Formatting & pure helpers
+            ├── components/      # Toast stack, context menu, confirm modal & Slide-over Drawer
+            ├── modals/          # 3-Tab Audit Modal, Provider Explorer/Benchmark Modal & Log Tail Viewer Modal
+            └── panels/          # Overview, Slots, Reserve & Memory + Hygiene Dry-run tab controllers
 ```
 
 ---

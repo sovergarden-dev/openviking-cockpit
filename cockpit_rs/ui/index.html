@@ -11,31 +11,74 @@
   <div class="c-shell">
     <header class="c-topbar">
       <div class="c-brand">
-        <span>OpenViking Cockpit</span>
+        <span>OpenViking <span class="c-brand-sub">Cockpit</span></span>
         <span id="overall-badge" class="c-badge c-badge--warn">Đang kết nối…</span>
       </div>
-      <nav class="c-tabs" role="tablist">
-        <button class="c-tab" role="tab" data-tab="overview" aria-selected="true">Tổng quan</button>
-        <button class="c-tab" role="tab" data-tab="slots" aria-selected="false">Định tuyến Slot</button>
-        <button class="c-tab" role="tab" data-tab="reserve" aria-selected="false">Dự trữ</button>
-        <button class="c-tab" role="tab" data-tab="memory" aria-selected="false">Bộ nhớ &amp; Tra cứu</button>
+
+      <nav class="c-tabs" role="tablist" aria-label="Điều hướng chính">
+        <button class="c-tab" role="tab" data-tab="overview" aria-selected="true">
+          <span>Tổng quan</span>
+        </button>
+        <button class="c-tab" role="tab" data-tab="slots" aria-selected="false">
+          <span>Định tuyến Slot</span>
+          <span id="tab-count-slots" class="c-tab-count">0</span>
+        </button>
+        <button class="c-tab" role="tab" data-tab="reserve" aria-selected="false">
+          <span>Dự trữ</span>
+          <span id="tab-count-reserve" class="c-tab-count">0</span>
+        </button>
+        <button class="c-tab" role="tab" data-tab="memory" aria-selected="false">
+          <span>Bộ nhớ &amp; Tra cứu</span>
+        </button>
       </nav>
-      <div class="c-actions">
-        <span id="topbar-status" class="c-card-meta"></span>
-        <label class="c-check-inline" title="Tự động khởi chạy ẩn dưới khay hệ thống (--tray) khi đăng nhập Windows">
-          <input id="pref-run-startup" type="checkbox" />
-          Khởi động cùng Windows
-        </label>
-        <label class="c-check-inline" title="Thông báo khay khi OpenViking (19330) mất kết nối hoặc thiếu model embedding">
-          <input id="pref-notify-down" type="checkbox" checked />
-          Báo sự cố Server
-        </label>
-        <label class="c-check-inline" title="Thông báo khay khi VLM tự động chuyển mạch sang Slot dự phòng">
-          <input id="pref-notify-failover" type="checkbox" checked />
-          Báo Failover
-        </label>
+
+      <div class="c-topbar-right">
+        <button id="btn-refresh" type="button" class="c-btn c-btn--sm" title="Làm mới dữ liệu (F5)">Làm mới</button>
         <button id="btn-hide-tray" type="button" class="c-btn c-btn--sm" title="Ẩn cửa sổ xuống khay hệ thống (vẫn chạy nền)">Ẩn khay</button>
-        <button id="btn-refresh" type="button" class="c-btn c-btn--sm">Làm mới</button>
+        <div class="c-popover-anchor">
+          <button
+            id="btn-settings-toggle"
+            type="button"
+            class="c-btn c-btn--sm"
+            aria-expanded="false"
+            aria-controls="settings-popover"
+            title="Cài đặt khay, khởi động Windows và chính sách Failback"
+          >⚙ Cài đặt</button>
+          <div id="settings-popover" class="c-popover" role="dialog" aria-label="Cài đặt hệ thống" hidden>
+            <div class="c-card-title">Hành vi &amp; Cảnh báo</div>
+            <label class="c-check-inline" title="Tự động khởi chạy ẩn dưới khay hệ thống (--tray) khi đăng nhập Windows">
+              <input id="pref-run-startup" type="checkbox" />
+              Khởi động cùng Windows (--tray)
+            </label>
+            <label class="c-check-inline" title="Thông báo khay khi OpenViking (19330) mất kết nối hoặc thiếu model embedding">
+              <input id="pref-notify-down" type="checkbox" checked />
+              Báo sự cố Server &amp; Embedding
+            </label>
+            <label class="c-check-inline" title="Thông báo khay khi VLM tự động chuyển mạch sang Slot dự phòng">
+              <input id="pref-notify-failover" type="checkbox" checked />
+              Báo Failover tự động
+            </label>
+            <hr class="c-divider" />
+            <div class="c-card-title">Chính sách Failback VLM (ov.conf)</div>
+            <form id="failback-policy-form" class="c-form--stack">
+              <div class="c-field">
+                <label for="policy-max-retries">Số lần thử lại (0–10)</label>
+                <input id="policy-max-retries" class="c-input c-input--sm" type="number" min="0" max="10" value="2" required />
+              </div>
+              <div class="c-field">
+                <label for="policy-failback-timeout">Thời gian thử về Slot chính (60–86400s)</label>
+                <input id="policy-failback-timeout" class="c-input c-input--sm" type="number" min="60" max="86400" value="3600" required />
+              </div>
+              <div class="c-field">
+                <label for="policy-failback-requests">Số request dự phòng (0 = chỉ theo thời gian)</label>
+                <input id="policy-failback-requests" class="c-input c-input--sm" type="number" min="0" max="10000" value="0" required />
+              </div>
+              <div class="c-actions">
+                <button id="btn-save-failback" type="submit" class="c-btn c-btn--sm c-btn--primary">Lưu chính sách Failback</button>
+              </div>
+            </form>
+          </div>
+        </div>
       </div>
     </header>
 
@@ -52,30 +95,36 @@
               <button id="btn-server-start" type="button" class="c-btn c-btn--sm c-btn--primary" hidden>Chạy Server</button>
               <button id="btn-server-restart" type="button" class="c-btn c-btn--sm">Khởi động lại</button>
               <button id="btn-server-cancel-restart" type="button" class="c-btn c-btn--sm" hidden>Hủy</button>
-              <button id="btn-open-logs" type="button" class="c-btn c-btn--sm" title="Mở thư mục nhật ký logs/ trong Windows Explorer">Mở Logs</button>
+              <button id="btn-view-logs" type="button" class="c-btn c-btn--sm" title="Xem nhật ký trực tiếp trong ứng dụng">Xem Logs</button>
+              <button id="btn-open-logs" type="button" class="c-btn c-btn--sm" title="Mở thư mục nhật ký logs/ trong Windows Explorer">Thư mục Logs</button>
             </div>
             <div id="server-action-status" class="c-card-meta" hidden></div>
           </article>
+
           <article class="c-card">
             <span class="c-card-title">Ollama &amp; Embedding (21434)</span>
             <div id="metric-ollama" class="c-card-metric">—</div>
             <div id="meta-ollama" class="c-card-meta">Chưa có dữ liệu</div>
           </article>
-          <article class="c-card">
-            <span class="c-card-title">VLM Hot-Switch</span>
+
+          <article id="card-jump-vlm" class="c-card c-card--interactive" role="button" tabindex="0" title="Bấm để mở tab Định tuyến Slot">
+            <span class="c-card-title">VLM Đang Phục Vụ</span>
             <div id="metric-vlm" class="c-card-metric">—</div>
             <div id="meta-vlm" class="c-card-meta">Chưa có dữ liệu</div>
           </article>
+
           <article class="c-card">
             <span class="c-card-title">Extraction Queue</span>
             <div id="metric-queue" class="c-card-metric">—</div>
             <div id="meta-queue" class="c-card-meta">Chưa có dữ liệu</div>
           </article>
+
           <article id="card-jump-vectors" class="c-card c-card--interactive" role="button" tabindex="0" title="Bấm để xem phân bổ chi tiết và tra cứu thử ngữ nghĩa">
             <span class="c-card-title">VikingDB Vectors</span>
             <div id="metric-vikingdb" class="c-card-metric">—</div>
             <div id="meta-vikingdb" class="c-card-meta">Chưa có dữ liệu</div>
           </article>
+
           <article id="card-jump-memories" class="c-card c-card--interactive" role="button" tabindex="0" title="Bấm để xem phân bổ chi tiết và tra cứu thử ngữ nghĩa">
             <span class="c-card-title">Long-Term Memories</span>
             <div id="metric-memories" class="c-card-metric">—</div>
@@ -84,22 +133,29 @@
         </div>
 
         <article class="c-card">
-          <div class="c-actions">
-            <span class="c-card-title">THEO DÕI (Tối đa 4 key độc lập — DPAPI)</span>
-            <span id="watch-count-badge" class="c-badge c-badge--ok">0 / 4 key</span>
-            <label class="c-check-inline">
-              <input id="watch-master-auto" type="checkbox" />
-              Công tắc Auto tổng
-            </label>
-            <label class="c-check-inline" for="watch-auto-minutes">
-              Chu kỳ:
-              <select id="watch-auto-minutes" class="c-input c-input--sm">
-                <option value="1">1 phút</option>
-                <option value="5">5 phút</option>
-                <option value="10" selected>10 phút</option>
-              </select>
-            </label>
+          <div class="c-toolbar">
+            <div class="c-toolbar-group">
+              <span class="c-card-title">THEO DÕI (Tối đa 4 key độc lập · DPAPI)</span>
+              <span id="watch-count-badge" class="c-badge c-badge--ok">0 / 4 key</span>
+              <label class="c-check-inline">
+                <input id="watch-master-auto" type="checkbox" />
+                Auto tổng
+              </label>
+              <label class="c-check-inline" for="watch-auto-minutes">
+                Chu kỳ:
+                <select id="watch-auto-minutes" class="c-input c-input--sm">
+                  <option value="1">1 phút</option>
+                  <option value="5">5 phút</option>
+                  <option value="10" selected>10 phút</option>
+                </select>
+              </label>
+            </div>
+            <div class="c-toolbar-group">
+              <button id="btn-watch-provider-test" type="button" class="c-btn c-btn--sm">Thử Provider</button>
+              <button id="btn-watch-add" type="button" class="c-btn c-btn--sm c-btn--primary">+ Thêm Theo dõi</button>
+            </div>
           </div>
+
           <div class="c-table-wrap">
             <table class="c-table">
               <thead>
@@ -107,109 +163,83 @@
                   <th>Tên gợi nhớ</th>
                   <th>Model</th>
                   <th>Endpoint</th>
-                  <th>Key</th>
+                  <th>Key · Kiểm định</th>
                   <th>Auto</th>
-                  <th>Lần thử gần nhất</th>
+                  <th>Lần thử</th>
                   <th>Thao tác</th>
                 </tr>
               </thead>
               <tbody id="watch-tbody"></tbody>
             </table>
           </div>
-
-          <form id="watch-form" class="c-form">
-            <div class="c-field">
-              <label for="watch-alias">Tên gợi nhớ</label>
-              <input id="watch-alias" class="c-input" type="text" placeholder="Gateway dự phòng" />
-            </div>
-            <div class="c-field">
-              <label for="watch-model">Model thử</label>
-              <input id="watch-model" class="c-input" type="text" required />
-            </div>
-            <div class="c-field">
-              <label for="watch-base">Base URL (/v1)</label>
-              <input id="watch-base" class="c-input" type="url" placeholder="https://api.example.com/v1" required />
-            </div>
-            <div class="c-field">
-              <label id="watch-key-label" for="watch-key">API Key / ${ENV_VAR}</label>
-              <input id="watch-key" class="c-input" type="password" autocomplete="off" required />
-            </div>
-            <div class="c-actions">
-              <button id="watch-submit-btn" type="submit" class="c-btn c-btn--primary">+ Thêm Theo dõi</button>
-              <button id="watch-cancel-edit" type="button" class="c-btn" hidden>Hủy sửa</button>
-            </div>
-          </form>
-          <div id="watch-status" class="c-card-meta"></div>
         </article>
       </section>
 
       <section id="panel-slots" class="c-panel" hidden>
         <div id="drift-banner" class="c-banner c-banner--warn" hidden></div>
+
+        <div class="c-toolbar">
+          <div class="c-toolbar-group">
+            <span id="slot-runtime-summary" class="c-badge c-badge--muted">Đang đọc Slot chạy…</span>
+            <span id="slot-failback-summary" class="c-card-meta"></span>
+            <button id="btn-slot-release-hold" type="button" class="c-btn c-btn--sm c-btn--primary" hidden>Mở khóa → Về tự động (#0)</button>
+          </div>
+          <div class="c-toolbar-group">
+            <button id="btn-slots-open-failback" type="button" class="c-btn c-btn--sm">Chính sách Failback</button>
+            <button id="btn-slots-probe-all" type="button" class="c-btn c-btn--sm">Thử tất cả Slot</button>
+            <button id="btn-slots-provider-test" type="button" class="c-btn c-btn--sm">Thử Provider</button>
+            <button id="btn-slot-add" type="button" class="c-btn c-btn--sm c-btn--primary">+ Thêm Slot</button>
+          </div>
+        </div>
+
         <div class="c-table-wrap">
           <table class="c-table">
             <thead>
               <tr>
                 <th>Slot</th>
-                <th>Vai trò</th>
+                <th>Trạng thái chạy</th>
                 <th>Model</th>
                 <th>Endpoint</th>
-                <th>Trạng thái Key</th>
+                <th>Độ trễ / Thử</th>
+                <th>Key · Kiểm định</th>
                 <th>Thao tác</th>
               </tr>
             </thead>
             <tbody id="slots-tbody"></tbody>
           </table>
         </div>
-
-        <article class="c-card">
-          <span class="c-card-title">Cập nhật Slot (Draft → Commit nguyên tử)</span>
-          <form id="slot-form" class="c-form">
-            <div class="c-field">
-              <label for="slot-index">Chỉ số Slot (0 = Primary)</label>
-              <input id="slot-index" class="c-input" type="number" min="0" value="0" required />
-            </div>
-            <div class="c-field">
-              <label for="slot-model">Model</label>
-              <input id="slot-model" class="c-input" type="text" placeholder="gemini-3.8-flash-high" required />
-            </div>
-            <div class="c-field">
-              <label for="slot-base">Base URL</label>
-              <input id="slot-base" class="c-input" type="url" placeholder="https://api.example.com/v1" required />
-            </div>
-            <div class="c-field">
-              <label for="slot-key">API Key / ${ENV_VAR} (để trống = giữ nguyên)</label>
-              <input id="slot-key" class="c-input" type="password" autocomplete="off" placeholder="${MY_API_KEY}" />
-            </div>
-            <div class="c-field">
-              <label>
-                <input id="slot-allow-unaudited" type="checkbox" />
-                Cho phép lưu dự phòng chưa kiểm định (Slot ≥ 1)
-              </label>
-            </div>
-            <div class="c-actions">
-              <button type="submit" class="c-btn c-btn--primary">Lưu Slot</button>
-            </div>
-          </form>
-          <div id="slot-status" class="c-card-meta"></div>
-        </article>
       </section>
 
       <section id="panel-reserve" class="c-panel" hidden>
-        <article class="c-card">
-          <div class="c-actions">
-            <span class="c-card-title">DỰ TRỮ (Spare Models Pool — DPAPI)</span>
+        <div class="c-toolbar">
+          <div class="c-toolbar-group">
+            <button id="btn-reserve-add" type="button" class="c-btn c-btn--sm c-btn--primary">+ Thêm Dự trữ</button>
+            <button id="btn-reserve-provider-test" type="button" class="c-btn c-btn--sm">Thử Provider</button>
             <span id="reserve-count-badge" class="c-badge c-badge--ok">0 model</span>
             <input
               id="reserve-filter-query"
-              class="c-input c-input--sm"
+              class="c-input c-input--sm c-input--search"
               type="search"
-              placeholder="Lọc model, endpoint, ghi chú…"
+              placeholder="Tìm model, endpoint… (Ctrl+K)"
               aria-label="Lọc danh sách dự trữ"
             />
+            <select id="reserve-filter-status" class="c-input c-input--sm" aria-label="Lọc theo trạng thái">
+              <option value="">Mọi trạng thái</option>
+              <option value="ok">Ping OK</option>
+              <option value="error">Đang lỗi</option>
+              <option value="untested">Chưa thử</option>
+              <option value="audited_pass">Kiểm định M4–M5</option>
+            </select>
             <select id="reserve-filter-endpoint" class="c-input c-input--sm" aria-label="Lọc theo endpoint">
               <option value="">Mọi endpoint</option>
             </select>
             <button id="reserve-filter-clear" type="button" class="c-btn c-btn--sm" hidden>Xóa lọc</button>
+          </div>
+
+          <div class="c-toolbar-group">
+            <button id="btn-reserve-probe-selected" type="button" class="c-btn c-btn--sm" hidden>Thử đã chọn</button>
+            <button id="btn-reserve-probe-all" type="button" class="c-btn c-btn--sm">Thử tất cả</button>
+            <button id="btn-reserve-probe-cancel" type="button" class="c-btn c-btn--sm c-btn--danger" hidden>Dừng</button>
             <label class="c-check-inline" for="reserve-target-slot">
               Slot đích:
               <select id="reserve-target-slot" class="c-input c-input--sm">
@@ -217,51 +247,38 @@
                 <option value="1" selected>Slot #1 (Dự phòng)</option>
               </select>
             </label>
-            <label class="c-check-inline">
+            <label class="c-check-inline" title="Chỉ áp dụng cho Slot dự phòng ≥ 1">
               <input id="reserve-allow-unaudited" type="checkbox" />
-              Cho phép chưa kiểm định (Slot ≥ 1)
+              Cho phép chưa kiểm định
             </label>
           </div>
-          <div class="c-table-wrap">
-            <table class="c-table">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Model</th>
-                  <th>Endpoint</th>
-                  <th>Trạng thái Key</th>
-                  <th>Ghi chú</th>
-                  <th>Thao tác</th>
-                </tr>
-              </thead>
-              <tbody id="reserve-tbody"></tbody>
-            </table>
-          </div>
+        </div>
 
-          <form id="reserve-form" class="c-form">
-            <div class="c-field">
-              <label for="reserve-model">Model dự trữ</label>
-              <input id="reserve-model" class="c-input" type="text" required />
-            </div>
-            <div class="c-field">
-              <label for="reserve-base">Base URL (/v1)</label>
-              <input id="reserve-base" class="c-input" type="url" placeholder="https://api.example.com/v1" required />
-            </div>
-            <div class="c-field">
-              <label id="reserve-key-label" for="reserve-key">API Key / ${ENV_VAR}</label>
-              <input id="reserve-key" class="c-input" type="password" autocomplete="off" required />
-            </div>
-            <div class="c-field">
-              <label for="reserve-note">Ghi chú</label>
-              <input id="reserve-note" class="c-input" type="text" />
-            </div>
-            <div class="c-actions">
-              <button id="reserve-submit-btn" type="submit" class="c-btn c-btn--primary">+ Thêm Dự trữ</button>
-              <button id="reserve-cancel-edit" type="button" class="c-btn" hidden>Hủy sửa</button>
-            </div>
-          </form>
-          <div id="reserve-status" class="c-card-meta"></div>
-        </article>
+        <div id="reserve-batch-bar" class="c-card" hidden>
+          <div class="c-actions">
+            <span id="reserve-batch-text" class="c-card-meta">Đang thử hàng loạt…</span>
+          </div>
+          <div class="c-progress"><div id="reserve-batch-progress" class="c-progress-bar"></div></div>
+        </div>
+
+        <div class="c-table-wrap">
+          <table class="c-table">
+            <thead>
+              <tr>
+                <th><input id="reserve-select-all" type="checkbox" aria-label="Chọn tất cả đang lọc" /></th>
+                <th class="c-th-sort" data-sort="index">#</th>
+                <th class="c-th-sort" data-sort="model">Model</th>
+                <th class="c-th-sort" data-sort="api_base">Endpoint</th>
+                <th class="c-th-sort" data-sort="status">Trạng thái</th>
+                <th class="c-th-sort" data-sort="ms">Độ trễ</th>
+                <th class="c-th-sort" data-sort="audit">Key · Kiểm định</th>
+                <th>Ghi chú</th>
+                <th>Thao tác</th>
+              </tr>
+            </thead>
+            <tbody id="reserve-tbody"></tbody>
+          </table>
+        </div>
       </section>
 
       <section id="panel-memory" class="c-panel" hidden>
@@ -287,6 +304,14 @@
             <div id="mem-ov-aux-disk-meta" class="c-card-meta">Chưa có dữ liệu</div>
           </article>
         </div>
+
+        <article class="c-card">
+          <div class="c-toolbar-group">
+            <span class="c-card-title">Quét vệ sinh Lưu trữ (Chỉ đọc · Dry-run)</span>
+            <span id="mem-hygiene-total" class="c-badge c-badge--ok">Đang quét…</span>
+          </div>
+          <div id="mem-hygiene-meta" class="c-card-meta">Kiểm tra vùng cách ly, tệp nháp _*.py/_*.json, phiên cron cũ (&gt;7 ngày) và ảnh chụp monitor-state — tuyệt đối không tự động xóa dữ liệu.</div>
+        </article>
 
         <div class="c-grid-split">
           <article class="c-card">
@@ -336,13 +361,7 @@
           <form id="memory-search-form" class="c-form">
             <div class="c-field">
               <label for="memory-search-query">Từ khóa / Câu hỏi ngữ nghĩa</label>
-              <input
-                id="memory-search-query"
-                class="c-input"
-                type="search"
-                placeholder="Ví dụ: quy tắc mã hóa DPAPI và định tuyến slot..."
-                required
-              />
+              <input id="memory-search-query" class="c-input" type="search" placeholder="Ví dụ: quy tắc mã hóa DPAPI và định tuyến slot..." required />
             </div>
             <div class="c-field">
               <label for="memory-search-type">Loại ngữ cảnh</label>
@@ -403,9 +422,175 @@
       </section>
     </main>
 
+    <!-- Slide-over Editor Drawer (Slot / Reserve / Watch) -->
+    <div id="editor-drawer-backdrop" class="c-drawer-backdrop" hidden>
+      <div class="c-drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+        <div class="c-modal-head">
+          <span id="drawer-title" class="c-modal-title">Chỉnh sửa cấu hình</span>
+          <button id="drawer-close" type="button" class="c-btn c-btn--sm">Đóng (Esc)</button>
+        </div>
+
+        <form id="drawer-form" class="c-form--stack">
+          <div id="drawer-slot-index-field" class="c-field" hidden>
+            <label for="drawer-slot-index">Chỉ số Slot (0 = Chính, ≥1 = Dự phòng)</label>
+            <input id="drawer-slot-index" class="c-input" type="number" min="0" value="0" />
+          </div>
+
+          <div id="drawer-alias-field" class="c-field" hidden>
+            <label for="drawer-alias">Tên gợi nhớ</label>
+            <input id="drawer-alias" class="c-input" type="text" placeholder="Gateway dự phòng" />
+          </div>
+
+          <div class="c-field">
+            <label for="drawer-base">Base URL (/v1)</label>
+            <input id="drawer-base" class="c-input" type="url" placeholder="https://api.example.com/v1" required />
+          </div>
+
+          <div id="drawer-inherit-field" class="c-field" hidden>
+            <label for="drawer-inherit-source">Kế thừa Key sẵn có cùng Endpoint (không lộ bí mật)</label>
+            <select id="drawer-inherit-source" class="c-input c-input--sm">
+              <option value="">— Không kế thừa (nhập key mới hoặc giữ nguyên) —</option>
+            </select>
+          </div>
+
+          <div class="c-field">
+            <label id="drawer-key-label" for="drawer-key">API Key / ${ENV_VAR}</label>
+            <input id="drawer-key" class="c-input" type="password" autocomplete="off" placeholder="${MY_API_KEY}" />
+          </div>
+
+          <div class="c-field">
+            <label for="drawer-model">Model</label>
+            <div class="c-input--row">
+              <input id="drawer-model" class="c-input" type="text" placeholder="gemini-3.8-flash-high" required />
+              <button id="drawer-fetch-models" type="button" class="c-btn c-btn--sm">Tải model (/v1/models)</button>
+            </div>
+          </div>
+
+          <div id="drawer-model-picker" class="c-field" hidden>
+            <input id="drawer-model-search" class="c-input c-input--sm" type="search" placeholder="Lọc nhanh danh sách model vừa tải…" />
+            <div id="drawer-model-list" class="c-list-box"></div>
+          </div>
+
+          <div id="drawer-note-field" class="c-field" hidden>
+            <label for="drawer-note">Ghi chú</label>
+            <input id="drawer-note" class="c-input" type="text" placeholder="Tài khoản chính / pay-as-you-go…" />
+          </div>
+
+          <label id="drawer-unaudited-field" class="c-check-inline" hidden>
+            <input id="drawer-allow-unaudited" type="checkbox" />
+            Cho phép lưu Slot dự phòng (≥ 1) khi chưa có kiểm định V3.1
+          </label>
+
+          <div class="c-actions">
+            <button id="drawer-probe-btn" type="button" class="c-btn c-btn--sm">Thử kết nối trước</button>
+            <span id="drawer-probe-badge" class="c-card-meta"></span>
+          </div>
+
+          <div class="c-actions">
+            <button id="drawer-submit" type="submit" class="c-btn c-btn--primary">Lưu cấu hình</button>
+            <button id="drawer-cancel" type="button" class="c-btn">Hủy</button>
+          </div>
+          <div id="drawer-status" class="c-card-meta"></div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Provider Model Explorer & 3-Round Benchmark Modal -->
+    <div id="provider-modal-backdrop" class="c-modal-backdrop" hidden>
+      <div class="c-modal c-modal--wide" role="dialog" aria-modal="true" aria-labelledby="provider-modal-title">
+        <div class="c-modal-head">
+          <span id="provider-modal-title" class="c-modal-title">Khám phá &amp; Benchmark Model Provider</span>
+          <button id="provider-modal-close" type="button" class="c-btn c-btn--sm">Đóng (Esc)</button>
+        </div>
+
+        <div class="c-form">
+          <div class="c-field">
+            <label for="pt-source-select">Nguồn xác thực (giải mã nội bộ trên Rust)</label>
+            <select id="pt-source-select" class="c-input c-input--sm"></select>
+          </div>
+          <div id="pt-inline-base-wrap" class="c-field" hidden>
+            <label for="pt-inline-base">Base URL (/v1)</label>
+            <input id="pt-inline-base" class="c-input c-input--sm" type="url" placeholder="https://api.example.com/v1" />
+          </div>
+          <div id="pt-inline-key-wrap" class="c-field" hidden>
+            <label for="pt-inline-key">API Key / ${ENV_VAR} (tùy chọn với localhost)</label>
+            <input id="pt-inline-key" class="c-input c-input--sm" type="password" autocomplete="off" />
+          </div>
+          <div class="c-actions">
+            <button id="pt-load-models" type="button" class="c-btn c-btn--sm c-btn--primary">Tải danh sách model</button>
+          </div>
+        </div>
+
+        <div id="pt-status" class="c-card-meta">Chọn một provider đang dùng hoặc nhập endpoint mới để lấy danh sách model qua /v1/models rồi Test Ping / Benchmark 3 lượt.</div>
+
+        <div id="pt-picker-section" class="c-card" hidden>
+          <div class="c-toolbar-group">
+            <input id="pt-model-filter" class="c-input c-input--sm" type="search" placeholder="Lọc theo tên model (VD: claude opus, gpt 5, gemini)…" />
+            <span id="pt-picked-count" class="c-badge c-badge--info">0 đã chọn</span>
+            <button id="pt-select-filtered" type="button" class="c-btn c-btn--sm">Chọn đang lọc (tối đa 40)</button>
+            <button id="pt-clear-picked" type="button" class="c-btn c-btn--sm">Bỏ chọn</button>
+            <button id="pt-run-ping" type="button" class="c-btn c-btn--sm c-btn--primary">Test Ping (1 lượt)</button>
+            <button id="pt-run-bench" type="button" class="c-btn c-btn--sm c-btn--primary">Benchmark (3 lượt)</button>
+            <button id="pt-cancel-bench" type="button" class="c-btn c-btn--sm c-btn--danger" hidden>Dừng</button>
+          </div>
+          <div id="pt-model-list" class="c-list-box"></div>
+        </div>
+
+        <div id="pt-progress-wrap" class="c-card" hidden>
+          <div id="pt-progress-text" class="c-card-meta">Đang chạy kiểm tra…</div>
+          <div class="c-progress"><div id="pt-progress-bar" class="c-progress-bar"></div></div>
+        </div>
+
+        <div id="pt-results-wrap" class="c-table-wrap" hidden>
+          <table class="c-table">
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>OK / Lượt</th>
+                <th>Median</th>
+                <th>P90</th>
+                <th>Min · Max</th>
+                <th>Lỗi / Trạng thái</th>
+                <th>Hành động nhanh</th>
+              </tr>
+            </thead>
+            <tbody id="pt-results-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Read-only Log Tail Viewer Modal -->
+    <div id="log-modal-backdrop" class="c-modal-backdrop" hidden>
+      <div class="c-modal c-modal--wide" role="dialog" aria-modal="true" aria-labelledby="log-modal-title">
+        <div class="c-modal-head">
+          <span id="log-modal-title" class="c-modal-title">Trình xem Nhật ký Hệ thống (Chỉ đọc)</span>
+          <div class="c-actions">
+            <button id="log-modal-refresh" type="button" class="c-btn c-btn--sm">Tải mới</button>
+            <button id="log-modal-close" type="button" class="c-btn c-btn--sm">Đóng (Esc)</button>
+          </div>
+        </div>
+        <div class="c-toolbar-group">
+          <label class="c-check-inline" for="log-file-select">
+            Tệp log:
+            <select id="log-file-select" class="c-input c-input--sm">
+              <option value="server.log">server.log</option>
+              <option value="ollama.log">ollama.log</option>
+              <option value="lifecycle.jsonl">lifecycle.jsonl</option>
+              <option value="monitor_app.log">monitor/app.log</option>
+            </select>
+          </label>
+          <input id="log-filter-input" class="c-input c-input--sm" type="search" placeholder="Lọc dòng (ERROR, WARN, slot…)" />
+          <span id="log-meta-text" class="c-card-meta"></span>
+        </div>
+        <div id="log-lines-box" class="c-log-view"></div>
+      </div>
+    </div>
+
+    <!-- Taxonomy V3.1 Security Audit Modal -->
     <div id="audit-modal-backdrop" class="c-modal-backdrop" hidden>
       <div class="c-modal" role="dialog" aria-modal="true" aria-labelledby="audit-modal-title">
-        <div class="c-topbar">
+        <div class="c-modal-head">
           <div class="c-brand">
             <span id="audit-modal-title">Kiểm định An toàn Provider (Taxonomy V3.1)</span>
             <span id="audit-verdict-badge" class="c-badge c-badge--warn">Đang chạy…</span>
@@ -417,7 +602,7 @@
           </nav>
           <div class="c-actions">
             <button id="audit-modal-rerun" type="button" class="c-btn c-btn--sm" title="Chạy lại trực tiếp 7 probe V3.1 trên mạng thay vì đọc cache">Đo lại (7 probe)</button>
-            <button id="audit-modal-close" type="button" class="c-btn">Đóng</button>
+            <button id="audit-modal-close" type="button" class="c-btn c-btn--sm">Đóng (Esc)</button>
           </div>
         </div>
 
@@ -452,6 +637,23 @@
         </section>
       </div>
     </div>
+
+    <!-- Reusable 2-Step Confirmation Modal -->
+    <div id="confirm-modal-backdrop" class="c-modal-backdrop c-confirm-backdrop" hidden>
+      <div class="c-modal c-modal--compact" role="alertdialog" aria-modal="true" aria-labelledby="confirm-modal-title">
+        <div class="c-modal-head">
+          <span id="confirm-modal-title" class="c-modal-title">Xác nhận thao tác</span>
+        </div>
+        <div id="confirm-modal-message" class="c-card-meta"></div>
+        <div class="c-actions">
+          <button id="confirm-modal-cancel" type="button" class="c-btn">Hủy</button>
+          <button id="confirm-modal-ok" type="button" class="c-btn c-btn--danger">Xác nhận</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="floating-menu" class="c-menu" role="menu" hidden></div>
+    <div id="toast-stack" class="c-toast-stack" aria-live="polite"></div>
   </div>
   <script type="module" src="src/main.js"></script>
 </body>

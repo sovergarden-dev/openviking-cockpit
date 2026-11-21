@@ -100,9 +100,9 @@ openviking-cockpit/
 │   ├── TAXONOMY_V3_1.md                # Đặc tả kiến trúc kiểm định V3.1 toàn văn
 │   └── TAXONOMY_V2_2.md                # Đặc tả kiến trúc V2.2
 ├── cockpit_rs/                         # Phân hệ Rust / Tauri V2 độc lập (openviking-cockpit.exe)
-│   ├── src/                            # Lõi DPAPI, DACL Safe Write, Config Gate, Service Control, Storage Inspector, Telemetry, Watchlist, Auditor V3.1
-│   ├── src-tauri/                      # Tauri V2 Desktop Host, Tray Balloon, Khởi động Windows & 21 lệnh IPC async
-│   └── ui/                             # Giao diện Dark Dashboard 4 Tab (Tổng quan + Hàng đợi + Điều khiển Server, Định tuyến Slot, Dự trữ, Bộ nhớ & Tra cứu chỉ đọc) & 3-Tab Audit Modal
+│   ├── src/                            # Lõi DPAPI, DACL Safe Write, Config Gate, Service Control, Storage Inspector (Hygiene Dry-run & Log Tail), Provider Probe & Benchmark, Telemetry, Watchlist, Auditor V3.1
+│   ├── src-tauri/                      # Tauri V2 Desktop Host, Tray Balloon, Khởi động Windows, Quản lý vòng đời Slot & 34 lệnh IPC async
+│   └── ui/                             # Giao diện ES Modules Dark Dashboard 4 Tab (Tổng quan + Hàng đợi + Điều khiển Server, Định tuyến Slot nổi bật active, Dự trữ, Bộ nhớ + Tra cứu + Hygiene Dry-run), Slide-over Drawer, Settings Popover, Audit / Provider Explorer & Benchmark / Log Tail Viewer Modals
 ├── integrations/antigravity/           # Plugin openviking-memory (MCP Stdio 5 công cụ an toàn dùng chung bộ nhớ cho Antigravity)
 ├── ops/                                # Trình khởi chạy ẩn watchdog, dọn khóa stale (ov_stale_lock_clean.py) & bọc vòng đời (ov_lifecycle.py)
 ├── scripts/                            # Tiện ích vận hành chạy từ repo (deploy_to_live.ps1, ov_storage_hygiene.py, install_antigravity_plugin.py, retrofit ACL, retention, sync)
