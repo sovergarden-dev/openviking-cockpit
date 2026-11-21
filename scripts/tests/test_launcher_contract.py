@@ -87,5 +87,24 @@ class TestLauncherContract(unittest.TestCase):
             "Ollama serve must direct stdout to nul to prevent Gin log ballooning"
         )
 
+    def test_cmd_uses_windows_backslashes_for_filesystem_paths(self):
+        """Windowless CMD must never pass forward-slash filesystem paths to cmd.exe built-ins."""
+        content = self.cmd_path.read_text(encoding="utf-8")
+        executable_lines = [
+            line.strip()
+            for line in content.splitlines()
+            if line.strip() and not line.strip().lower().startswith(("rem", "::", "@rem"))
+        ]
+        for line in executable_lines:
+            self.assertNotRegex(
+                line,
+                r"%(?:HOME_DIR|USERPROFILE|LOCALAPPDATA|LOG_DIR|DATA_DIR)%/",
+                f"Forward-slash path breaks cmd.exe built-ins (del/move/mkdir): {line}",
+            )
+            if line.lower().startswith("set ") and any(
+                k in line for k in ("HOME_DIR=", "SERVER=", "OLLAMA=", "LOG_DIR=", "LOG=", "OLLAMA_LOG=", "LIFECYCLE_LOG=", "DATA_DIR=")
+            ):
+                self.assertNotIn("/", line, f"Windows path variable must use backslashes: {line}")
+
 if __name__ == "__main__":
     unittest.main()

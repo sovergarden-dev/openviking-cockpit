@@ -25,20 +25,22 @@ function setDriftBanner(message) {
 }
 
 function computeLiveSlotDriftReason(slots, cfg, live) {
-  if (cfg?.drift?.drift) return cfg.drift.reason;
   const liveIds = live?.credential_ids;
-  if (!Array.isArray(liveIds) || liveIds.length === 0 || !Array.isArray(slots) || slots.length === 0) {
+  if (Array.isArray(liveIds) && liveIds.length > 0 && Array.isArray(slots) && slots.length > 0) {
+    let confIds = slots.map((s) => s.id).filter(Boolean);
+    if (confIds.length === 1 && confIds[0] === "default") confIds = ["credential-0"];
+    const countMismatch = typeof live.n === "number" && live.n !== slots.length;
+    const idsMismatch =
+      confIds.length !== liveIds.length || confIds.some((id, idx) => id !== liveIds[idx]);
+    if (countMismatch || idsMismatch) {
+      return (
+        cfg?.drift?.reason ||
+        "Chuỗi Slot trong ov.conf trên đĩa đã thay đổi so với tiến trình OpenViking đang chạy trên RAM."
+      );
+    }
     return "";
   }
-  let confIds = slots.map((s) => s.id).filter(Boolean);
-  if (confIds.length === 1 && confIds[0] === "default") confIds = ["credential-0"];
-  const countMismatch = typeof live.n === "number" && live.n !== slots.length;
-  const idsMismatch =
-    confIds.length !== liveIds.length || confIds.some((id, idx) => id !== liveIds[idx]);
-  if (countMismatch || idsMismatch) {
-    return "Chuỗi Slot trong ov.conf trên đĩa đã thay đổi so với tiến trình OpenViking đang chạy trên RAM.";
-  }
-  return "";
+  return cfg?.drift?.drift ? cfg.drift.reason : "";
 }
 
 async function hotSwitchSlot(slotIndex, btn) {
@@ -76,7 +78,7 @@ async function probeSingleSlot(slot, btn) {
   }
 }
 
-async function reorderSlot(op) {
+async function reorderSlot(op, allowAuditPrompt = true) {
   try {
     const out = await invokeCmd("reorder_slot", {
       expectedSha: state.confSha,
@@ -86,7 +88,7 @@ async function reorderSlot(op) {
     showToast("Đã cập nhật thứ tự Slot trong ov.conf.", "ok");
     await state.onRefreshRequested?.();
   } catch (err) {
-    if (isAuditRequiredError(err)) {
+    if (allowAuditPrompt && isAuditRequiredError(err)) {
       const candIdx =
         op.op === "promote_to_primary" ? op.index : op.b === 0 ? op.a : op.b;
       const candSlot = (state.slots || []).find((s) => s.slot_index === candIdx);
@@ -95,7 +97,7 @@ async function reorderSlot(op) {
         model: candSlot?.model || `Slot #${candIdx}`,
         auditTarget: { source: "slot", slot_index: candIdx },
         allowUnaudit: false,
-        retryAction: () => reorderSlot(op),
+        retryAction: () => reorderSlot(op, false),
       });
       return;
     }

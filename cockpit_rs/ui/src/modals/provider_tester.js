@@ -5,10 +5,22 @@ import { enqueueMonitorMutation, MAX_WATCHES, state } from "../state.js";
 import { createCell, filterModelIds, normalizeEndpoint } from "../utils/format.js";
 
 let sourceOptions = [];
+let activeSourceKey = "";
 let loadedIds = [];
 let selectedModels = new Set();
 let lastBenchmarkDesc = null;
 let lastBenchmarkRows = [];
+
+function resetLoadedModelPicker() {
+  loadedIds = [];
+  selectedModels.clear();
+  const filterEl = document.getElementById("pt-model-filter");
+  if (filterEl) filterEl.value = "";
+  const pickerSection = document.getElementById("pt-picker-section");
+  if (pickerSection) pickerSection.hidden = true;
+  const box = document.getElementById("pt-model-list");
+  if (box) box.replaceChildren();
+}
 
 export function closeProviderTester() {
   const backdrop = document.getElementById("provider-modal-backdrop");
@@ -461,12 +473,10 @@ export function setupProviderTester() {
     if (ev.target === backdrop) closeProviderTester();
   });
 
-  document.getElementById("pt-source-select")?.addEventListener("change", () => {
+  document.getElementById("pt-source-select")?.addEventListener("change", (ev) => {
+    activeSourceKey = ev.currentTarget.value || "";
     syncInlineVisibility();
-    loadedIds = [];
-    selectedModels.clear();
-    const pickerSection = document.getElementById("pt-picker-section");
-    if (pickerSection) pickerSection.hidden = true;
+    resetLoadedModelPicker();
     syncPickedCountUi();
   });
   document.getElementById("pt-inline-base")?.addEventListener("input", () => {
@@ -579,10 +589,18 @@ export function openProviderTester(preferredSourceKey = "") {
     select.appendChild(og);
   }
 
+  let nextKey = "";
   if (preferredSourceKey && sourceOptions.some((o) => o.key === preferredSourceKey)) {
-    select.value = preferredSourceKey;
+    nextKey = preferredSourceKey;
   } else if (sourceOptions.length > 0) {
-    select.value = sourceOptions[0].key;
+    nextKey = sourceOptions[0].key;
+  }
+  select.value = nextKey;
+  if (nextKey !== activeSourceKey) {
+    resetLoadedModelPicker();
+    activeSourceKey = nextKey;
+  } else if (loadedIds.length > 0) {
+    renderModelChecklist();
   }
 
   syncInlineVisibility();

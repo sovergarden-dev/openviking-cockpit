@@ -1843,12 +1843,10 @@ pub struct ServiceControlOutcome {
     pub elapsed_ms: u64,
 }
 
-#[tauri::command]
-pub async fn control_openviking_service(
-    state: State<'_, Arc<CockpitState>>,
-    action: String,
-) -> Result<ServiceControlOutcome, String> {
-    let parsed_action = ServiceAction::parse(&action)?;
+pub(crate) async fn execute_service_action_and_wait(
+    state: &Arc<CockpitState>,
+    parsed_action: ServiceAction,
+) -> Result<(ServiceControlOutcome, TelemetrySnapshot), String> {
     let _guard = state.service_lock.lock().await;
     let started = std::time::Instant::now();
     let ov_home = state.paths.ov_home.clone();
@@ -1878,9 +1876,9 @@ pub async fn control_openviking_service(
     }
 
     state.invalidate_poll_meta_cache();
-    let _ = collect_telemetry_once(state.inner()).await;
+    let snap = collect_telemetry_once(state).await;
 
-    Ok(ServiceControlOutcome {
+    let outcome = ServiceControlOutcome {
         action: step.action,
         task_end_rc: step.task_end_rc,
         task_run_rc: step.task_run_rc,
@@ -1889,7 +1887,18 @@ pub async fn control_openviking_service(
         health_ok,
         ready_ok,
         elapsed_ms: started.elapsed().as_millis() as u64,
-    })
+    };
+    Ok((outcome, snap))
+}
+
+#[tauri::command]
+pub async fn control_openviking_service(
+    state: State<'_, Arc<CockpitState>>,
+    action: String,
+) -> Result<ServiceControlOutcome, String> {
+    let parsed_action = ServiceAction::parse(&action)?;
+    let (outcome, _) = execute_service_action_and_wait(state.inner(), parsed_action).await?;
+    Ok(outcome)
 }
 
 #[tauri::command]

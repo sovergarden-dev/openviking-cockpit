@@ -215,6 +215,21 @@ function syncPeerScopeOptions(peers) {
   }
 }
 
+function setMemoryTableHeaders(mode) {
+  const col1 = document.getElementById("memory-col-1");
+  const col4 = document.getElementById("memory-col-4");
+  if (col1) col1.textContent = mode === "browse" ? "Loại" : "Điểm";
+  if (col4) col4.textContent = mode === "browse" ? "Tên mục" : "Tóm tắt";
+}
+
+function computeParentVikingUri(uri) {
+  const raw = String(uri || "").trim();
+  if (!raw.startsWith("viking://")) return "";
+  const parts = raw.slice("viking://".length).split("/").filter(Boolean);
+  if (parts.length <= 2) return "";
+  return `viking://${parts.slice(0, -1).join("/")}`;
+}
+
 async function browseMemoryDirectory(uri) {
   const reqSeq = ++state.searchRequestSeq;
   const searchBody = document.getElementById("memory-search-tbody");
@@ -225,8 +240,28 @@ async function browseMemoryDirectory(uri) {
   try {
     const entries = await invokeCmd("list_viking_dir", { uri, limit: 80 });
     if (reqSeq !== state.searchRequestSeq) return;
+    setMemoryTableHeaders("browse");
     searchBody.replaceChildren();
     if (statusEl) statusEl.textContent = `Đang duyệt '${uri}': ${entries.length} mục (chỉ đọc).`;
+    const parentUri = computeParentVikingUri(uri);
+    if (parentUri) {
+      const upTr = document.createElement("tr");
+      upTr.appendChild(createCell("↑", { mono: true, nowrap: true }));
+      upTr.appendChild(createCell("parent", { mono: true, nowrap: true }));
+      upTr.appendChild(createCell(parentUri, { mono: true, truncate: true, wide: true }));
+      upTr.appendChild(createCell("↑ Thư mục cha", { truncate: true, wide: true }));
+
+      const upTd = document.createElement("td");
+      upTd.className = "c-row-actions";
+      const upBtn = document.createElement("button");
+      upBtn.type = "button";
+      upBtn.className = "c-btn c-btn--sm";
+      upBtn.textContent = "Lên thư mục cha";
+      upBtn.addEventListener("click", () => browseMemoryDirectory(parentUri));
+      upTd.appendChild(upBtn);
+      upTr.appendChild(upTd);
+      searchBody.appendChild(upTr);
+    }
     if (entries.length === 0) {
       searchBody.appendChild(createEmptyRow(5, `Thư mục '${uri}' hiện trống.`));
       return;
@@ -359,6 +394,7 @@ export function setupMemoryPanel() {
       });
       if (reqSeq !== state.searchRequestSeq) return;
       statusEl.textContent = `Tìm thấy ${out.hits.length} kết quả (tổng khớp: ${out.total}) trong ${out.latency_ms} ms.`;
+      setMemoryTableHeaders("search");
       searchBody.replaceChildren();
       if (out.hits.length === 0) {
         searchBody.appendChild(

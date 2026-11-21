@@ -208,8 +208,14 @@ function setupGlobalKeyboard() {
 
     if (ev.key === "F5" || ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "r")) {
       ev.preventDefault();
-      refreshAll();
-      showToast("Đã làm mới dữ liệu.", "ok");
+      refreshAll()
+        .then((ok) =>
+          showToast(
+            ok ? "Đã làm mới dữ liệu." : "Làm mới dữ liệu chỉ thành công một phần.",
+            ok ? "ok" : "warn"
+          )
+        )
+        .catch((err) => showToast(`Lỗi làm mới dữ liệu: ${err}`, "danger"));
       return;
     }
 
@@ -236,7 +242,7 @@ function setupGlobalKeyboard() {
 }
 
 async function refreshAll() {
-  if (!hasTauriCore()) return;
+  if (!hasTauriCore()) return false;
   const tasks = [
     invokeCmd("get_telemetry_status"),
     invokeCmd("read_config"),
@@ -249,6 +255,11 @@ async function refreshAll() {
   if (snap.status === "fulfilled") renderTelemetry(snap.value);
   if (cfg.status === "fulfilled") renderConfig(cfg.value);
   if (mon.status === "fulfilled") renderMonitorState(mon.value);
+  return (
+    snap.status === "fulfilled" &&
+    cfg.status === "fulfilled" &&
+    mon.status === "fulfilled"
+  );
 }
 
 async function setupStreaming() {
@@ -260,6 +271,7 @@ async function setupStreaming() {
   await listenEvent("telemetry://snapshot", (ev) => renderTelemetry(ev.payload));
   await listenEvent("monitor://updated", (ev) => renderMonitorState(ev.payload));
   await listenEvent("tray://open-log", (ev) => openLogViewer(ev.payload || "server.log"));
+  await listenEvent("service://restarted", () => refreshAll());
   await listenEvent("watchlist://auto-disabled", (ev) => {
     const p = ev.payload;
     showToast(

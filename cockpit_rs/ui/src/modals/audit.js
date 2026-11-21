@@ -164,7 +164,8 @@ export async function runGuidedSlotAuditWorkflow({
   const lvl = Number(verdict?.verdict_level || 0);
   const safePrimary =
     !verdict?.safety_stop && Boolean(verdict?.memory_permitted) && lvl >= 4;
-  const safeFallback = !verdict?.safety_stop && lvl >= 3;
+  const safeFallback =
+    !verdict?.safety_stop && (lvl === 3 || (lvl >= 4 && Boolean(verdict?.memory_permitted)));
   const passed = slotIndex === 0 ? safePrimary : safeFallback;
 
   if (!passed) {

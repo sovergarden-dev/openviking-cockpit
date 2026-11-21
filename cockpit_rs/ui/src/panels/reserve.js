@@ -103,7 +103,8 @@ async function promoteReserveToSlot(
   targetSlotOverride,
   btn,
   onDoneRefresh,
-  allowUnauditedOverride = null
+  allowUnauditedOverride = null,
+  allowAuditPrompt = true
 ) {
   const slotIndex =
     typeof targetSlotOverride === "number"
@@ -126,7 +127,7 @@ async function promoteReserveToSlot(
     showToast(`Đã đưa vào Slot #${slotIndex} thành công.`, "ok");
     await onDoneRefresh?.();
   } catch (err) {
-    if (isAuditRequiredError(err)) {
+    if (allowAuditPrompt && isAuditRequiredError(err)) {
       const rec = (state.lastMonitorSummary?.reserves || []).find((r) => r.index === reserveIndex);
       await runGuidedSlotAuditWorkflow({
         slotIndex,
@@ -134,9 +135,9 @@ async function promoteReserveToSlot(
         auditTarget: { source: "reserve", index: reserveIndex },
         allowUnaudit: true,
         retryAction: () =>
-          promoteReserveToSlot(reserveIndex, slotIndex, btn, onDoneRefresh, false),
+          promoteReserveToSlot(reserveIndex, slotIndex, btn, onDoneRefresh, false, false),
         unauditRetryAction: () =>
-          promoteReserveToSlot(reserveIndex, slotIndex, btn, onDoneRefresh, true),
+          promoteReserveToSlot(reserveIndex, slotIndex, btn, onDoneRefresh, true, false),
       });
       return;
     }

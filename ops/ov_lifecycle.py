@@ -29,7 +29,6 @@ import os
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -148,6 +147,20 @@ def _kill_hung_child_tree(child):
         pass
 
 
+def _unlink_with_retry(path_str, attempts=5, delay_s=0.1):
+    if not path_str:
+        return
+    target = Path(path_str)
+    for idx in range(attempts):
+        try:
+            target.unlink(missing_ok=True)
+            return
+        except OSError:
+            if idx + 1 >= attempts:
+                return
+            time.sleep(delay_s)
+
+
 def wait_with_health_monitor(
     child,
     log,
@@ -192,11 +205,11 @@ def wait_with_health_monitor(
         consecutive_failures += 1
         if consecutive_failures >= effective_max and child.poll() is None:
             _kill_hung_child_tree(child)
-            if data_lock_path:
-                try:
-                    Path(data_lock_path).unlink(missing_ok=True)
-                except OSError:
-                    pass
+            try:
+                code = child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                code = HANG_KILLED_RC
+            _unlink_with_retry(data_lock_path)
             observe(
                 log,
                 dict(
@@ -208,10 +221,6 @@ def wait_with_health_monitor(
                     uptime_s=round(time.monotonic() - started, 3),
                 ),
             )
-            try:
-                code = child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                code = HANG_KILLED_RC
             return code if code != 0 else HANG_KILLED_RC
 
     return child.returncode

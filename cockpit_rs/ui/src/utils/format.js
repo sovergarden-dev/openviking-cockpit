@@ -124,25 +124,21 @@ export function formatBackendError(err) {
   return raw;
 }
 
-export function createAuditBadgeElement(row, onAuditClick = null) {
+export function createAuditBadgeElement(row, onAuditClick) {
   const wrap = document.createElement("span");
   wrap.className = "c-actions";
-  const interactive = typeof onAuditClick === "function";
   const buildBadge = (variantClass, text, titleText) => {
-    const el = document.createElement(interactive ? "button" : "span");
-    if (interactive) {
-      el.type = "button";
-      el.className = `c-badge c-badge--interactive ${variantClass}`;
-      el.title = `${titleText} · Bấm để mở/chạy Kiểm định V3.1`;
+    const el = document.createElement("button");
+    el.type = "button";
+    el.className = `c-badge c-badge--interactive ${variantClass}`;
+    el.title = `${titleText} · Bấm để mở/chạy Kiểm định V3.1`;
+    el.textContent = text;
+    if (typeof onAuditClick === "function") {
       el.addEventListener("click", (ev) => {
         ev.stopPropagation();
         onAuditClick();
       });
-    } else {
-      el.className = `c-badge ${variantClass}`;
-      el.title = titleText;
     }
-    el.textContent = text;
     return el;
   };
 

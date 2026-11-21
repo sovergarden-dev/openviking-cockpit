@@ -261,9 +261,10 @@ export function setupEditorDrawer() {
     const apiBase = document.getElementById("drawer-base").value.trim();
     const rawKey = document.getElementById("drawer-key").value.trim();
     const inheritSource = resolveInheritSourceSelection();
+    const slotIndex =
+      ctx.kind === "slot" ? Number(document.getElementById("drawer-slot-index").value) : 0;
 
-    const saveSlotWithOptionalGuidedAudit = async (allowUnaudited) => {
-      const slotIndex = Number(document.getElementById("drawer-slot-index").value);
+    const saveSlotWithOptionalGuidedAudit = async (allowUnaudited, allowAuditPrompt = true) => {
       submitBtn.disabled = true;
       statusEl.textContent = "Đang kiểm định cổng an toàn & lưu nguyên tử vào ov.conf…";
       try {
@@ -284,7 +285,7 @@ export function setupEditorDrawer() {
         closeEditorDrawer();
         await state.onRefreshRequested?.();
       } catch (err) {
-        if (isAuditRequiredError(err)) {
+        if (allowAuditPrompt && isAuditRequiredError(err)) {
           const auditTarget =
             !rawKey &&
             !inheritSource &&
@@ -298,10 +299,10 @@ export function setupEditorDrawer() {
             model,
             auditTarget,
             allowUnaudit: true,
-            retryAction: () => saveSlotWithOptionalGuidedAudit(false),
+            retryAction: () => saveSlotWithOptionalGuidedAudit(false, false),
             unauditRetryAction: () => {
               document.getElementById("drawer-allow-unaudited").checked = true;
-              return saveSlotWithOptionalGuidedAudit(true);
+              return saveSlotWithOptionalGuidedAudit(true, false);
             },
           });
           if (!completed) {

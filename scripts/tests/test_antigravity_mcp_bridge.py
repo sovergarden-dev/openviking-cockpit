@@ -85,7 +85,8 @@ class _MockOpenVikingHandler(BaseHTTPRequestHandler):
                 {
                     "status": "ok",
                     "result": [
-                        {"uri": "viking://user/default/memories/cases", "size": 0, "isDir": True}
+                        {"uri": "viking://", "size": 0, "isDir": True},
+                        {"uri": "viking://user/default/memories/cases", "size": 0, "isDir": True},
                     ],
                 },
             )

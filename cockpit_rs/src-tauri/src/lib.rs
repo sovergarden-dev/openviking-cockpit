@@ -11,14 +11,16 @@ use tauri::{
     WebviewWindow, Window, WindowEvent,
 };
 
-use cockpit_rs::services::service_control::{execute_service_step, ServiceAction};
+use cockpit_rs::services::service_control::ServiceAction;
 use cockpit_rs::services::telemetry::{EndpointStatus, TelemetrySnapshot};
 use cockpit_rs::services::watchlist::{
     format_window_geometry, load_monitor_state, parse_window_geometry,
     save_monitor_state_with_live_policy,
 };
 
-use crate::commands::{collect_telemetry_once, run_due_watch_auto_pass};
+use crate::commands::{
+    collect_telemetry_once, execute_service_action_and_wait, run_due_watch_auto_pass,
+};
 use crate::state::{CockpitPaths, CockpitState};
 
 /// Emits a native Win32 tray balloon (`Shell_NotifyIconW` `NIF_INFO`) without raw credentials (`COCKPIT_RUST_SPEC` §4.3).
@@ -292,24 +294,37 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                     let st_ref = std::sync::Arc::clone(&st);
                     let app_handle = app.clone();
                     tauri::async_runtime::spawn(async move {
-                        let _guard = st_ref.service_lock.lock().await;
-                        let ov_home = st_ref.paths.ov_home.clone();
-                        let port = st_ref.server_port;
-                        let res = tauri::async_runtime::spawn_blocking(move || {
-                            execute_service_step(ServiceAction::Restart, &ov_home, port)
-                        })
-                        .await;
-                        st_ref.invalidate_poll_meta_cache();
-                        let snap = collect_telemetry_once(&st_ref).await;
-                        let _ = app_handle.emit("telemetry://snapshot", &snap);
-                        let msg = match res {
-                            Ok(Ok(_)) => {
-                                "Đã gửi lệnh khởi động lại OpenViking Server từ khay hệ thống."
+                        let msg = match execute_service_action_and_wait(
+                            &st_ref,
+                            ServiceAction::Restart,
+                        )
+                        .await
+                        {
+                            Ok((outcome, snap)) => {
+                                let _ = app_handle.emit("telemetry://snapshot", &snap);
+                                let _ = app_handle.emit("service://restarted", ());
+                                if outcome.ready_ok {
+                                    format!(
+                                        "OpenViking Server đã khởi động lại và sẵn sàng ({:.1}s).",
+                                        outcome.elapsed_ms as f64 / 1000.0
+                                    )
+                                } else if outcome.health_ok {
+                                    "OpenViking Server đã phản hồi /health và đang nạp /ready."
+                                        .to_string()
+                                } else {
+                                    "Đã gửi lệnh khởi động lại nhưng cổng 19330 chưa phản hồi /ready."
+                                        .to_string()
+                                }
                             }
-                            _ => "Không thể khởi động lại OpenViking Server từ khay hệ thống.",
+                            Err(_) => {
+                                let snap = collect_telemetry_once(&st_ref).await;
+                                let _ = app_handle.emit("telemetry://snapshot", &snap);
+                                "Không thể khởi động lại OpenViking Server từ khay hệ thống."
+                                    .to_string()
+                            }
                         };
                         let _ = tauri::async_runtime::spawn_blocking(move || {
-                            let _ = dispatch_tray_balloon("OpenViking Cockpit", msg);
+                            let _ = dispatch_tray_balloon("OpenViking Cockpit", &msg);
                         })
                         .await;
                     });

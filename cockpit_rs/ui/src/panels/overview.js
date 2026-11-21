@@ -139,10 +139,13 @@ export function renderTelemetry(snap) {
     ? `Warm: ${memRes.hotness_distribution?.warm ?? 0} · Cold: ${memRes.hotness_distribution?.cold ?? 0} · ${snap.memories_latency_ms} ms`
     : `${snap.memories_latency_ms} ms`;
 
+  const prevCreds = Array.isArray(prevVlm?.credential_ids) ? prevVlm.credential_ids.join("\0") : "";
+  const curCreds = Array.isArray(state.liveVlm?.credential_ids) ? state.liveVlm.credential_ids.join("\0") : "";
   const vlmChanged =
     prevVlm?.index !== state.liveVlm?.index ||
     prevVlm?.manual_hold !== state.liveVlm?.manual_hold ||
-    prevVlm?.n !== state.liveVlm?.n;
+    prevVlm?.n !== state.liveVlm?.n ||
+    prevCreds !== curCreds;
   if (vlmChanged || !prevVlm) {
     state.onRenderSlots?.();
   }
@@ -163,6 +166,8 @@ export function renderWatchTable(summary, onMonitorUpdated) {
     addBtn.disabled = watches.length >= MAX_WATCHES;
     addBtn.title = watches.length >= MAX_WATCHES ? `Đã đủ tối đa ${MAX_WATCHES} key` : "";
   }
+  const probeAllBtn = document.getElementById("btn-watch-probe-all");
+  if (probeAllBtn) probeAllBtn.disabled = watches.length === 0;
 
   const masterAuto = document.getElementById("watch-master-auto");
   if (masterAuto) masterAuto.checked = Boolean(summary.watch_auto_enabled);
@@ -378,9 +383,11 @@ export async function runServiceAction(action) {
   state.serviceBusy = true;
   const startBtn = document.getElementById("btn-server-start");
   const restartBtn = document.getElementById("btn-server-restart");
+  const driftRestartBtn = document.getElementById("btn-drift-apply-restart");
   const statusEl = document.getElementById("server-action-status");
   if (startBtn) startBtn.disabled = true;
   if (restartBtn) restartBtn.disabled = true;
+  if (driftRestartBtn) driftRestartBtn.disabled = true;
   if (statusEl) {
     statusEl.hidden = false;
     statusEl.textContent =
@@ -412,6 +419,7 @@ export async function runServiceAction(action) {
     state.serviceBusy = false;
     if (startBtn) startBtn.disabled = false;
     if (restartBtn) restartBtn.disabled = false;
+    if (driftRestartBtn) driftRestartBtn.disabled = false;
   }
 }
 
@@ -453,7 +461,7 @@ export function setupOverviewPanel({ onActivateTab, onMonitorUpdated }) {
       }
       showToast(`Đã thử xong ${watches.length} key Theo dõi (${passed} OK).`, "ok");
     } finally {
-      if (btn.isConnected) btn.disabled = false;
+      if (btn.isConnected) btn.disabled = (state.lastMonitorSummary?.watches?.length || 0) === 0;
     }
   });
   document.getElementById("btn-watch-provider-test")?.addEventListener("click", () => {
