@@ -6,6 +6,7 @@ All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Secur
 
 ### Changed
 - Removed the six test-only `QueueStatus::total_*` and `TelemetrySnapshot::is_overall_healthy` exports in `cockpit_rs/src/services/telemetry.rs` so Rust library reachability aligns strictly with production callers.
+- Extended `scripts/deploy_to_live.ps1` with `-SyncShortcuts` to cut Desktop, Start Menu, and Startup `OpenViking Monitor.lnk` shortcuts over to `openviking-cockpit.exe`, and documented the `AtLogon` Scheduled Task trigger in `docs/ops/windowless-startup.md`.
 
 ### Fixed
 - Synced the `ov.conf` `(mtime, size)` poll cache synchronously at the start of `switch_active_slot`, `get_memory_overview`, `search_memories`, and `read_viking_content` in `cockpit_rs/src-tauri/src/commands.rs`, raised the `control_openviking_service` cold-boot readiness deadline from 35s to 75s to cover the 15s Ollama warm-up plus vector index load, and added a 250ms Windows handle-release wait before unlinking `.openviking.lock` after terminating hung processes on `ServiceAction::Start` in `cockpit_rs/src/services/service_control.rs`.

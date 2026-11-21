@@ -5,6 +5,7 @@ param(
     [string]$LiveDir = "",
     [switch]$SyncOps,
     [switch]$SyncAntigravityPlugin,
+    [switch]$SyncShortcuts,
     [switch]$Apply,
     [string]$PythonExe = "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
 )
@@ -36,11 +37,11 @@ $OpsPairs = @(
 )
 
 if (-not $Apply) {
-    Write-Output "[PLAN ONLY] Target=CockpitRs | LiveExe=$LiveExe | SyncOps=$SyncOps"
+    Write-Output "[PLAN ONLY] Target=CockpitRs | LiveExe=$LiveExe | SyncOps=$SyncOps | SyncShortcuts=$SyncShortcuts"
     foreach ($p in $OpsPairs) {
         Write-Output ("  OpsCandidate: " + $p.Src + " -> " + $p.Dst)
     }
-    Write-Output "Pass -Apply (and optionally -SyncOps) to build --release and deploy atomically."
+    Write-Output "Pass -Apply (and optionally -SyncOps, -SyncAntigravityPlugin, -SyncShortcuts) to build --release and deploy atomically."
     exit 0
 }
 
@@ -85,5 +86,35 @@ if ($SyncAntigravityPlugin) {
     & $PythonExe -X utf8 $PluginInstaller --python-exe $PythonExe --apply
     if ($LASTEXITCODE -ne 0) {
         throw "Antigravity plugin installation failed (exit $LASTEXITCODE)."
+    }
+}
+
+if ($SyncShortcuts) {
+    $IconPath = Join-Path $LiveMonitorDir "openviking.ico"
+    $Ws = New-Object -ComObject WScript.Shell
+    $ShortcutSpecs = @(
+        @{ Path = (Join-Path $env:USERPROFILE "Desktop\OpenViking Monitor.lnk"); Args = ""; Optional = $false },
+        @{ Path = (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\OpenViking Monitor.lnk"); Args = ""; Optional = $false },
+        @{ Path = (Join-Path $LiveMonitorDir "OpenViking Monitor.lnk"); Args = ""; Optional = $false },
+        @{ Path = (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup\OpenViking Monitor.lnk"); Args = "--tray"; Optional = $true }
+    )
+    foreach ($spec in $ShortcutSpecs) {
+        if ($spec.Optional -and -not (Test-Path -LiteralPath $spec.Path)) {
+            continue
+        }
+        $parentDir = Split-Path -Parent $spec.Path
+        if (-not (Test-Path -LiteralPath $parentDir -PathType Container)) {
+            New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
+        }
+        $sc = $Ws.CreateShortcut($spec.Path)
+        $sc.TargetPath = $LiveExe
+        $sc.Arguments = $spec.Args
+        $sc.WorkingDirectory = $LiveMonitorDir
+        if (Test-Path -LiteralPath $IconPath -PathType Leaf) {
+            $sc.IconLocation = "$IconPath,0"
+        }
+        $sc.Description = "OpenViking Cockpit"
+        $sc.Save()
+        Write-Output ("SYNCED_SHORTCUT=" + $spec.Path + " -> " + $LiveExe + $(if ($spec.Args) { " " + $spec.Args } else { "" }))
     }
 }

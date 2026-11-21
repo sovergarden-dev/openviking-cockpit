@@ -1,6 +1,6 @@
 # Windowless OpenViking startup
 
-OpenViking is launched by the Windows Scheduled Task **`OpenViking Autostart`** (`InteractiveToken`, no triggers — the Cockpit Monitor starts it with `schtasks /Run` and restarts it with `/End` + `/Run`).
+OpenViking is launched by the Windows Scheduled Task **`OpenViking Autostart`** (`InteractiveToken`, with an `AtLogon` trigger for the interactive user, and on-demand start/restart from the Cockpit via `schtasks /Run` and `/End` + `/Run`).
 
 Historically the task ran `cmd.exe /d /c start-openviking.cmd`, which created a visible console showing the Ollama Gin access log (`GET /api/version`, 200, every ~11 s) and duplicating what the Monitor already surfaces. The console is now removed from the desktop entirely, and `logs/server.log`, `logs/ollama.log`, and `logs/lifecycle.jsonl` are the only log surfaces.
 

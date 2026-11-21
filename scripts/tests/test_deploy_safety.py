@@ -13,12 +13,16 @@ class DeploymentSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as directory:
             destination = Path(directory) / 'monitor'
             destination.mkdir()
-            result = subprocess.run(
-                ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-                 str(ROOT / 'scripts/deploy_to_live.ps1'), '-LiveDir', str(destination)],
-                capture_output=True, text=True, timeout=40)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(list(destination.iterdir()), [], 'Default deployment must only show a plan, not write live files')
+            for extra in ([], ['-SyncShortcuts']):
+                result = subprocess.run(
+                    ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                     str(ROOT / 'scripts/deploy_to_live.ps1'), '-LiveDir', str(destination), *extra],
+                    capture_output=True, text=True, timeout=40)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('[PLAN ONLY]', result.stdout)
+                if extra:
+                    self.assertIn('SyncShortcuts=True', result.stdout)
+                self.assertEqual(list(destination.iterdir()), [], 'Default deployment must only show a plan, not write live files')
 
     def test_watch_modules_are_required_deploy_artifacts(self):
         module = self.load_sync()
