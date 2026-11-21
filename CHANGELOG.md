@@ -2,11 +2,21 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
-## [Unreleased]
+## [1.8.0] - 2026-11-21
+
+### Added
+- Added OpenAI-compatible provider model discovery (`GET /v1/models`) and cancellable single/multi-round (`1–5` rounds) latency benchmarking (`cockpit_rs/src/services/provider_probe.rs`, `list_provider_models`, `probe_credential`, `run_provider_benchmark`, `cancel_provider_benchmark`) running 100% inside Rust backend memory with zero secrets sent to WebView IPC, surfaced in a unified Provider Model Explorer & Benchmark modal (`cockpit_rs/ui/src/modals/provider_tester.js`).
+- Added Reserve ping & bounded concurrency batch probing (`probe_reserve_entry`, `probe_reserves_batch` with `≤ 2` concurrent endpoints and per-endpoint serialization, plus `cancel_reserve_batch_probe`), slot connectivity probing, status/latency columns, status filters, multi-column sorting, and persistent backward-compatible `last_probe` tracking on `SpareModelRecord`.
+- Added complete VLM Slot lifecycle operations in `conf_gate.rs` and `commands.rs`: reordering (`swap`), promoting to Primary (`promote_to_primary` with V3.1 gate verification), deleting fallback slots (`>= 1`), editing failback policy (`update_failback_policy` preserving UI `0 <-> 2147483647` sentinel semantics), and Rust-side `Slot -> Reserve` / `Slot -> Watch` cloning plus same-endpoint credential inheritance (`inherit_source`).
+- Added a Slide-over Editor Drawer (`cockpit_rs/ui/src/components/drawer.js`) with inline `/v1/models` lookup and pre-save connectivity check, a `⚙ Cài đặt` header popover, a live Toast notification stack, viewport-clamped `⋯`/right-click context menus, a 2-step destructive Confirmation modal, a read-only Log Tail Viewer modal (`read_log_tail` over `server.log`, `ollama.log`, `lifecycle.jsonl`, `monitor_app.log`), and a read-only `Quét vệ sinh Lưu trữ (Dry-run)` card (`HygieneDryRunSummary`) in `Bộ nhớ & Tra cứu`.
 
 ### Changed
+- Overhauled `cockpit_rs/ui/` layout and refactored `main.js` into native ES modules (`api.js`, `state.js`, `utils/`, `components/`, `modals/`, `panels/`) backed solely by `styles/tokens.css` variables: single-line non-wrapping Topbar with tab badges across `880px–1440px+`, unmistakably highlighted active/hold/failover VLM Slot rows synchronized live with telemetry, compact 1-line table density with sticky action toolbars, audit freshness/expiry indicators (`[M5 · age]` / `[Hết hạn]`), and full `Escape` / `Ctrl+K` keyboard support.
+- Enforced fail-closed cross-endpoint guards inside `conf_gate.rs` and `watchlist.rs` rejecting Base URL changes without an explicit new or inherited matching-endpoint key, and scoped `compute_reserves_sha256` to structural reserve fields (`model`, `api_base`, `api_key`, `note`) so background probes never trigger false revision conflicts.
+- Added a `75s` cold-boot startup grace window to `IncidentTracker` (`evaluate_telemetry_incidents_with_uptime` in `telemetry.rs`) suppressing transient server/embedding offline balloons until either `/ready` succeeds or `75s` elapse after app launch.
 - Removed the six test-only `QueueStatus::total_*` and `TelemetrySnapshot::is_overall_healthy` exports in `cockpit_rs/src/services/telemetry.rs` so Rust library reachability aligns strictly with production callers.
 - Extended `scripts/deploy_to_live.ps1` with `-SyncShortcuts` to cut Desktop, Start Menu, and Startup `OpenViking Monitor.lnk` shortcuts over to `openviking-cockpit.exe`, and documented the `AtLogon` Scheduled Task trigger in `docs/ops/windowless-startup.md`.
+- Updated `docs/specs/COCKPIT_RUST_SPEC.md` and `README.md` to reflect the 34 async IPC commands, native ES module UI layout, and new provider, slot, log, and hygiene capabilities.
 
 ### Fixed
 - Synced the `ov.conf` `(mtime, size)` poll cache synchronously at the start of `switch_active_slot`, `get_memory_overview`, `search_memories`, and `read_viking_content` in `cockpit_rs/src-tauri/src/commands.rs`, raised the `control_openviking_service` cold-boot readiness deadline from 35s to 75s to cover the 15s Ollama warm-up plus vector index load, and added a 250ms Windows handle-release wait before unlinking `.openviking.lock` after terminating hung processes on `ServiceAction::Start` in `cockpit_rs/src/services/service_control.rs`.
