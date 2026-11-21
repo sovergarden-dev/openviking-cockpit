@@ -2,6 +2,18 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
+## [1.8.1] - 2026-11-21
+
+### Changed
+- Unified loopback endpoint checking across `conf_gate.rs`, `auditor_cache.rs`, `provider_probe.rs`, and `watchlist.rs` via `is_loopback_host()`, enforcing HTTPS on non-loopback slot endpoints.
+- Extracted shared helpers for reserve table filtering (`getFilteredReserves` in `reserve.js`), failover audit cache lookups (`lookup_failover_cached_audit` in `commands.rs`), reserve probe fallback matching (`find_reserve_fallback_index`), and watch/reserve duplicate checks (`same_credential_tuple` / `sanitize_monitor_label` in `watchlist.rs`).
+- Removed dead CSS tokens (`--shadow-md`, `--space-6`, `--z-sticky-bar`), redundant `[hidden]` selectors in `app.css`, unused `id="memory-search-badge"` in `index.html`, unused `state.js` properties and redundant JS `export` modifiers, orphaned `WATCH_MAX_TOKENS`, unused `BenchmarkProgressEvent::Failed`, unreferenced public Rust items, and the test-only `evaluate_telemetry_incidents()` wrapper.
+
+### Fixed
+- Keyed per-session slot connectivity badges (`state.slotProbes`) by stable `slot.id` instead of `slot_index` so slot swaps, promotions, and deletions preserve accurate probe badges on each row.
+- Shifted selected indices in `state.selectedReserveIndices` when deleting an earlier Reserve row, updated `drawer.js` slot validation baseline when editing `#drawer-slot-index`, and refreshed remaining `+ Theo dõi` row buttons across open Provider Benchmark results when hitting the 4-key limit.
+- Matched `raw_key` when resolving reserve probe fallback targets in `probe_reserve_entry` and `probe_reserves_batch` after concurrent Reserve list changes.
+
 ## [1.8.0] - 2026-11-21
 
 ### Added
