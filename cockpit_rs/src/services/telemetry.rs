@@ -821,12 +821,22 @@ impl TelemetryClient {
                     .or_else(|| obj.get("is_dir"))
                     .and_then(|v| v.as_bool())
                     .unwrap_or_else(|| raw_name.ends_with('/'));
-                let name = raw_name.trim_matches('/').to_string();
                 let explicit_uri = obj
                     .get("uri")
                     .and_then(|v| v.as_str())
                     .map(str::trim)
                     .filter(|u| u.starts_with("viking://"));
+                let mut name = raw_name.trim_matches('/').to_string();
+                if name.is_empty() {
+                    if let Some(u) = explicit_uri {
+                        name = u
+                            .trim_end_matches('/')
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
+                    }
+                }
                 let entry_uri = explicit_uri
                     .map(|u| u.to_string())
                     .unwrap_or_else(|| format!("{}/{}", base_trimmed, name));
@@ -1544,7 +1554,7 @@ mod tests {
                     ) {
                         (
                             "HTTP/1.1 200 OK",
-                            r#"{"status":"ok","result":[{"name":"profile.md","uri":"viking://user/default/memories/profile.md","isDir":false},{"name":"cases","isDir":true}]}"#,
+                            r#"{"status":"ok","result":[{"uri":"viking://user/default/memories/profile.md","size":128,"isDir":false},{"uri":"viking://user/default/memories/cases","size":0,"isDir":true}]}"#,
                         )
                     } else {
                         ("HTTP/1.1 400 Bad Request", r#"{"status":"error"}"#)

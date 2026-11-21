@@ -20,7 +20,7 @@ from io import TextIOWrapper
 from pathlib import Path
 
 SERVER_NAME = "openviking-memory"
-SERVER_VERSION = "1.9.0"
+SERVER_VERSION = "1.9.1"
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", "2024-11-05"}
 DEFAULT_PROTOCOL_VERSION = "2025-03-26"
 MAX_READ_CHARS = 32_000
@@ -214,10 +214,14 @@ class OpenVikingBridgeClient:
         items = raw_res if isinstance(raw_res, list) else (raw_res.get("entries") or raw_res.get("items") or []) if isinstance(raw_res, dict) else []
         for entry in items[:capped]:
             if isinstance(entry, dict):
+                raw_uri = str(entry.get("uri") or "").strip()
+                raw_name = str(entry.get("name") or entry.get("path") or "").strip("/")
+                if not raw_name and raw_uri.startswith("viking://"):
+                    raw_name = raw_uri.rstrip("/").rsplit("/", 1)[-1]
                 entries.append(
                     {
-                        "name": sanitize_text(str(entry.get("name") or entry.get("path") or "")),
-                        "uri": sanitize_text(str(entry.get("uri") or "")),
+                        "name": sanitize_text(raw_name),
+                        "uri": sanitize_text(raw_uri),
                         "is_dir": bool(entry.get("isDir") or entry.get("is_dir")),
                     }
                 )

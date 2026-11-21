@@ -85,7 +85,7 @@ class _MockOpenVikingHandler(BaseHTTPRequestHandler):
                 {
                     "status": "ok",
                     "result": [
-                        {"name": "preferences", "uri": "viking://user/default/memories/preferences", "isDir": True}
+                        {"uri": "viking://user/default/memories/cases", "size": 0, "isDir": True}
                     ],
                 },
             )
@@ -220,6 +220,15 @@ class TestAntigravityMcpBridge(unittest.TestCase):
                             "arguments": {"content": "Prefer Rust Tauri V2 cockpit", "category_hint": "preference"},
                         },
                     },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 7,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "ov_list",
+                            "arguments": {"uri": "viking://user/default/memories", "limit": 10},
+                        },
+                    },
                 ]
                 stdin_payload = "\ufeff" + "\n".join(json.dumps(r) for r in requests) + "\n"
                 out, err = proc.communicate(input=stdin_payload, timeout=10)
@@ -264,6 +273,12 @@ class TestAntigravityMcpBridge(unittest.TestCase):
                 for h in _MockOpenVikingHandler.recorded_headers
             )
         )
+
+        # Verify ov_list derives entry name from uri when OpenViking /fs/ls omits "name"
+        list_data = json.loads(responses[7]["result"]["content"][0]["text"])
+        self.assertEqual(list_data["count"], 1)
+        self.assertEqual(list_data["entries"][0]["name"], "cases")
+        self.assertTrue(list_data["entries"][0]["is_dir"])
 
     def test_plugin_installer_writes_atomic_bundle_and_mcp_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
