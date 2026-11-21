@@ -2,6 +2,11 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
+## [1.9.1] - 2026-11-21
+
+### Fixed
+- Derived `VikingDirEntry::name` in `cockpit_rs/src/services/telemetry.rs` and `name` in `integrations/antigravity/openviking-memory/scripts/ov_mcp_bridge.py` (`list_dir`) from the trailing segment of `uri` when OpenViking `0.5.5` `/api/v1/fs/ls` omits `"name"` and `"path"` fields, ensuring non-empty alphabetical labels in the Memory Directory Explorer and MCP `ov_list`.
+
 ## [1.9.0] - 2026-11-21
 
 ### Added
