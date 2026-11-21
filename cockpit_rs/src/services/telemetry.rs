@@ -172,28 +172,6 @@ pub struct QueueStatus {
     pub queues: Vec<QueueItem>,
 }
 
-impl QueueStatus {
-    pub fn total_pending(&self) -> usize {
-        self.queues.iter().map(|q| q.pending).sum()
-    }
-
-    pub fn total_in_progress(&self) -> usize {
-        self.queues.iter().map(|q| q.in_progress).sum()
-    }
-
-    pub fn total_processed(&self) -> usize {
-        self.queues.iter().map(|q| q.processed).sum()
-    }
-
-    pub fn total_requeued(&self) -> usize {
-        self.queues.iter().map(|q| q.requeued).sum()
-    }
-
-    pub fn total_errors(&self) -> usize {
-        self.queues.iter().map(|q| q.errors).sum()
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueItem {
     #[serde(default)]
@@ -474,15 +452,6 @@ fn default_ollama_status() -> EndpointStatus {
 }
 
 impl TelemetrySnapshot {
-    pub fn is_overall_healthy(&self) -> bool {
-        let health_ok = self.health_status == EndpointStatus::Ok
-            && self.health.as_ref().is_some_and(|h| h.healthy);
-        let ready_ok = self.ready_status == EndpointStatus::Ok
-            && self.ready.as_ref().is_some_and(|r| r.status == "ready");
-        let embed_ok = self.embedding_model_ready.unwrap_or(true);
-        health_ok && ready_ok && embed_ok
-    }
-
     pub fn has_ollama_model(&self, target: &str) -> bool {
         let needle = target.trim();
         if needle.is_empty() {
@@ -987,27 +956,13 @@ mod tests {
     }
 
     #[test]
-    fn test_overall_healthy_predicate_and_embedding_gate() {
-        let mut snapshot = TelemetrySnapshot {
+    fn test_has_ollama_model_matches_exact_and_latest_tags() {
+        let snapshot = TelemetrySnapshot {
             timestamp_ms: 1000,
-            health: Some(HealthResponse {
-                status: "ok".to_string(),
-                healthy: true,
-                version: Some("0.5.3".to_string()),
-                auth_mode: None,
-            }),
+            health: None,
             health_status: EndpointStatus::Ok,
             health_latency_ms: 5,
-            ready: Some(ReadyResponse {
-                status: "ready".to_string(),
-                checks: ReadyChecks {
-                    agfs: None,
-                    vectordb: Some("ok".to_string()),
-                    api_key_manager: None,
-                    embedding: Some("ok".to_string()),
-                    ollama: Some("ok".to_string()),
-                },
-            }),
+            ready: None,
             ready_status: EndpointStatus::Ok,
             ready_latency_ms: 6,
             vlm: None,
@@ -1023,32 +978,21 @@ mod tests {
             queue_status: EndpointStatus::Ok,
             queue_latency_ms: 4,
             ollama_status: EndpointStatus::Ok,
-            ollama_models: vec!["qwen3-embedding:0.6b".to_string()],
+            ollama_models: vec![
+                "qwen3-embedding:0.6b".to_string(),
+                "nomic-embed-text:latest".to_string(),
+            ],
             ollama_latency_ms: 3,
             expected_embedding_model: Some("qwen3-embedding:0.6b".to_string()),
             embedding_model_ready: Some(true),
             lifecycle: None,
         };
 
-        assert!(snapshot.is_overall_healthy());
         assert!(snapshot.has_ollama_model("qwen3-embedding:0.6b"));
+        assert!(snapshot.has_ollama_model("QWEN3-EMBEDDING:0.6B"));
+        assert!(snapshot.has_ollama_model("nomic-embed-text"));
         assert!(!snapshot.has_ollama_model("bge-m3"));
-
-        // Missing embedding model in Ollama must flip overall health to false even when /ready says "ok".
-        snapshot.embedding_model_ready = Some(false);
-        assert!(!snapshot.is_overall_healthy());
-        snapshot.embedding_model_ready = Some(true);
-
-        snapshot.ready_status = EndpointStatus::Degraded;
-        assert!(!snapshot.is_overall_healthy());
-
-        snapshot.ready_status = EndpointStatus::Ok;
-        snapshot.ready.as_mut().unwrap().status = "not_ready".to_string();
-        assert!(!snapshot.is_overall_healthy());
-
-        snapshot.ready.as_mut().unwrap().status = "ready".to_string();
-        snapshot.health.as_mut().unwrap().healthy = false;
-        assert!(!snapshot.is_overall_healthy());
+        assert!(!snapshot.has_ollama_model("   "));
     }
 
     #[test]
@@ -1332,11 +1276,13 @@ mod tests {
         let q_json = r#"{"status":"ok","result":{"name":"queue","is_healthy":true,"has_errors":false,"status":{"queues":[{"queue":"Embedding","pending":2,"in_progress":1,"processed":8,"requeued":0,"errors":1,"total":11},{"queue":"Semantic","pending":0,"in_progress":0,"processed":5,"requeued":1,"errors":0,"total":5}]}}}"#;
         let q_parsed: QueueResponse = serde_json::from_str(q_json).expect("parse queue json");
         let q_status = q_parsed.result.unwrap().status.unwrap();
-        assert_eq!(q_status.total_pending(), 2);
-        assert_eq!(q_status.total_in_progress(), 1);
-        assert_eq!(q_status.total_processed(), 13);
-        assert_eq!(q_status.total_requeued(), 1);
-        assert_eq!(q_status.total_errors(), 1);
+        assert_eq!(q_status.queues.len(), 2);
+        assert_eq!(q_status.queues[0].pending, 2);
+        assert_eq!(q_status.queues[0].in_progress, 1);
+        assert_eq!(q_status.queues[0].processed, 8);
+        assert_eq!(q_status.queues[0].errors, 1);
+        assert_eq!(q_status.queues[1].processed, 5);
+        assert_eq!(q_status.queues[1].requeued, 1);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let port = listener.local_addr().unwrap().port();

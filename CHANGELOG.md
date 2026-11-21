@@ -2,6 +2,18 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
+## [Unreleased]
+
+### Changed
+- Removed the six test-only `QueueStatus::total_*` and `TelemetrySnapshot::is_overall_healthy` exports in `cockpit_rs/src/services/telemetry.rs` so Rust library reachability aligns strictly with production callers.
+
+### Fixed
+- Synced the `ov.conf` `(mtime, size)` poll cache synchronously at the start of `switch_active_slot`, `get_memory_overview`, `search_memories`, and `read_viking_content` in `cockpit_rs/src-tauri/src/commands.rs`, raised the `control_openviking_service` cold-boot readiness deadline from 35s to 75s to cover the 15s Ollama warm-up plus vector index load, and added a 250ms Windows handle-release wait before unlinking `.openviking.lock` after terminating hung processes on `ServiceAction::Start` in `cockpit_rs/src/services/service_control.rs`.
+- Stripped leading UTF-8 BOM sequences per incoming JSON-RPC line in `serve_stdio` inside `integrations/antigravity/openviking-memory/scripts/ov_mcp_bridge.py` to prevent `-32700` parse errors from Windows pipe callers.
+
+### Security
+- Added `ov.conf` `server.root_api_key` fallback resolution (`resolve_ov_api_key`, supporting `${ENV_VAR}` placeholders while ignoring `dpapi:` ciphertext) and dual `X-API-Key` / `Bearer` header injection in `integrations/antigravity/openviking-memory/scripts/ov_mcp_bridge.py`.
+
 ## [1.7.1] - 2026-11-18
 
 ### Changed

@@ -250,6 +250,9 @@ pub fn execute_service_step(
     } else if port_confirmed_closed(&netstat, port, self_pid) {
         // On Start when port 19330 has no listener, clear hung WinError 64 orphans and stale locks before schtasks /Run.
         terminate_cim_server_orphans(self_pid, &taskkill, &mut terminated_pids);
+        if !terminated_pids.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
         if port_confirmed_closed(&netstat, port, self_pid) {
             locks_cleaned = remove_leftover_data_locks(ov_home);
         }

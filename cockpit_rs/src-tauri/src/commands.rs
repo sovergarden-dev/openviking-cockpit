@@ -384,6 +384,7 @@ pub async fn switch_active_slot(
     state: State<'_, Arc<CockpitState>>,
     slot_index: usize,
 ) -> Result<VlmActiveResponse, String> {
+    let _ = read_cached_poll_meta(state.inner()).await;
     let res = state
         .telemetry_client
         .switch_active_vlm_slot(slot_index)
@@ -1023,7 +1024,7 @@ pub async fn control_openviking_service(
 
     let mut health_ok = false;
     let mut ready_ok = false;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(35);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(75);
 
     while std::time::Instant::now() < deadline {
         let (h_st, h_body, _) = state.telemetry_client.fetch_health().await;
@@ -1097,6 +1098,7 @@ pub struct MemoryOverviewPayload {
 pub async fn get_memory_overview(
     state: State<'_, Arc<CockpitState>>,
 ) -> Result<MemoryOverviewPayload, String> {
+    let _ = read_cached_poll_meta(state.inner()).await;
     let ov_home = state.paths.ov_home.clone();
     let storage_fut =
         tauri::async_runtime::spawn_blocking(move || inspect_storage_footprint(&ov_home));
@@ -1167,6 +1169,7 @@ pub async fn search_memories(
         .filter(|s| !s.is_empty());
     let limit = input.limit.unwrap_or(10).clamp(1, 50);
 
+    let _ = read_cached_poll_meta(state.inner()).await;
     let req = SearchFindRequest {
         query: clean_query,
         target_uri,
@@ -1219,6 +1222,7 @@ pub async fn read_viking_content(
     state: State<'_, Arc<CockpitState>>,
     uri: String,
 ) -> Result<VikingContentOutcome, String> {
+    let _ = read_cached_poll_meta(state.inner()).await;
     let raw = state.telemetry_client.read_content(&uri, 16_384).await?;
     Ok(VikingContentOutcome {
         uri: presentation_sanitize_text(&uri, None),

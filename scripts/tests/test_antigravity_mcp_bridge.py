@@ -161,66 +161,73 @@ class TestAntigravityMcpBridge(unittest.TestCase):
         import os
 
         bridge_script = BRIDGE_DIR / "ov_mcp_bridge.py"
-        merged_env = dict(os.environ)
-        merged_env["OPENVIKING_BASE_URL"] = self.base_url
-        merged_env["OPENVIKING_ACTOR_PEER"] = "antigravity"
-        merged_env.pop("OPENVIKING_API_KEY", None)
+        with tempfile.TemporaryDirectory() as tmp_ov_home:
+            (Path(tmp_ov_home) / "ov.conf").write_text(
+                '{"server":{"port":19330,"root_api_key":"${TEST_MCP_ROOT_KEY}"}}',
+                encoding="utf-8",
+            )
+            merged_env = dict(os.environ)
+            merged_env["OPENVIKING_BASE_URL"] = self.base_url
+            merged_env["OPENVIKING_ACTOR_PEER"] = "antigravity"
+            merged_env["OPENVIKING_OV_HOME"] = tmp_ov_home
+            merged_env["TEST_MCP_ROOT_KEY"] = "SYNTHETIC_MCP_KEY_909"
+            merged_env.pop("OPENVIKING_API_KEY", None)
 
-        proc = subprocess.Popen(
-            [sys.executable, "-X", "utf8", "-u", str(bridge_script)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            env=merged_env,
-        )
-        try:
-            requests = [
-                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}},
-                {"jsonrpc": "2.0", "method": "notifications/initialized"},
-                {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
-                {
-                    "jsonrpc": "2.0",
-                    "id": 3,
-                    "method": "tools/call",
-                    "params": {"name": "ov_recall", "arguments": {"query": "DPAPI"}},
-                },
-                {
-                    "jsonrpc": "2.0",
-                    "id": 4,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "ov_read",
-                        "arguments": {"uri": "viking://user/default/memories/preferences/dpapi.md"},
+            proc = subprocess.Popen(
+                [sys.executable, "-X", "utf8", "-u", str(bridge_script)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                env=merged_env,
+            )
+            try:
+                requests = [
+                    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}},
+                    {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 3,
+                        "method": "tools/call",
+                        "params": {"name": "ov_recall", "arguments": {"query": "DPAPI"}},
                     },
-                },
-                {
-                    "jsonrpc": "2.0",
-                    "id": 5,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "ov_read",
-                        "arguments": {"uri": "file:///C:/Windows/win.ini"},
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 4,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "ov_read",
+                            "arguments": {"uri": "viking://user/default/memories/preferences/dpapi.md"},
+                        },
                     },
-                },
-                {
-                    "jsonrpc": "2.0",
-                    "id": 6,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "ov_remember",
-                        "arguments": {"content": "Prefer Rust Tauri V2 cockpit", "category_hint": "preference"},
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 5,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "ov_read",
+                            "arguments": {"uri": "file:///C:/Windows/win.ini"},
+                        },
                     },
-                },
-            ]
-            stdin_payload = "\n".join(json.dumps(r) for r in requests) + "\n"
-            out, err = proc.communicate(input=stdin_payload, timeout=10)
-            self.assertEqual(proc.returncode, 0, f"stderr={err}")
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=3)
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 6,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "ov_remember",
+                            "arguments": {"content": "Prefer Rust Tauri V2 cockpit", "category_hint": "preference"},
+                        },
+                    },
+                ]
+                stdin_payload = "\ufeff" + "\n".join(json.dumps(r) for r in requests) + "\n"
+                out, err = proc.communicate(input=stdin_payload, timeout=10)
+                self.assertEqual(proc.returncode, 0, f"stderr={err}")
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=3)
 
         responses = {json.loads(line)["id"]: json.loads(line) for line in out.splitlines() if line.strip()}
         self.assertEqual(responses[1]["result"]["serverInfo"]["name"], "openviking-memory")
@@ -245,12 +252,17 @@ class TestAntigravityMcpBridge(unittest.TestCase):
         # Verify non-viking:// URI is rejected with isError=True
         self.assertTrue(responses[5]["result"]["isError"])
 
-        # Verify ov_remember sends X-OpenViking-Actor-Peer: antigravity
+        # Verify ov_remember sends X-OpenViking-Actor-Peer: antigravity and resolved root_api_key headers
         rem_data = json.loads(responses[6]["result"]["content"][0]["text"])
         self.assertTrue(rem_data["submitted"])
         self.assertEqual(rem_data["actor_peer"], "antigravity")
         self.assertTrue(
-            any(h.get("x-openviking-actor-peer") == "antigravity" for h in _MockOpenVikingHandler.recorded_headers)
+            any(
+                h.get("x-openviking-actor-peer") == "antigravity"
+                and h.get("x-api-key") == "SYNTHETIC_MCP_KEY_909"
+                and h.get("authorization") == "Bearer SYNTHETIC_MCP_KEY_909"
+                for h in _MockOpenVikingHandler.recorded_headers
+            )
         )
 
     def test_plugin_installer_writes_atomic_bundle_and_mcp_config(self) -> None:

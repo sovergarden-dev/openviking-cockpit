@@ -17,6 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from io import TextIOWrapper
+from pathlib import Path
 
 SERVER_NAME = "openviking-memory"
 SERVER_VERSION = "1.7.1"
@@ -28,6 +29,37 @@ MAX_REMEMBER_CHARS = 16_000
 SECRET_REDACT_RE = re.compile(
     r"""(?i)(\b(?:api[_-]?key|token|access_token|auth_token|secret|password)\b["']?\s*[=:]\s*|bearer\s+)(["']?)([^\s"']+)"""
 )
+ENV_PLACEHOLDER_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+
+
+def resolve_ov_api_key(ov_home: Path | None = None) -> str:
+    env_key = os.environ.get("OPENVIKING_API_KEY", "").strip()
+    if env_key:
+        return env_key
+    home_override = os.environ.get("OPENVIKING_OV_HOME", "").strip()
+    root = ov_home or (Path(home_override) if home_override else Path(os.environ.get("USERPROFILE") or Path.home()) / ".openviking")
+    conf_path = root / "ov.conf"
+    if not conf_path.is_file() or conf_path.is_symlink():
+        return ""
+    try:
+        doc = json.loads(conf_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(doc, dict):
+        return ""
+    srv = doc.get("server")
+    if not isinstance(srv, dict):
+        return ""
+    raw_key = srv.get("root_api_key")
+    if not isinstance(raw_key, str) or not raw_key.strip():
+        return ""
+    val = raw_key.strip()
+    if val.startswith("dpapi:"):
+        return ""
+    match = ENV_PLACEHOLDER_RE.match(val)
+    if match:
+        return os.environ.get(match.group(1), "").strip()
+    return val
 
 
 def sanitize_text(raw: str) -> str:
@@ -71,7 +103,8 @@ class OpenVikingBridgeClient:
         self.base_url = validate_base_url(env_url)
         raw_peer = (actor_peer or os.environ.get("OPENVIKING_ACTOR_PEER", "antigravity")).strip()
         self.actor_peer = re.sub(r"[^A-Za-z0-9._-]", "-", raw_peer)[:64] or "antigravity"
-        self.api_key = (api_key if api_key is not None else os.environ.get("OPENVIKING_API_KEY", "")).strip()
+        raw_key = api_key if api_key is not None else resolve_ov_api_key()
+        self.api_key = raw_key.strip()
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def _headers(self, include_peer: bool = True) -> dict[str, str]:
@@ -81,6 +114,7 @@ class OpenVikingBridgeClient:
         }
         if self.api_key:
             hdrs["X-API-Key"] = self.api_key
+            hdrs["Authorization"] = f"Bearer {self.api_key}"
         if include_peer and self.actor_peer:
             hdrs["X-OpenViking-Actor-Peer"] = self.actor_peer
         return hdrs
@@ -514,7 +548,7 @@ def serve_stdio(client: OpenVikingBridgeClient | None = None) -> int:
     stdout = TextIOWrapper(sys.stdout.buffer, encoding="utf-8", line_buffering=True)
 
     for raw_line in stdin:
-        line = raw_line.strip()
+        line = raw_line.lstrip("\ufeff").strip()
         if not line:
             continue
         try:
