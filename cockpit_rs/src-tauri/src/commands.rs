@@ -31,7 +31,7 @@ use cockpit_rs::services::storage_inspector::{
 use cockpit_rs::services::telemetry::{
     evaluate_telemetry_incidents_with_uptime, read_lifecycle_summary, EndpointStatus,
     LifecycleSummary, MemoriesStatsResponse, RetrievalObserverResponse, SearchFindHit,
-    SearchFindRequest, TelemetrySnapshot, VikingDbResponse, VlmActiveResponse,
+    SearchFindRequest, TelemetrySnapshot, VikingDbResponse, VikingDirEntry, VlmActiveResponse,
 };
 use cockpit_rs::services::watchlist::{
     copy_reserve_into_watchlist, copy_watch_into_reserve, load_monitor_state,
@@ -2066,4 +2066,25 @@ pub async fn read_viking_content(
         uri: presentation_sanitize_text(&uri, None),
         content: presentation_sanitize_text(&raw, None),
     })
+}
+
+#[tauri::command]
+pub async fn list_viking_dir(
+    state: State<'_, Arc<CockpitState>>,
+    uri: String,
+    limit: Option<usize>,
+) -> Result<Vec<VikingDirEntry>, String> {
+    let _ = read_cached_poll_meta(state.inner()).await;
+    let raw_entries = state
+        .telemetry_client
+        .list_dir(&uri, limit.unwrap_or(80))
+        .await?;
+    Ok(raw_entries
+        .into_iter()
+        .map(|e| VikingDirEntry {
+            name: presentation_sanitize_text(&e.name, None),
+            uri: presentation_sanitize_text(&e.uri, None),
+            is_dir: e.is_dir,
+        })
+        .collect())
 }

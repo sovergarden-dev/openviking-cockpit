@@ -330,6 +330,8 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("ov_lifecycle.py", content)
         self.assertRegex(content, r"-u\s+-X\s+faulthandler",
                          "launcher must run helper with -u -X faulthandler")
+        self.assertIn("--health-url", content,
+                      "launcher must enable self-healing loopback health monitoring")
         self.assertIn("--entry-point openviking-server", content,
                       "child must be the installed server entry point, not the exe shim")
         self.assertNotIn("-m openviking", content, "no guessed -m module invocation")
@@ -340,6 +342,52 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("goto watchdog", content, "watchdog restart loop must survive")
         self.assertIn("ping -n 11", content, "10s crash-restart delay must survive")
         self.assertIn("4194304", content, "4MB log rotation must survive")
+
+    def test_health_monitor_kills_hung_child_after_consecutive_failures(self):
+        lock_file = self.dir / "synthetic.lock"
+        lock_file.write_text("locked", encoding="utf-8")
+        proc = subprocess.Popen(
+            [
+                sys.executable, "-u", str(HELPER),
+                "--log", str(self.log),
+                "--health-url", "http://127.0.0.1:19399/health",
+                "--health-grace-s", "0.1",
+                "--health-interval-s", "0.15",
+                "--health-max-failures", "2",
+                "--data-lock", str(lock_file),
+                "--",
+                sys.executable, "-c", CHILD_SLOW_EXIT, str(self.pidfile), "0", "30",
+            ],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        self.cleanup_pids.append(proc.pid)
+        child_pid = self.wait_for(self.read_pidfile, label="child pidfile")
+        self.cleanup_pids.append(child_pid)
+        proc.communicate(timeout=30)
+        self.assertNotEqual(proc.returncode, 0, "hang-killed child must return non-zero")
+        self.assertFalse(lock_file.exists(), "data-lock must be removed immediately after hang-kill")
+        records = self.read_records()
+        self.assertEqual([r["event"] for r in records], ["start", "hang-killed", "exit"], records)
+        self.assertGreaterEqual(records[1]["consecutive_failures"], 2)
+        raw = self.log.read_text(encoding="utf-8")
+        self.assertNotIn("19399", raw, "lifecycle log must remain sanitized metadata only")
+        for record in records:
+            self.assertFalse({"cmdline", "argv", "env", "exception", "traceback", "stdout", "stderr", "url"} & set(record),
+                             f"forbidden field in lifecycle record: {record}")
+
+    def test_health_monitor_rejects_non_loopback_url(self):
+        result = subprocess.run(
+            [
+                sys.executable, "-u", str(HELPER),
+                "--log", str(self.log),
+                "--health-url", "https://example.com/health",
+                "--",
+                sys.executable, "-c", CHILD_PID_THEN_EXIT, str(self.pidfile), "0",
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.pidfile.exists(), "child must not spawn when health URL is non-loopback")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,8 @@ use tauri::{
     WebviewWindow, Window, WindowEvent,
 };
 
+use cockpit_rs::services::service_control::{execute_service_step, ServiceAction};
+use cockpit_rs::services::telemetry::{EndpointStatus, TelemetrySnapshot};
 use cockpit_rs::services::watchlist::{
     format_window_geometry, load_monitor_state, parse_window_geometry,
     save_monitor_state_with_live_policy,
@@ -211,8 +213,44 @@ fn quit_application(app: &AppHandle) {
     app.exit(0);
 }
 
+fn format_tray_tooltip(snap: &TelemetrySnapshot) -> String {
+    let healthy = snap.health_status == EndpointStatus::Ok
+        && snap.health.as_ref().is_some_and(|h| h.healthy)
+        && snap.ready_status == EndpointStatus::Ok
+        && snap.embedding_model_ready != Some(false);
+    if !healthy {
+        return "OpenViking Cockpit — Cần kiểm tra".to_string();
+    }
+    if let Some(vlm) = snap.vlm.as_ref().and_then(|v| v.result.as_ref()) {
+        let idx = vlm.index.unwrap_or(0);
+        let slot_label = if vlm.manual_hold == Some(true) {
+            format!("Slot #{} (Khóa)", idx)
+        } else if idx > 0 {
+            format!("Slot #{} (Failover)", idx)
+        } else {
+            "Slot #0".to_string()
+        };
+        return format!("OpenViking Cockpit — Ổn định · {}", slot_label);
+    }
+    "OpenViking Cockpit — Ổn định".to_string()
+}
+
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let show_item = MenuItem::with_id(app, "show", "Mở OpenViking Cockpit", true, None::<&str>)?;
+    let logs_item = MenuItem::with_id(
+        app,
+        "view_logs",
+        "Xem nhật ký Server (server.log)",
+        true,
+        None::<&str>,
+    )?;
+    let restart_item = MenuItem::with_id(
+        app,
+        "restart_server",
+        "Khởi động lại OpenViking Server",
+        true,
+        None::<&str>,
+    )?;
     let test_item = MenuItem::with_id(
         app,
         "test_balloon",
@@ -221,7 +259,16 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let quit_item = MenuItem::with_id(app, "quit", "Thoát", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_item, &test_item, &quit_item])?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &show_item,
+            &logs_item,
+            &restart_item,
+            &test_item,
+            &quit_item,
+        ],
+    )?;
 
     let mut builder = TrayIconBuilder::with_id("main-tray")
         .menu(&menu)
@@ -231,6 +278,41 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.show();
                     let _ = win.set_focus();
+                }
+            }
+            "view_logs" => {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+                let _ = app.emit("tray://open-log", "server.log");
+            }
+            "restart_server" => {
+                if let Some(st) = app.try_state::<std::sync::Arc<CockpitState>>() {
+                    let st_ref = std::sync::Arc::clone(&st);
+                    let app_handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _guard = st_ref.service_lock.lock().await;
+                        let ov_home = st_ref.paths.ov_home.clone();
+                        let port = st_ref.server_port;
+                        let res = tauri::async_runtime::spawn_blocking(move || {
+                            execute_service_step(ServiceAction::Restart, &ov_home, port)
+                        })
+                        .await;
+                        st_ref.invalidate_poll_meta_cache();
+                        let snap = collect_telemetry_once(&st_ref).await;
+                        let _ = app_handle.emit("telemetry://snapshot", &snap);
+                        let msg = match res {
+                            Ok(Ok(_)) => {
+                                "Đã gửi lệnh khởi động lại OpenViking Server từ khay hệ thống."
+                            }
+                            _ => "Không thể khởi động lại OpenViking Server từ khay hệ thống.",
+                        };
+                        let _ = tauri::async_runtime::spawn_blocking(move || {
+                            let _ = dispatch_tray_balloon("OpenViking Cockpit", msg);
+                        })
+                        .await;
+                    });
                 }
             }
             "test_balloon" => {
@@ -321,10 +403,18 @@ pub fn run() {
             let worker_state = cockpit_state.clone();
             tauri::async_runtime::spawn(async move {
                 let mut ticker = tokio::time::interval(Duration::from_secs(2));
+                let mut last_tooltip = String::new();
                 loop {
                     tokio::select! {
                         _ = ticker.tick() => {
                             let snap = collect_telemetry_once(&worker_state).await;
+                            let new_tip = format_tray_tooltip(&snap);
+                            if new_tip != last_tooltip {
+                                last_tooltip = new_tip;
+                                if let Some(tray) = handle.tray_by_id("main-tray") {
+                                    let _ = tray.set_tooltip(Some(&last_tooltip));
+                                }
+                            }
                             let _ = handle.emit("telemetry://snapshot", &snap);
                         }
                         _ = shutdown_rx.changed() => {
@@ -391,6 +481,7 @@ pub fn run() {
             commands::get_memory_overview,
             commands::search_memories,
             commands::read_viking_content,
+            commands::list_viking_dir,
         ])
         .build(tauri::generate_context!())
         .expect("error while building OpenViking Cockpit Tauri application");

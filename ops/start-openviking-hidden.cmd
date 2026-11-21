@@ -51,13 +51,14 @@ if not errorlevel 1 exit /b 0
 
 rem Clear a data-dir lock left by a recycled PID after reboot (crash-loop guard).
 "%HOME_DIR%/venv/Scripts/python.exe" "%HOME_DIR%/ov_stale_lock_clean.py" >nul 2>&1
+if not exist "%HOME_DIR%/data-qwen06b/.openviking.pid" if exist "%HOME_DIR%/data-qwen06b/.openviking.lock" del /f /q "%HOME_DIR%/data-qwen06b/.openviking.lock" >nul 2>&1
 
 echo [%date% %time%] Starting OpenViking watchdog instance.>>"%LOG%"
 rem One run through the lifecycle wrapper: real child PID, exact exit code and
 rem monotonic uptime land in lifecycle.jsonl (metadata only, no server output).
 rem --entry-point runs the installed console script with python -u -X faulthandler,
 rem so the server process (not just this wrapper) gets those flags.
-"%HOME_DIR%/venv/Scripts/python.exe" -u -X faulthandler "%HOME_DIR%/ov_lifecycle.py" --log "%LIFECYCLE_LOG%" --entry-point openviking-server >>"%LOG%" 2>&1
+"%HOME_DIR%/venv/Scripts/python.exe" -u -X faulthandler "%HOME_DIR%/ov_lifecycle.py" --log "%LIFECYCLE_LOG%" --health-url "%HEALTH%" --data-lock "%HOME_DIR%/data-qwen06b/.openviking.lock" --entry-point openviking-server >>"%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 echo [%date% %time%] OpenViking exited with code %RC%; restarting in 10 seconds.>>"%LOG%"
 ping -n 11 127.0.0.1 >nul

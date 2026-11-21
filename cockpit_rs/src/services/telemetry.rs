@@ -291,6 +291,21 @@ pub struct ContentReadResponse {
     pub error: Option<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VikingDirEntry {
+    pub name: String,
+    pub uri: String,
+    pub is_dir: bool,
+}
+
+fn validate_viking_uri(uri: &str) -> Result<&str, String> {
+    let clean = uri.trim();
+    if !clean.starts_with("viking://") || clean.contains("..") {
+        return Err("URI must start with 'viking://' and contain no '..' segments".to_string());
+    }
+    Ok(clean)
+}
+
 /// RFC 3986 unreserved byte percent-encoder for query parameters (`uri=viking://...`).
 pub fn percent_encode_query_component(input: &str) -> String {
     let mut out = String::with_capacity(input.len() + 16);
@@ -715,10 +730,7 @@ impl TelemetryClient {
 
     /// Read-only content fetch for a validated `viking://` URI via `GET /api/v1/content/read`.
     pub async fn read_content(&self, uri: &str, max_chars: usize) -> Result<String, String> {
-        let clean = uri.trim();
-        if !clean.starts_with("viking://") || clean.contains("..") {
-            return Err("URI must start with 'viking://' and contain no '..' segments".to_string());
-        }
+        let clean = validate_viking_uri(uri)?;
         let capped_limit = max_chars.clamp(256, 32_768);
         let encoded_uri = percent_encode_query_component(clean);
         let url = format!(
@@ -742,6 +754,94 @@ impl TelemetryClient {
             .await
             .map_err(|_| "Failed to decode /api/v1/content/read response".to_string())?;
         Ok(parsed.result.unwrap_or_default())
+    }
+
+    /// Read-only directory listing for a validated `viking://` URI via `GET /api/v1/fs/ls`.
+    pub async fn list_dir(&self, uri: &str, limit: usize) -> Result<Vec<VikingDirEntry>, String> {
+        let clean = validate_viking_uri(uri)?;
+        let capped_limit = limit.clamp(1, 200);
+        let encoded_uri = percent_encode_query_component(clean);
+        let url = format!(
+            "{}/api/v1/fs/ls?uri={}&limit={}",
+            self.base_url, encoded_uri, capped_limit
+        );
+        let req = self.attach_auth(self.search_http.get(&url));
+        let resp = req.send().await.map_err(|e| {
+            if e.is_timeout() {
+                "Directory listing timed out".to_string()
+            } else {
+                "OpenViking filesystem endpoint unreachable".to_string()
+            }
+        })?;
+        let code = resp.status();
+        if !code.is_success() {
+            return Err(format!(
+                "Directory listing failed with HTTP {}",
+                code.as_u16()
+            ));
+        }
+        let parsed: Value = resp
+            .json()
+            .await
+            .map_err(|_| "Failed to decode /api/v1/fs/ls response".to_string())?;
+        let raw_result = parsed.get("result");
+        let items: &[Value] = match raw_result {
+            Some(Value::Array(arr)) => arr.as_slice(),
+            Some(Value::Object(obj)) => obj
+                .get("entries")
+                .or_else(|| obj.get("items"))
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.as_slice())
+                .unwrap_or(&[]),
+            _ => &[],
+        };
+
+        let base_trimmed = clean.trim_end_matches('/');
+        let mut entries = Vec::new();
+        for item in items.iter().take(capped_limit) {
+            if let Some(s) = item.as_str() {
+                let is_dir = s.ends_with('/');
+                let name = s.trim_matches('/').to_string();
+                if name.is_empty() {
+                    continue;
+                }
+                entries.push(VikingDirEntry {
+                    uri: format!("{}/{}", base_trimmed, name),
+                    name,
+                    is_dir,
+                });
+            } else if let Some(obj) = item.as_object() {
+                let raw_name = obj
+                    .get("name")
+                    .or_else(|| obj.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let is_dir = obj
+                    .get("isDir")
+                    .or_else(|| obj.get("is_dir"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or_else(|| raw_name.ends_with('/'));
+                let name = raw_name.trim_matches('/').to_string();
+                let explicit_uri = obj
+                    .get("uri")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|u| u.starts_with("viking://"));
+                let entry_uri = explicit_uri
+                    .map(|u| u.to_string())
+                    .unwrap_or_else(|| format!("{}/{}", base_trimmed, name));
+                if name.is_empty() && explicit_uri.is_none() {
+                    continue;
+                }
+                entries.push(VikingDirEntry {
+                    name,
+                    uri: entry_uri,
+                    is_dir,
+                });
+            }
+        }
+        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+        Ok(entries)
     }
 
     pub async fn fetch_ollama_tags(&self) -> (EndpointStatus, Vec<String>, u64) {
@@ -1416,7 +1516,7 @@ mod tests {
         let base_url = format!("http://127.0.0.1:{}", port);
 
         tokio::spawn(async move {
-            for _ in 0..2 {
+            for _ in 0..3 {
                 if let Ok((mut socket, _)) = listener.accept().await {
                     let mut buf = [0u8; 4096];
                     let n = socket.read(&mut buf).await.unwrap_or(0);
@@ -1438,6 +1538,13 @@ mod tests {
                         (
                             "HTTP/1.1 200 OK",
                             r##"{"status":"ok","result":"# DPAPI Policy\nNever write plaintext keys."}"##,
+                        )
+                    } else if first_line.starts_with(
+                        "GET /api/v1/fs/ls?uri=viking%3A%2F%2Fuser%2Fdefault%2Fmemories&limit=20 ",
+                    ) {
+                        (
+                            "HTTP/1.1 200 OK",
+                            r#"{"status":"ok","result":[{"name":"profile.md","uri":"viking://user/default/memories/profile.md","isDir":false},{"name":"cases","isDir":true}]}"#,
                         )
                     } else {
                         ("HTTP/1.1 400 Bad Request", r#"{"status":"error"}"#)
@@ -1502,5 +1609,17 @@ mod tests {
             .await
             .expect("read_content ok");
         assert!(content.contains("Never write plaintext keys."));
+
+        assert!(client.list_dir("http://bad/uri", 20).await.is_err());
+        let listed = client
+            .list_dir("viking://user/default/memories", 20)
+            .await
+            .expect("list_dir ok");
+        assert_eq!(listed.len(), 2);
+        assert!(listed[0].is_dir);
+        assert_eq!(listed[0].name, "cases");
+        assert_eq!(listed[0].uri, "viking://user/default/memories/cases");
+        assert!(!listed[1].is_dir);
+        assert_eq!(listed[1].name, "profile.md");
     }
 }

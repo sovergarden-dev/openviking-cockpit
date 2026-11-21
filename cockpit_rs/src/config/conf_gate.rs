@@ -564,7 +564,7 @@ pub fn compute_slot_drift(
     if count_mismatch || &conf_ids != live_ids {
         return SlotDriftStatus {
             drift: true,
-            reason: "On-disk slot chain or priority order differs from the active server runtime."
+            reason: "Chuỗi Slot trong ov.conf trên đĩa đã thay đổi so với tiến trình OpenViking đang chạy trên RAM."
                 .to_string(),
         };
     }

@@ -29,6 +29,9 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +40,9 @@ DEFAULT_LOG = Path.home() / ".openviking" / "logs" / "lifecycle.jsonl"
 MAX_LOG_BYTES = 1_048_576
 LOG_UNAVAILABLE_RC = 2
 SPAWN_FAILED_RC = 127
+HANG_KILLED_RC = 64
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+CREATE_NO_WINDOW = 0x08000000
 
 CHILD_FLAGS = ["-u", "-X", "faulthandler"]
 
@@ -105,11 +111,124 @@ def command_for_entry_point(value):
     return [sys.executable, *CHILD_FLAGS, "-c", bootstrap]
 
 
+def validate_loopback_health_url(raw_url):
+    """Accept only local loopback URLs for the health watchdog."""
+    cleaned = (raw_url or "").strip()
+    parsed = urllib.parse.urlparse(cleaned)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in ("http", "https") or host not in LOOPBACK_HOSTS:
+        raise ValueError("health URL must target a local loopback host")
+    return cleaned
+
+
+def _probe_health_ok(opener, health_url):
+    req = urllib.request.Request(health_url, method="GET")
+    try:
+        with opener.open(req, timeout=3.0) as resp:
+            return 200 <= resp.status < 300
+    except Exception:
+        return False
+
+
+def _kill_hung_child_tree(child):
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(child.pid), "/T", "/F"],
+                capture_output=True,
+                creationflags=CREATE_NO_WINDOW,
+                timeout=10,
+            )
+        except Exception:
+            pass
+    try:
+        if child.poll() is None:
+            child.kill()
+    except OSError:
+        pass
+
+
+def wait_with_health_monitor(
+    child,
+    log,
+    base,
+    started,
+    health_url,
+    grace_s,
+    interval_s,
+    max_failures,
+    data_lock_path=None,
+):
+    """Wait on child normally or terminate a socket-hung process when loopback health fails repeatedly."""
+    if not health_url:
+        return child.wait()
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    poll_step = min(0.5, max(0.05, float(interval_s)))
+    effective_interval = max(0.05, float(interval_s))
+    effective_max = max(1, int(max_failures))
+    ever_healthy = False
+    consecutive_failures = 0
+    last_probe = started
+
+    while child.poll() is None:
+        try:
+            return child.wait(timeout=poll_step)
+        except subprocess.TimeoutExpired:
+            pass
+
+        now = time.monotonic()
+        if (now - last_probe) < effective_interval:
+            continue
+        if not ever_healthy and (now - started) < max(0.0, float(grace_s)):
+            continue
+
+        last_probe = now
+        if _probe_health_ok(opener, health_url):
+            ever_healthy = True
+            consecutive_failures = 0
+            continue
+
+        consecutive_failures += 1
+        if consecutive_failures >= effective_max and child.poll() is None:
+            _kill_hung_child_tree(child)
+            if data_lock_path:
+                try:
+                    Path(data_lock_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            observe(
+                log,
+                dict(
+                    base,
+                    utc=utc_now(),
+                    event="hang-killed",
+                    child_pid=child.pid,
+                    consecutive_failures=consecutive_failures,
+                    uptime_s=round(time.monotonic() - started, 3),
+                ),
+            )
+            try:
+                code = child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                code = HANG_KILLED_RC
+            return code if code != 0 else HANG_KILLED_RC
+
+    return child.returncode
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Record one OpenViking server run.")
     parser.add_argument("--log", default=str(DEFAULT_LOG))
     parser.add_argument("--entry-point", default=None,
                         help="installed console script to run (e.g. openviking-server)")
+    parser.add_argument("--health-url", default=None,
+                        help="optional loopback HTTP health URL to terminate a socket-hung server")
+    parser.add_argument("--health-grace-s", type=float, default=90.0)
+    parser.add_argument("--health-interval-s", type=float, default=15.0)
+    parser.add_argument("--health-max-failures", type=int, default=3)
+    parser.add_argument("--data-lock", default=None,
+                        help="optional .openviking.lock path cleaned immediately after hang-kill")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -117,6 +236,13 @@ def main(argv=None):
         parser.error("pass either --entry-point or an explicit command, not both")
     if not args.entry_point and not command:
         parser.error("missing --entry-point or child command after --")
+
+    health_url = None
+    if args.health_url:
+        try:
+            health_url = validate_loopback_health_url(args.health_url)
+        except ValueError as exc:
+            parser.error(str(exc))
 
     log = Path(args.log)
     try:
@@ -151,7 +277,17 @@ def main(argv=None):
         return SPAWN_FAILED_RC
 
     observe(log, dict(base, utc=utc_now(), event="start", child_pid=child.pid))
-    code = child.wait()
+    code = wait_with_health_monitor(
+        child,
+        log,
+        base,
+        started,
+        health_url=health_url,
+        grace_s=args.health_grace_s,
+        interval_s=args.health_interval_s,
+        max_failures=args.health_max_failures,
+        data_lock_path=args.data_lock,
+    )
     observe(log, dict(base, utc=utc_now(), event="exit", child_pid=child.pid,
                       exit_code=code, exit_code_hex=format_exit_hex(code),
                       uptime_s=round(time.monotonic() - started, 3)))
