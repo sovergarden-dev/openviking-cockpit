@@ -7,6 +7,8 @@ import { createCell, filterModelIds, normalizeEndpoint } from "../utils/format.j
 let sourceOptions = [];
 let loadedIds = [];
 let selectedModels = new Set();
+let lastBenchmarkDesc = null;
+let lastBenchmarkRows = [];
 
 export function closeProviderTester() {
   const backdrop = document.getElementById("provider-modal-backdrop");
@@ -115,12 +117,80 @@ function syncPickedCountUi() {
   if (benchBtn) benchBtn.disabled = disabled;
 }
 
-function syncBenchmarkWatchButtons() {
-  const full = state.watchCount >= MAX_WATCHES;
-  document.querySelectorAll('#pt-results-tbody button[data-watch-add="1"]').forEach((btn) => {
-    btn.disabled = full;
-    btn.title = full ? `Bảng Theo dõi đã đủ ${MAX_WATCHES} key` : "";
+function getModelMembership(modelId, apiBase) {
+  const normEp = normalizeEndpoint(apiBase);
+  const slots = (state.slots || [])
+    .filter((s) => s.model === modelId && normalizeEndpoint(s.api_base) === normEp)
+    .map((s) => s.slot_index);
+  const inReserve = (state.lastMonitorSummary?.reserves || []).some(
+    (r) => r.model === modelId && normalizeEndpoint(r.api_base) === normEp
+  );
+  const inWatch = (state.lastMonitorSummary?.watches || []).some(
+    (w) => w.model === modelId && normalizeEndpoint(w.api_base) === normEp
+  );
+  return { slots, inReserve, inWatch };
+}
+
+function getEligibleOkForBatchReserve() {
+  const apiBase = lastBenchmarkDesc?.apiBase || "";
+  if (!apiBase) return [];
+  return (lastBenchmarkRows || []).filter(
+    (row) => row.ok_runs > 0 && !getModelMembership(row.model, apiBase).inReserve
+  );
+}
+
+function upsertBenchmarkRowToReserve(row, desc, expectedSha) {
+  return invokeCmd("upsert_reserve_entry", {
+    expectedReservesSha: expectedSha,
+    input: {
+      index: null,
+      model: row.model,
+      api_base: desc.apiBase,
+      api_key: desc.inlineKey,
+      note: row.median_ms != null ? `Bench ~${row.median_ms} ms` : "",
+    },
+    inheritSource: desc.inheritSource,
   });
+}
+
+function syncBatchSaveOkUi() {
+  const btn = document.getElementById("pt-save-all-ok-reserve");
+  if (!btn) return;
+  const eligible = getEligibleOkForBatchReserve();
+  btn.hidden = state.benchmarkBusy || eligible.length === 0;
+  btn.textContent = `+ Lưu tất cả model OK vào Dự trữ (${eligible.length})`;
+}
+
+function syncBenchmarkActionButtons() {
+  const watchFull = state.watchCount >= MAX_WATCHES;
+  const apiBase = lastBenchmarkDesc?.apiBase || "";
+  document.querySelectorAll('#pt-results-tbody button[data-watch-add="1"]').forEach((btn) => {
+    const modelId = btn.dataset.watchAddModel || "";
+    const inWatch = modelId && apiBase ? getModelMembership(modelId, apiBase).inWatch : false;
+    if (inWatch) {
+      btn.textContent = "✓ Đang Theo dõi";
+      btn.disabled = true;
+      btn.title = "Model này đã có trong bảng Theo dõi";
+    } else {
+      btn.textContent = "+ Theo dõi";
+      btn.disabled = watchFull;
+      btn.title = watchFull ? `Bảng Theo dõi đã đủ ${MAX_WATCHES} key` : "";
+    }
+  });
+  document.querySelectorAll('#pt-results-tbody button[data-reserve-add="1"]').forEach((btn) => {
+    const modelId = btn.dataset.reserveAddModel || "";
+    const inReserve = modelId && apiBase ? getModelMembership(modelId, apiBase).inReserve : false;
+    if (inReserve) {
+      btn.textContent = "✓ Đã ở Dự trữ";
+      btn.disabled = true;
+      btn.title = "Model này đã có trong kho Dự trữ";
+    } else {
+      btn.textContent = "+ Dự trữ";
+      btn.disabled = false;
+      btn.title = "";
+    }
+  });
+  syncBatchSaveOkUi();
 }
 
 function renderModelChecklist() {
@@ -128,6 +198,7 @@ function renderModelChecklist() {
   const filterEl = document.getElementById("pt-model-filter");
   if (!box || !filterEl) return;
 
+  const currentBase = getSelectedSourceDescriptor().apiBase;
   const filtered = filterModelIds(loadedIds, filterEl.value);
   box.replaceChildren();
   if (filtered.length === 0) {
@@ -164,6 +235,34 @@ function renderModelChecklist() {
     left.appendChild(cb);
     left.appendChild(txt);
     label.appendChild(left);
+
+    if (currentBase) {
+      const mem = getModelMembership(id, currentBase);
+      const tagsWrap = document.createElement("span");
+      tagsWrap.className = "c-actions";
+      for (const idx of mem.slots) {
+        const b = document.createElement("span");
+        b.className = "c-badge c-badge--ok";
+        b.textContent = `Slot #${idx}`;
+        tagsWrap.appendChild(b);
+      }
+      if (mem.inReserve) {
+        const b = document.createElement("span");
+        b.className = "c-badge c-badge--info";
+        b.textContent = "Dự trữ";
+        tagsWrap.appendChild(b);
+      }
+      if (mem.inWatch) {
+        const b = document.createElement("span");
+        b.className = "c-badge c-badge--warn";
+        b.textContent = "Theo dõi";
+        tagsWrap.appendChild(b);
+      }
+      if (tagsWrap.childElementCount > 0) {
+        label.appendChild(tagsWrap);
+      }
+    }
+
     box.appendChild(label);
   }
 }
@@ -190,27 +289,23 @@ function renderBenchmarkRow(tbody, row, desc) {
   const actTd = document.createElement("td");
   actTd.className = "c-row-actions";
 
+  const mem = getModelMembership(row.model, desc.apiBase);
+
   const addResBtn = document.createElement("button");
   addResBtn.type = "button";
   addResBtn.className = "c-btn c-btn--sm";
-  addResBtn.textContent = "+ Dự trữ";
+  addResBtn.dataset.reserveAdd = "1";
+  addResBtn.dataset.reserveAddModel = row.model;
+  addResBtn.textContent = mem.inReserve ? "✓ Đã ở Dự trữ" : "+ Dự trữ";
+  addResBtn.disabled = mem.inReserve;
   addResBtn.addEventListener("click", () => {
     enqueueMonitorMutation(addResBtn, async () => {
       try {
-        const summary = await invokeCmd("upsert_reserve_entry", {
-          expectedReservesSha: state.reservesSha,
-          input: {
-            index: null,
-            model: row.model,
-            api_base: desc.apiBase,
-            api_key: desc.inlineKey,
-            note: row.median_ms != null ? `Bench ~${row.median_ms} ms` : "",
-          },
-          inheritSource: desc.inheritSource,
-        });
+        await upsertBenchmarkRowToReserve(row, desc, state.reservesSha);
         showToast(`Đã lưu '${row.model}' vào kho Dự trữ (DPAPI).`, "ok");
         await state.onRefreshRequested?.();
-        void summary;
+        syncBenchmarkActionButtons();
+        renderModelChecklist();
       } catch (err) {
         showToast(`Không lưu được Dự trữ: ${err}`, "danger");
       }
@@ -221,9 +316,12 @@ function renderBenchmarkRow(tbody, row, desc) {
   addWatchBtn.type = "button";
   addWatchBtn.className = "c-btn c-btn--sm";
   addWatchBtn.dataset.watchAdd = "1";
-  addWatchBtn.textContent = "+ Theo dõi";
-  addWatchBtn.disabled = state.watchCount >= MAX_WATCHES;
-  if (addWatchBtn.disabled) {
+  addWatchBtn.dataset.watchAddModel = row.model;
+  addWatchBtn.textContent = mem.inWatch ? "✓ Đang Theo dõi" : "+ Theo dõi";
+  addWatchBtn.disabled = mem.inWatch || state.watchCount >= MAX_WATCHES;
+  if (mem.inWatch) {
+    addWatchBtn.title = "Model này đã có trong bảng Theo dõi";
+  } else if (addWatchBtn.disabled) {
     addWatchBtn.title = `Bảng Theo dõi đã đủ ${MAX_WATCHES} key`;
   }
   addWatchBtn.addEventListener("click", () => {
@@ -241,7 +339,8 @@ function renderBenchmarkRow(tbody, row, desc) {
         });
         showToast(`Đã thêm '${row.model}' vào bảng Theo dõi.`, "ok");
         await state.onRefreshRequested?.();
-        syncBenchmarkWatchButtons();
+        syncBenchmarkActionButtons();
+        renderModelChecklist();
       } catch (err) {
         showToast(`Không thêm được Theo dõi: ${err}`, "danger");
       }
@@ -301,8 +400,11 @@ async function runBenchmark(rounds) {
   const resultsWrap = document.getElementById("pt-results-wrap");
   const tbody = document.getElementById("pt-results-tbody");
 
+  lastBenchmarkDesc = desc;
+  lastBenchmarkRows = [];
   state.benchmarkBusy = true;
   syncPickedCountUi();
+  syncBatchSaveOkUi();
   cancelBtn.hidden = false;
   cancelBtn.disabled = false;
   progressWrap.hidden = false;
@@ -318,6 +420,7 @@ async function runBenchmark(rounds) {
       const pct = ev.total_models > 0 ? Math.round((ev.completed * 100) / ev.total_models) : 100;
       progressBar.style.width = `${pct}%`;
       progressText.textContent = `Đã xong ${ev.completed} / ${ev.total_models}: ${ev.summary.model}`;
+      lastBenchmarkRows.push(ev.summary);
       renderBenchmarkRow(tbody, ev.summary, desc);
     } else if (ev.kind === "completed") {
       progressBar.style.width = "100%";
@@ -334,11 +437,12 @@ async function runBenchmark(rounds) {
       rounds,
       onEvent: ch,
     });
+    lastBenchmarkRows = finalResults || [];
     tbody.replaceChildren();
-    for (const row of finalResults || []) {
+    for (const row of lastBenchmarkRows) {
       renderBenchmarkRow(tbody, row, desc);
     }
-    statusEl.textContent = `Hoàn tất kiểm tra ${finalResults?.length || 0} model (${rounds} lượt/model).`;
+    statusEl.textContent = `Hoàn tất kiểm tra ${lastBenchmarkRows.length} model (${rounds} lượt/model).`;
   } catch (err) {
     statusEl.textContent = `Lỗi benchmark: ${err}`;
     showToast(String(err), "danger");
@@ -346,6 +450,7 @@ async function runBenchmark(rounds) {
     state.benchmarkBusy = false;
     cancelBtn.hidden = true;
     syncPickedCountUi();
+    syncBenchmarkActionButtons();
   }
 }
 
@@ -356,7 +461,17 @@ export function setupProviderTester() {
     if (ev.target === backdrop) closeProviderTester();
   });
 
-  document.getElementById("pt-source-select")?.addEventListener("change", syncInlineVisibility);
+  document.getElementById("pt-source-select")?.addEventListener("change", () => {
+    syncInlineVisibility();
+    loadedIds = [];
+    selectedModels.clear();
+    const pickerSection = document.getElementById("pt-picker-section");
+    if (pickerSection) pickerSection.hidden = true;
+    syncPickedCountUi();
+  });
+  document.getElementById("pt-inline-base")?.addEventListener("input", () => {
+    if (loadedIds.length > 0) renderModelChecklist();
+  });
   document.getElementById("pt-model-filter")?.addEventListener("input", renderModelChecklist);
 
   document.getElementById("pt-load-models")?.addEventListener("click", async () => {
@@ -410,6 +525,33 @@ export function setupProviderTester() {
     btn.disabled = true;
     await invokeCmd("cancel_provider_benchmark").catch(() => {});
   });
+
+  document.getElementById("pt-save-all-ok-reserve")?.addEventListener("click", (ev) => {
+    const btn = ev.currentTarget;
+    const desc = lastBenchmarkDesc;
+    const eligible = getEligibleOkForBatchReserve();
+    if (!desc || eligible.length === 0) return;
+
+    enqueueMonitorMutation(btn, async () => {
+      let curSha = state.reservesSha;
+      let savedCount = 0;
+      try {
+        for (const row of eligible) {
+          const summary = await upsertBenchmarkRowToReserve(row, desc, curSha);
+          curSha = summary?.reserves_sha256 || curSha;
+          savedCount += 1;
+        }
+        await state.onRefreshRequested?.();
+        syncBenchmarkActionButtons();
+        renderModelChecklist();
+        showToast(`Đã lưu ${savedCount} model OK vào kho Dự trữ (DPAPI).`, "ok");
+      } catch (err) {
+        await state.onRefreshRequested?.();
+        syncBenchmarkActionButtons();
+        showToast(`Đã lưu ${savedCount} model trước khi gặp lỗi: ${err}`, "danger");
+      }
+    });
+  });
 }
 
 export function openProviderTester(preferredSourceKey = "") {
@@ -445,6 +587,6 @@ export function openProviderTester(preferredSourceKey = "") {
 
   syncInlineVisibility();
   syncPickedCountUi();
-  syncBenchmarkWatchButtons();
+  syncBenchmarkActionButtons();
   backdrop.hidden = false;
 }

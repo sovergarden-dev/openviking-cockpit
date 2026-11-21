@@ -1,6 +1,16 @@
 import { invokeCmd } from "../api.js";
+import { showToast } from "../components/toast.js";
 import { state } from "../state.js";
 import { createCell, createEmptyRow, formatEndpointStatus, formatMib } from "../utils/format.js";
+
+const MEMORY_CATEGORY_URIS = {
+  preferences: "viking://user/default/memories/preferences",
+  entities: "viking://user/default/memories/entities",
+  patterns: "viking://user/default/memories/patterns",
+  cases: "viking://user/default/memories/cases",
+  events: "viking://user/default/memories/events",
+  profile: "viking://user/default/memories/profile.md",
+};
 
 const MEMORY_CATEGORY_ROLES = {
   preferences: "Quy tắc, phong cách và tùy chọn cá nhân dài hạn",
@@ -98,9 +108,23 @@ function renderMemoryOverview(payload) {
       const pct = mem?.total_memories ? `${((count * 100) / totalMemories).toFixed(1)}%` : "0.0%";
       tr.appendChild(createCell(pct, { mono: true }));
       tr.appendChild(createCell(MEMORY_CATEGORY_ROLES[catName] || "Danh mục bổ sung"));
+      const browseTarget = MEMORY_CATEGORY_URIS[catName];
+      if (browseTarget) {
+        tr.className = "c-row--clickable";
+        tr.title = `Bấm để duyệt/xem '${browseTarget}'`;
+        tr.addEventListener("click", () => {
+          if (catName === "profile") {
+            openMemoryContentPreview(browseTarget, null);
+          } else {
+            browseMemoryDirectory(browseTarget);
+          }
+        });
+      }
       catBody.appendChild(tr);
     }
   }
+
+  syncPeerScopeOptions(st.peers || []);
 
   const stBody = document.getElementById("memory-storage-tbody");
   stBody.replaceChildren();
@@ -111,6 +135,7 @@ function renderMemoryOverview(payload) {
       formatMib(st.memories_default?.bytes),
       "Kho ký ức dùng chung mặc định",
       st.memories_default?.md_files ? "user/default/memories" : "",
+      "viking://user/default/memories",
     ],
   ];
   for (const p of st.peers || []) {
@@ -120,6 +145,7 @@ function renderMemoryOverview(payload) {
       formatMib(p.bytes),
       `Nhánh tác nhân riêng (${p.peer_id})`,
       p.peer_id,
+      `viking://user/default/peers/${p.peer_id}/memories`,
     ]);
   }
   storageRows.push(
@@ -129,12 +155,14 @@ function renderMemoryOverview(payload) {
       formatMib(st.vectordb?.bytes),
       "Chỉ mục vector cục bộ (Dim 1024)",
       "",
+      "",
     ],
     [
       "user/default/sessions/",
       `${sess.total_sessions ?? 0} phiên (${sess.files ?? 0} tệp)`,
       formatMib(sess.bytes),
       `Lịch sử hội thoại thô (${sess.cron_sessions ?? 0} cron)`,
+      "",
       "",
     ],
     [
@@ -143,6 +171,7 @@ function renderMemoryOverview(payload) {
       formatMib(st.quarantine?.bytes),
       "Bản sao lưu thừa đã đưa vào khu cách ly",
       "",
+      "",
     ],
     [
       "logs/",
@@ -150,16 +179,83 @@ function renderMemoryOverview(payload) {
       formatMib(st.logs?.bytes),
       "Nhật ký server, Ollama và lifecycle.jsonl",
       "",
+      "",
     ]
   );
 
-  for (const [label, countTxt, sizeTxt, noteTxt, fullTitle] of storageRows) {
+  for (const [label, countTxt, sizeTxt, noteTxt, fullTitle, browseUri] of storageRows) {
     const tr = document.createElement("tr");
     tr.appendChild(createCell(label, { mono: true, title: fullTitle }));
     tr.appendChild(createCell(countTxt, { mono: true }));
     tr.appendChild(createCell(sizeTxt, { mono: true }));
     tr.appendChild(createCell(noteTxt));
+    if (browseUri) {
+      tr.className = "c-row--clickable";
+      tr.title = `Bấm để duyệt các tệp trong '${browseUri}'`;
+      tr.addEventListener("click", () => browseMemoryDirectory(browseUri));
+    }
     stBody.appendChild(tr);
+  }
+}
+
+function syncPeerScopeOptions(peers) {
+  const scopeSelect = document.getElementById("memory-search-scope");
+  if (!scopeSelect) return;
+  const prevVal = scopeSelect.value;
+  scopeSelect.querySelectorAll('option[data-peer-scope="1"]').forEach((el) => el.remove());
+  for (const p of peers || []) {
+    const opt = document.createElement("option");
+    opt.value = `viking://user/default/peers/${p.peer_id}/memories`;
+    opt.textContent = `Peer: ${p.display_label} (${p.md_files} tệp)`;
+    opt.dataset.peerScope = "1";
+    scopeSelect.appendChild(opt);
+  }
+  if (prevVal && Array.from(scopeSelect.options).some((o) => o.value === prevVal)) {
+    scopeSelect.value = prevVal;
+  }
+}
+
+async function browseMemoryDirectory(uri) {
+  const reqSeq = ++state.searchRequestSeq;
+  const searchBody = document.getElementById("memory-search-tbody");
+  const statusEl = document.getElementById("memory-search-status");
+  if (!searchBody) return;
+
+  if (statusEl) statusEl.textContent = `Đang liệt kê thư mục '${uri}'…`;
+  try {
+    const entries = await invokeCmd("list_viking_dir", { uri, limit: 80 });
+    if (reqSeq !== state.searchRequestSeq) return;
+    searchBody.replaceChildren();
+    if (statusEl) statusEl.textContent = `Đang duyệt '${uri}': ${entries.length} mục (chỉ đọc).`;
+    if (entries.length === 0) {
+      searchBody.appendChild(createEmptyRow(5, `Thư mục '${uri}' hiện trống.`));
+      return;
+    }
+    for (const entry of entries) {
+      const tr = document.createElement("tr");
+      tr.appendChild(createCell(entry.is_dir ? "Thư mục" : "Tệp .md", { mono: true, nowrap: true }));
+      tr.appendChild(createCell(entry.is_dir ? "dir" : "file", { mono: true, nowrap: true }));
+      tr.appendChild(createCell(entry.uri, { mono: true, truncate: true, wide: true }));
+      tr.appendChild(createCell(entry.name, { truncate: true, wide: true }));
+
+      const actTd = document.createElement("td");
+      actTd.className = "c-row-actions";
+      const actBtn = document.createElement("button");
+      actBtn.type = "button";
+      actBtn.className = "c-btn c-btn--sm";
+      actBtn.textContent = entry.is_dir ? "Mở thư mục" : "Xem nội dung";
+      actBtn.addEventListener("click", () => {
+        if (entry.is_dir) browseMemoryDirectory(entry.uri);
+        else openMemoryContentPreview(entry.uri, actBtn);
+      });
+      actTd.appendChild(actBtn);
+      tr.appendChild(actTd);
+      searchBody.appendChild(tr);
+    }
+    searchBody.closest("article")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  } catch (err) {
+    if (reqSeq !== state.searchRequestSeq) return;
+    if (statusEl) statusEl.textContent = `Không liệt kê được '${uri}': ${err}`;
   }
 }
 
@@ -189,6 +285,7 @@ async function openMemoryContentPreview(uri, btn) {
   const bodyEl = document.getElementById("memory-preview-body");
   if (btn) btn.disabled = true;
   card.hidden = false;
+  card.scrollIntoView({ block: "nearest", behavior: "smooth" });
   uriEl.textContent = uri;
   bodyEl.textContent = "Đang đọc nội dung chỉ đọc từ OpenViking…";
   try {
@@ -216,6 +313,28 @@ export function setupMemoryPanel() {
   }
 
   document.getElementById("btn-refresh-memory-overview")?.addEventListener("click", refreshMemoryOverview);
+
+  document.getElementById("btn-copy-memory-uri")?.addEventListener("click", async () => {
+    const text = document.getElementById("memory-preview-uri")?.textContent || "";
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast("Đã sao chép URI vào bộ nhớ tạm.", "ok");
+    } catch (err) {
+      showToast(`Không chép được URI: ${err}`, "danger");
+    }
+  });
+
+  document.getElementById("btn-copy-memory-body")?.addEventListener("click", async () => {
+    const text = document.getElementById("memory-preview-body")?.textContent || "";
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast("Đã sao chép nội dung ký ức.", "ok");
+    } catch (err) {
+      showToast(`Không chép được nội dung: ${err}`, "danger");
+    }
+  });
 
   document.getElementById("btn-close-memory-preview")?.addEventListener("click", () => {
     state.previewRequestSeq += 1;

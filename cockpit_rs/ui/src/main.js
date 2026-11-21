@@ -4,7 +4,7 @@ import { closeEditorDrawer, isEditorDrawerOpen, setupEditorDrawer } from "./comp
 import { closeFloatingMenu } from "./components/menu.js";
 import { showToast } from "./components/toast.js";
 import { closeAuditModal, isAuditModalOpen, launchSecurityAudit, setupAuditModal } from "./modals/audit.js";
-import { closeLogViewer, isLogViewerOpen, setupLogViewer } from "./modals/log_viewer.js";
+import { closeLogViewer, isLogViewerOpen, openLogViewer, setupLogViewer } from "./modals/log_viewer.js";
 import {
   closeProviderTester,
   isProviderTesterOpen,
@@ -206,6 +206,23 @@ function setupGlobalKeyboard() {
       return;
     }
 
+    if (ev.key === "F5" || ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "r")) {
+      ev.preventDefault();
+      refreshAll();
+      showToast("Đã làm mới dữ liệu.", "ok");
+      return;
+    }
+
+    if (ev.altKey && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey) {
+      const tabMap = { 1: "overview", 2: "slots", 3: "reserve", 4: "memory" };
+      const targetTab = tabMap[ev.key];
+      if (targetTab) {
+        ev.preventDefault();
+        activateTab(targetTab);
+        return;
+      }
+    }
+
     if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "k") {
       ev.preventDefault();
       if (state.activeTab === "memory") {
@@ -242,6 +259,7 @@ async function setupStreaming() {
   }
   await listenEvent("telemetry://snapshot", (ev) => renderTelemetry(ev.payload));
   await listenEvent("monitor://updated", (ev) => renderMonitorState(ev.payload));
+  await listenEvent("tray://open-log", (ev) => openLogViewer(ev.payload || "server.log"));
   await listenEvent("watchlist://auto-disabled", (ev) => {
     const p = ev.payload;
     showToast(

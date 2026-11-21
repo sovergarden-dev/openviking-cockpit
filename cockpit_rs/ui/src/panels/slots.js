@@ -3,6 +3,7 @@ import { requestConfirm } from "../components/confirm.js";
 import { openEditorDrawer } from "../components/drawer.js";
 import { openFloatingMenu } from "../components/menu.js";
 import { showToast } from "../components/toast.js";
+import { runGuidedSlotAuditWorkflow } from "../modals/audit.js";
 import { MAX_WATCHES, state } from "../state.js";
 import {
   createAuditBadgeElement,
@@ -10,13 +11,34 @@ import {
   createEmptyRow,
   createProbeLatencyText,
   createProbeStatusBadge,
+  formatBackendError,
+  isAuditRequiredError,
 } from "../utils/format.js";
+import { runServiceAction } from "./overview.js";
 
 function setDriftBanner(message) {
   const el = document.getElementById("drift-banner");
+  const textEl = document.getElementById("drift-banner-text");
   if (!el) return;
   el.hidden = !message;
-  el.textContent = message || "";
+  if (textEl) textEl.textContent = message || "";
+}
+
+function computeLiveSlotDriftReason(slots, cfg, live) {
+  if (cfg?.drift?.drift) return cfg.drift.reason;
+  const liveIds = live?.credential_ids;
+  if (!Array.isArray(liveIds) || liveIds.length === 0 || !Array.isArray(slots) || slots.length === 0) {
+    return "";
+  }
+  let confIds = slots.map((s) => s.id).filter(Boolean);
+  if (confIds.length === 1 && confIds[0] === "default") confIds = ["credential-0"];
+  const countMismatch = typeof live.n === "number" && live.n !== slots.length;
+  const idsMismatch =
+    confIds.length !== liveIds.length || confIds.some((id, idx) => id !== liveIds[idx]);
+  if (countMismatch || idsMismatch) {
+    return "Chuỗi Slot trong ov.conf trên đĩa đã thay đổi so với tiến trình OpenViking đang chạy trên RAM.";
+  }
+  return "";
 }
 
 async function hotSwitchSlot(slotIndex, btn) {
@@ -64,7 +86,20 @@ async function reorderSlot(op) {
     showToast("Đã cập nhật thứ tự Slot trong ov.conf.", "ok");
     await state.onRefreshRequested?.();
   } catch (err) {
-    showToast(`Từ chối đổi vị trí Slot: ${err}`, "danger");
+    if (isAuditRequiredError(err)) {
+      const candIdx =
+        op.op === "promote_to_primary" ? op.index : op.b === 0 ? op.a : op.b;
+      const candSlot = (state.slots || []).find((s) => s.slot_index === candIdx);
+      await runGuidedSlotAuditWorkflow({
+        slotIndex: 0,
+        model: candSlot?.model || `Slot #${candIdx}`,
+        auditTarget: { source: "slot", slot_index: candIdx },
+        allowUnaudit: false,
+        retryAction: () => reorderSlot(op),
+      });
+      return;
+    }
+    showToast(`Từ chối đổi vị trí Slot: ${formatBackendError(err)}`, "danger");
   }
 }
 
@@ -97,7 +132,7 @@ export function renderSlotsPanel() {
   const countBadge = document.getElementById("tab-count-slots");
   if (countBadge) countBadge.textContent = String(slots.length);
 
-  setDriftBanner(cfg?.drift?.drift ? cfg.drift.reason : "");
+  setDriftBanner(computeLiveSlotDriftReason(slots, cfg, live));
 
   const summaryBadge = document.getElementById("slot-runtime-summary");
   const releaseBtn = document.getElementById("btn-slot-release-hold");
@@ -220,7 +255,11 @@ export function renderSlotsPanel() {
         : slot.secret_status;
       keyWrap.appendChild(keyDesc);
     }
-    keyWrap.appendChild(createAuditBadgeElement(slot));
+    keyWrap.appendChild(
+      createAuditBadgeElement(slot, () =>
+        state.onOpenAudit?.({ source: "slot", slot_index: slot.slot_index })
+      )
+    );
     keyTd.appendChild(keyWrap);
     tr.appendChild(keyTd);
 
@@ -319,6 +358,10 @@ export function renderSlotsPanel() {
       ev.preventDefault();
       openMenu(ev);
     });
+    tr.addEventListener("dblclick", (ev) => {
+      if (ev.target.closest("button, input, select, a")) return;
+      openEditorDrawer({ kind: "slot", mode: "edit", item: slot });
+    });
 
     rowAct.appendChild(probeBtn);
     rowAct.appendChild(switchBtn);
@@ -345,6 +388,19 @@ export function setupSlotsPanel() {
 
   document.getElementById("btn-slots-open-failback")?.addEventListener("click", () => {
     state.onOpenSettingsPopover?.(true);
+  });
+
+  document.getElementById("btn-drift-apply-restart")?.addEventListener("click", async () => {
+    const ok = await requestConfirm({
+      title: "Khởi động lại OpenViking Server",
+      message:
+        "Khởi động lại tiến trình OpenViking Server (19330) ngay để áp dụng chuỗi Slot và thứ tự ưu tiên mới trong ov.conf?",
+      confirmLabel: "Khởi động lại ngay",
+      danger: false,
+    });
+    if (ok) {
+      await runServiceAction("restart");
+    }
   });
 
   document.getElementById("btn-slots-probe-all")?.addEventListener("click", async (ev) => {

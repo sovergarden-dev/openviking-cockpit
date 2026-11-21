@@ -286,6 +286,21 @@ body {
   border: 1px solid var(--color-border);
 }
 
+.c-badge--interactive {
+  border: 1px solid transparent;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color var(--duration-fast), background var(--duration-fast);
+}
+
+.c-badge--interactive:hover {
+  border-color: var(--color-border-strong);
+}
+
+.c-row--clickable {
+  cursor: pointer;
+}
+
 @keyframes c-pulse {
   0%,
   100% {

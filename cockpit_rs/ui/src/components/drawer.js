@@ -1,6 +1,12 @@
 import { invokeCmd } from "../api.js";
+import { runGuidedSlotAuditWorkflow } from "../modals/audit.js";
 import { enqueueMonitorMutation, state } from "../state.js";
-import { filterModelIds, normalizeEndpoint } from "../utils/format.js";
+import {
+  filterModelIds,
+  formatBackendError,
+  isAuditRequiredError,
+  normalizeEndpoint,
+} from "../utils/format.js";
 import { showToast } from "./toast.js";
 
 let currentCtx = null;
@@ -256,27 +262,64 @@ export function setupEditorDrawer() {
     const rawKey = document.getElementById("drawer-key").value.trim();
     const inheritSource = resolveInheritSourceSelection();
 
+    const saveSlotWithOptionalGuidedAudit = async (allowUnaudited) => {
+      const slotIndex = Number(document.getElementById("drawer-slot-index").value);
+      submitBtn.disabled = true;
+      statusEl.textContent = "Đang kiểm định cổng an toàn & lưu nguyên tử vào ov.conf…";
+      try {
+        const out = await invokeCmd("apply_slot", {
+          expectedSha: state.confSha,
+          input: {
+            slot_index: slotIndex,
+            model,
+            api_base: apiBase,
+            api_key: rawKey || null,
+            allow_unaudited: allowUnaudited,
+            manual_save: false,
+          },
+          inheritSource,
+        });
+        state.confSha = out.new_sha256;
+        showToast("Đã lưu cấu hình Slot thành công.", "ok");
+        closeEditorDrawer();
+        await state.onRefreshRequested?.();
+      } catch (err) {
+        if (isAuditRequiredError(err)) {
+          const auditTarget =
+            !rawKey &&
+            !inheritSource &&
+            ctx.isExistingSlot &&
+            normalizeEndpoint(apiBase) === originalBaseNormalized
+              ? { source: "slot", slot_index: slotIndex }
+              : { source: "provider_model", target: buildActiveCredentialTarget(), model };
+          statusEl.textContent = "Đang chờ xác nhận Kiểm định V3.1…";
+          const completed = await runGuidedSlotAuditWorkflow({
+            slotIndex,
+            model,
+            auditTarget,
+            allowUnaudit: true,
+            retryAction: () => saveSlotWithOptionalGuidedAudit(false),
+            unauditRetryAction: () => {
+              document.getElementById("drawer-allow-unaudited").checked = true;
+              return saveSlotWithOptionalGuidedAudit(true);
+            },
+          });
+          if (!completed) {
+            statusEl.textContent = "Đã hủy lưu Slot chưa kiểm định.";
+          }
+          return;
+        }
+        const friendlyErr = formatBackendError(err);
+        statusEl.textContent = `Từ chối lưu: ${friendlyErr}`;
+        showToast(friendlyErr, "danger");
+      }
+    };
+
     const saveTask = async () => {
       try {
         if (ctx.kind === "slot") {
-          submitBtn.disabled = true;
-          statusEl.textContent = "Đang kiểm định cổng an toàn & lưu nguyên tử vào ov.conf…";
-          const out = await invokeCmd("apply_slot", {
-            expectedSha: state.confSha,
-            input: {
-              slot_index: Number(document.getElementById("drawer-slot-index").value),
-              model,
-              api_base: apiBase,
-              api_key: rawKey || null,
-              allow_unaudited: document.getElementById("drawer-allow-unaudited").checked,
-              manual_save: false,
-            },
-            inheritSource,
-          });
-          state.confSha = out.new_sha256;
-          showToast("Đã lưu cấu hình Slot thành công.", "ok");
-          closeEditorDrawer();
-          await state.onRefreshRequested?.();
+          const allowUnaudited = document.getElementById("drawer-allow-unaudited").checked;
+          await saveSlotWithOptionalGuidedAudit(allowUnaudited);
         } else if (ctx.kind === "reserve") {
           await enqueueMonitorMutation(submitBtn, async () => {
             statusEl.textContent = "Đang mã hóa DPAPI & lưu model Dự trữ…";

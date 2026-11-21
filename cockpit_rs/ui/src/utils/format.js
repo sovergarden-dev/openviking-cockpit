@@ -106,38 +106,67 @@ export function createEmptyRow(colSpan, text) {
   return tr;
 }
 
-export function createAuditBadgeElement(row) {
+export function isAuditRequiredError(err) {
+  return String(err || "").includes("Security audit required:");
+}
+
+export function formatBackendError(err) {
+  const raw = String(err || "").trim();
+  if (raw.includes("Security audit required:")) {
+    return "Cần báo cáo Kiểm định V3.1 còn hạn trước khi lưu vào Slot.";
+  }
+  if (raw.includes("Revision mismatch for")) {
+    return "Tệp cấu hình trên đĩa vừa thay đổi; bấm Làm mới rồi thử lại.";
+  }
+  if (raw.includes("Base URL changed; provide an API key")) {
+    return "Đã đổi Endpoint — vui lòng nhập API Key hoặc chọn nguồn kế thừa cùng Endpoint.";
+  }
+  return raw;
+}
+
+export function createAuditBadgeElement(row, onAuditClick = null) {
   const wrap = document.createElement("span");
   wrap.className = "c-actions";
+  const interactive = typeof onAuditClick === "function";
+  const buildBadge = (variantClass, text, titleText) => {
+    const el = document.createElement(interactive ? "button" : "span");
+    if (interactive) {
+      el.type = "button";
+      el.className = `c-badge c-badge--interactive ${variantClass}`;
+      el.title = `${titleText} · Bấm để mở/chạy Kiểm định V3.1`;
+      el.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        onAuditClick();
+      });
+    } else {
+      el.className = `c-badge ${variantClass}`;
+      el.title = titleText;
+    }
+    el.textContent = text;
+    return el;
+  };
+
   const lvl = Number(row?.cached_audit_level);
   if (Number.isInteger(lvl) && lvl >= 1 && lvl <= 5) {
-    const badge = document.createElement("span");
     const variant =
       lvl >= 4 ? "c-badge--ok" : lvl >= 2 ? "c-badge--warn" : "c-badge--danger";
-    badge.className = `c-badge ${variant}`;
     const ageLabel = row.cached_audit_age_s != null ? ` · ${formatAgeShort(row.cached_audit_age_s)}` : "";
-    badge.textContent = `[M${lvl}${ageLabel}]`;
     const ttlDays = Math.round(Number(row.cached_audit_ttl_s || 0) / 86400);
-    badge.title = `${AUDIT_LEVEL_TITLES[lvl] || `Mức ${lvl}`} (Còn hạn · TTL ${ttlDays >= 1 ? `${ttlDays} ngày` : "24h"})`;
-    wrap.appendChild(badge);
+    const title = `${AUDIT_LEVEL_TITLES[lvl] || `Mức ${lvl}`} (Còn hạn · TTL ${ttlDays >= 1 ? `${ttlDays} ngày` : "24h"})`;
+    wrap.appendChild(buildBadge(variant, `[M${lvl}${ageLabel}]`, title));
     return wrap;
   }
 
   if (row?.cached_audit_expired) {
     const expLvl = row.cached_audit_expired_level;
-    const badge = document.createElement("span");
-    badge.className = "c-badge c-badge--warn";
     const ageLabel = row.cached_audit_age_s != null ? formatAgeShort(row.cached_audit_age_s) : "cũ";
-    badge.textContent = expLvl ? `[M${expLvl} · Hết hạn ${ageLabel}]` : `[Hết hạn ${ageLabel}]`;
-    badge.title = "Báo cáo kiểm định đã hết hạn TTL — hãy bấm Kiểm định (Đo lại) trước khi đưa vào Slot";
-    wrap.appendChild(badge);
+    const label = expLvl ? `[M${expLvl} · Hết hạn ${ageLabel}]` : `[Hết hạn ${ageLabel}]`;
+    const title = "Báo cáo kiểm định đã hết hạn TTL — bấm Kiểm định V3.1 trước khi đưa vào Slot";
+    wrap.appendChild(buildBadge("c-badge--warn", label, title));
     return wrap;
   }
 
-  const noneBadge = document.createElement("span");
-  noneBadge.className = "c-badge c-badge--muted";
-  noneBadge.textContent = "Chưa kiểm định";
-  wrap.appendChild(noneBadge);
+  wrap.appendChild(buildBadge("c-badge--muted", "Chưa kiểm định", "Chưa có báo cáo kiểm định V3.1"));
   return wrap;
 }
 

@@ -3,6 +3,7 @@ import { requestConfirm } from "../components/confirm.js";
 import { openEditorDrawer } from "../components/drawer.js";
 import { openFloatingMenu } from "../components/menu.js";
 import { showToast } from "../components/toast.js";
+import { runGuidedSlotAuditWorkflow } from "../modals/audit.js";
 import { enqueueMonitorMutation, MAX_WATCHES, state } from "../state.js";
 import {
   createAuditBadgeElement,
@@ -10,6 +11,8 @@ import {
   createEmptyRow,
   createProbeLatencyText,
   createProbeStatusBadge,
+  formatBackendError,
+  isAuditRequiredError,
   normalizeSearchText,
 } from "../utils/format.js";
 
@@ -95,18 +98,26 @@ function getFilteredReserves(reserves) {
   });
 }
 
-async function promoteReserveToSlot(reserveIndex, targetSlotOverride, btn, onDoneRefresh) {
-  const expectedReservesSha = state.reservesSha;
+async function promoteReserveToSlot(
+  reserveIndex,
+  targetSlotOverride,
+  btn,
+  onDoneRefresh,
+  allowUnauditedOverride = null
+) {
   const slotIndex =
     typeof targetSlotOverride === "number"
       ? targetSlotOverride
       : Number(document.getElementById("reserve-target-slot")?.value ?? 1);
-  const allowUnaudited = Boolean(document.getElementById("reserve-allow-unaudited")?.checked);
+  const allowUnaudited =
+    allowUnauditedOverride !== null
+      ? allowUnauditedOverride
+      : Boolean(document.getElementById("reserve-allow-unaudited")?.checked);
   if (btn) btn.disabled = true;
   try {
     const out = await invokeCmd("promote_reserve_to_slot", {
       expectedConfSha: state.confSha,
-      expectedReservesSha,
+      expectedReservesSha: state.reservesSha,
       reserveIndex,
       slotIndex,
       allowUnaudited,
@@ -115,7 +126,21 @@ async function promoteReserveToSlot(reserveIndex, targetSlotOverride, btn, onDon
     showToast(`Đã đưa vào Slot #${slotIndex} thành công.`, "ok");
     await onDoneRefresh?.();
   } catch (err) {
-    showToast(`Từ chối đưa vào Slot #${slotIndex}: ${err}`, "danger");
+    if (isAuditRequiredError(err)) {
+      const rec = (state.lastMonitorSummary?.reserves || []).find((r) => r.index === reserveIndex);
+      await runGuidedSlotAuditWorkflow({
+        slotIndex,
+        model: rec?.model || `Dự trữ #${reserveIndex + 1}`,
+        auditTarget: { source: "reserve", index: reserveIndex },
+        allowUnaudit: true,
+        retryAction: () =>
+          promoteReserveToSlot(reserveIndex, slotIndex, btn, onDoneRefresh, false),
+        unauditRetryAction: () =>
+          promoteReserveToSlot(reserveIndex, slotIndex, btn, onDoneRefresh, true),
+      });
+      return;
+    }
+    showToast(`Từ chối đưa vào Slot #${slotIndex}: ${formatBackendError(err)}`, "danger");
   } finally {
     if (btn && btn.isConnected) btn.disabled = false;
   }
@@ -277,7 +302,11 @@ export function renderReserveTable(onMonitorUpdated) {
       keySpan.textContent = res.secret_status;
       keyWrap.appendChild(keySpan);
     }
-    keyWrap.appendChild(createAuditBadgeElement(res));
+    keyWrap.appendChild(
+      createAuditBadgeElement(res, () =>
+        state.onOpenAudit?.({ source: "reserve", index: res.index })
+      )
+    );
     keyTd.appendChild(keyWrap);
     tr.appendChild(keyTd);
 
@@ -406,6 +435,15 @@ export function renderReserveTable(onMonitorUpdated) {
     tr.addEventListener("contextmenu", (ev) => {
       ev.preventDefault();
       openMenu(ev);
+    });
+    tr.addEventListener("dblclick", (ev) => {
+      if (ev.target.closest("button, input, select, a")) return;
+      openEditorDrawer({
+        kind: "reserve",
+        mode: "edit",
+        item: res,
+        onMonitorUpdated,
+      });
     });
 
     rowAct.appendChild(pingBtn);

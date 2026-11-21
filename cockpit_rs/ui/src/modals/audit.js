@@ -1,4 +1,6 @@
 import { invokeCmd } from "../api.js";
+import { requestConfirm } from "../components/confirm.js";
+import { showToast } from "../components/toast.js";
 import { state } from "../state.js";
 import { createCell, formatAgeShort } from "../utils/format.js";
 
@@ -116,11 +118,63 @@ export async function launchSecurityAudit(target, forceRefresh = false) {
     if (!fromCache) {
       await state.onRefreshRequested?.();
     }
+    return doc;
   } catch (err) {
     badge.className = "c-badge c-badge--danger";
     badge.textContent = "Lỗi kiểm định";
     sumEl.textContent = `Không thể chạy kiểm định: ${err}`;
+    return null;
   } finally {
     if (rerunBtn) rerunBtn.disabled = false;
   }
+}
+
+export async function runGuidedSlotAuditWorkflow({
+  slotIndex,
+  model,
+  auditTarget,
+  allowUnaudit = false,
+  retryAction,
+  unauditRetryAction = null,
+}) {
+  const canQuickBypass = slotIndex >= 1 && allowUnaudit && typeof unauditRetryAction === "function";
+  const choice = await requestConfirm({
+    title:
+      slotIndex === 0
+        ? "Yêu cầu Kiểm định V3.1 cho Slot Chính #0"
+        : `Slot Dự phòng #${slotIndex} chưa kiểm định V3.1`,
+    message: canQuickBypass
+      ? `Model '${model}' chưa có báo cáo Kiểm định V3.1 còn hạn. Bạn có thể chạy 7 probe V3.1 ngay rồi tự động lưu, hoặc lưu nhanh vào Slot Dự phòng #${slotIndex}.`
+      : `Model '${model}' chưa có báo cáo Kiểm định V3.1 còn hạn cho Slot #${slotIndex}. Chạy Kiểm định V3.1 ngay và tự động lưu nếu đạt chuẩn?`,
+    confirmLabel: "Kiểm định V3.1 & Lưu",
+    altLabel: canQuickBypass ? "Lưu nhanh Dự phòng (Bỏ qua kiểm định)" : "",
+    danger: false,
+  });
+
+  if (choice === "alt" && canQuickBypass) {
+    await unauditRetryAction();
+    return true;
+  }
+  if (choice !== true) {
+    return false;
+  }
+
+  const doc = await launchSecurityAudit(auditTarget, true);
+  const verdict = doc?.verdict;
+  const lvl = Number(verdict?.verdict_level || 0);
+  const safePrimary =
+    !verdict?.safety_stop && Boolean(verdict?.memory_permitted) && lvl >= 4;
+  const safeFallback = !verdict?.safety_stop && lvl >= 3;
+  const passed = slotIndex === 0 ? safePrimary : safeFallback;
+
+  if (!passed) {
+    showToast(
+      `Model '${model}' chưa đạt chuẩn an toàn (${verdict?.level_label || "lỗi đo"}) để tự động lưu vào Slot #${slotIndex}.`,
+      "warn"
+    );
+    return false;
+  }
+
+  await retryAction();
+  return true;
 }

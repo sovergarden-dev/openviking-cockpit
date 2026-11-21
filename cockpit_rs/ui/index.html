@@ -101,7 +101,7 @@
             <div id="server-action-status" class="c-card-meta" hidden></div>
           </article>
 
-          <article class="c-card">
+          <article id="card-jump-ollama" class="c-card c-card--interactive" role="button" tabindex="0" title="Bấm để xem nhật ký ollama.log">
             <span class="c-card-title">Ollama &amp; Embedding (21434)</span>
             <div id="metric-ollama" class="c-card-metric">—</div>
             <div id="meta-ollama" class="c-card-meta">Chưa có dữ liệu</div>
@@ -113,7 +113,7 @@
             <div id="meta-vlm" class="c-card-meta">Chưa có dữ liệu</div>
           </article>
 
-          <article class="c-card">
+          <article id="card-jump-queue" class="c-card c-card--interactive" role="button" tabindex="0" title="Bấm để xem nhật ký trích xuất server.log">
             <span class="c-card-title">Extraction Queue</span>
             <div id="metric-queue" class="c-card-metric">—</div>
             <div id="meta-queue" class="c-card-meta">Chưa có dữ liệu</div>
@@ -151,6 +151,7 @@
               </label>
             </div>
             <div class="c-toolbar-group">
+              <button id="btn-watch-probe-all" type="button" class="c-btn c-btn--sm">Thử tất cả</button>
               <button id="btn-watch-provider-test" type="button" class="c-btn c-btn--sm">Thử Provider</button>
               <button id="btn-watch-add" type="button" class="c-btn c-btn--sm c-btn--primary">+ Thêm Theo dõi</button>
             </div>
@@ -176,7 +177,10 @@
       </section>
 
       <section id="panel-slots" class="c-panel" hidden>
-        <div id="drift-banner" class="c-banner c-banner--warn" hidden></div>
+        <div id="drift-banner" class="c-banner c-banner--warn" hidden>
+          <span id="drift-banner-text"></span>
+          <button id="btn-drift-apply-restart" type="button" class="c-btn c-btn--sm c-btn--primary">Áp dụng ngay (Khởi động lại Server)</button>
+        </div>
 
         <div class="c-toolbar">
           <div class="c-toolbar-group">
@@ -380,7 +384,9 @@
                 <option value="viking://user/default/memories/preferences">Preferences (Sở thích)</option>
                 <option value="viking://user/default/memories/entities">Entities (Thực thể)</option>
                 <option value="viking://user/default/memories/patterns">Patterns (Mẫu giải pháp)</option>
+                <option value="viking://user/default/memories/cases">Cases (Tình huống &amp; Sự cố)</option>
                 <option value="viking://user/default/memories/events">Events (Sự kiện)</option>
+                <option value="viking://user/default/memories/profile.md">Profile (Hồ sơ cốt lõi)</option>
                 <option value="viking://user/default/peers">Nhánh Tác nhân (Peers)</option>
               </select>
             </div>
@@ -414,6 +420,8 @@
           <article id="memory-preview-card" class="c-card" hidden>
             <div class="c-actions">
               <span id="memory-preview-uri" class="c-mono"></span>
+              <button id="btn-copy-memory-uri" type="button" class="c-btn c-btn--sm">Chép URI</button>
+              <button id="btn-copy-memory-body" type="button" class="c-btn c-btn--sm">Chép nội dung</button>
               <button id="btn-close-memory-preview" type="button" class="c-btn c-btn--sm">Đóng nội dung</button>
             </div>
             <pre id="memory-preview-body" class="c-pre"></pre>
@@ -537,7 +545,10 @@
         </div>
 
         <div id="pt-progress-wrap" class="c-card" hidden>
-          <div id="pt-progress-text" class="c-card-meta">Đang chạy kiểm tra…</div>
+          <div class="c-toolbar-group">
+            <div id="pt-progress-text" class="c-card-meta">Đang chạy kiểm tra…</div>
+            <button id="pt-save-all-ok-reserve" type="button" class="c-btn c-btn--sm c-btn--primary" hidden>+ Lưu tất cả model OK vào Dự trữ</button>
+          </div>
           <div class="c-progress"><div id="pt-progress-bar" class="c-progress-bar"></div></div>
         </div>
 
@@ -647,6 +658,7 @@
         <div id="confirm-modal-message" class="c-card-meta"></div>
         <div class="c-actions">
           <button id="confirm-modal-cancel" type="button" class="c-btn">Hủy</button>
+          <button id="confirm-modal-alt" type="button" class="c-btn" hidden></button>
           <button id="confirm-modal-ok" type="button" class="c-btn c-btn--danger">Xác nhận</button>
         </div>
       </div>

@@ -205,7 +205,9 @@ export function renderWatchTable(summary, onMonitorUpdated) {
     keyLabel.className = "c-mono";
     keyLabel.textContent = row.secret_status;
     keyWrap.appendChild(keyLabel);
-    keyWrap.appendChild(createAuditBadgeElement(row));
+    keyWrap.appendChild(
+      createAuditBadgeElement(row, () => state.onOpenAudit?.({ source: "watch", watch_id: row.id }))
+    );
     keyTd.appendChild(keyWrap);
     tr.appendChild(keyTd);
 
@@ -336,6 +338,15 @@ export function renderWatchTable(summary, onMonitorUpdated) {
       ev.preventDefault();
       openRowMenu(ev);
     });
+    tr.addEventListener("dblclick", (ev) => {
+      if (ev.target.closest("button, input, select, a")) return;
+      openEditorDrawer({
+        kind: "watch",
+        mode: "edit",
+        item: row,
+        onMonitorUpdated,
+      });
+    });
 
     rowAct.appendChild(probeBtn);
     rowAct.appendChild(autoBtn);
@@ -361,7 +372,7 @@ function resetRestartConfirm() {
   if (cancelBtn) cancelBtn.hidden = true;
 }
 
-async function runServiceAction(action) {
+export async function runServiceAction(action) {
   if (state.serviceBusy) return;
   resetRestartConfirm();
   state.serviceBusy = true;
@@ -404,9 +415,46 @@ async function runServiceAction(action) {
   }
 }
 
+function bindCardActivation(cardId, onActivate) {
+  const el = document.getElementById(cardId);
+  if (!el) return;
+  el.addEventListener("click", onActivate);
+  el.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      onActivate();
+    }
+  });
+}
+
 export function setupOverviewPanel({ onActivateTab, onMonitorUpdated }) {
   document.getElementById("btn-watch-add")?.addEventListener("click", () => {
     openEditorDrawer({ kind: "watch", mode: "add", onMonitorUpdated });
+  });
+  document.getElementById("btn-watch-probe-all")?.addEventListener("click", async (ev) => {
+    const btn = ev.currentTarget;
+    const watches = state.lastMonitorSummary?.watches || [];
+    if (watches.length === 0) {
+      showToast("Chưa có key theo dõi nào để thử.", "warn");
+      return;
+    }
+    btn.disabled = true;
+    let passed = 0;
+    try {
+      for (const w of watches) {
+        try {
+          const updated = await invokeCmd("probe_watch_entry", { watchId: w.id });
+          onMonitorUpdated?.(updated);
+          const refreshed = (updated?.watches || []).find((row) => row.id === w.id);
+          if (refreshed?.last_probe?.ok) passed += 1;
+        } catch (err) {
+          showToast(`Lỗi thử '${w.alias || w.model}': ${err}`, "danger");
+        }
+      }
+      showToast(`Đã thử xong ${watches.length} key Theo dõi (${passed} OK).`, "ok");
+    } finally {
+      if (btn.isConnected) btn.disabled = false;
+    }
   });
   document.getElementById("btn-watch-provider-test")?.addEventListener("click", () => {
     state.onOpenProviderTester?.();
@@ -469,22 +517,9 @@ export function setupOverviewPanel({ onActivateTab, onMonitorUpdated }) {
     }
   });
 
-  document.getElementById("card-jump-vlm")?.addEventListener("click", () => onActivateTab("slots"));
-  document.getElementById("card-jump-vlm")?.addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter" || ev.key === " ") {
-      ev.preventDefault();
-      onActivateTab("slots");
-    }
-  });
-
-  for (const cardId of ["card-jump-vectors", "card-jump-memories"]) {
-    const el = document.getElementById(cardId);
-    el?.addEventListener("click", () => onActivateTab("memory"));
-    el?.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter" || ev.key === " ") {
-        ev.preventDefault();
-        onActivateTab("memory");
-      }
-    });
-  }
+  bindCardActivation("card-jump-ollama", () => openLogViewer("ollama.log"));
+  bindCardActivation("card-jump-vlm", () => onActivateTab("slots"));
+  bindCardActivation("card-jump-queue", () => openLogViewer("server.log"));
+  bindCardActivation("card-jump-vectors", () => onActivateTab("memory"));
+  bindCardActivation("card-jump-memories", () => onActivateTab("memory"));
 }

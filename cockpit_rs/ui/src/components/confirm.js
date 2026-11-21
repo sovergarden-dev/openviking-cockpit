@@ -6,7 +6,7 @@ export function closeConfirmModal(result = false) {
   if (pendingResolve) {
     const resolve = pendingResolve;
     pendingResolve = null;
-    resolve(Boolean(result));
+    resolve(result === "alt" ? "alt" : Boolean(result));
   }
 }
 
@@ -18,23 +18,32 @@ export function isConfirmModalOpen() {
 export function setupConfirmModal() {
   const backdrop = document.getElementById("confirm-modal-backdrop");
   const cancelBtn = document.getElementById("confirm-modal-cancel");
+  const altBtn = document.getElementById("confirm-modal-alt");
   const okBtn = document.getElementById("confirm-modal-ok");
   if (!backdrop || !cancelBtn || !okBtn) return;
 
   cancelBtn.addEventListener("click", () => closeConfirmModal(false));
+  altBtn?.addEventListener("click", () => closeConfirmModal("alt"));
   okBtn.addEventListener("click", () => closeConfirmModal(true));
   backdrop.addEventListener("click", (ev) => {
     if (ev.target === backdrop) closeConfirmModal(false);
   });
 }
 
-export function requestConfirm({ title, message, confirmLabel = "Xác nhận", danger = true }) {
+export function requestConfirm({
+  title,
+  message,
+  confirmLabel = "Xác nhận",
+  altLabel = "",
+  danger = true,
+}) {
   if (pendingResolve) {
     closeConfirmModal(false);
   }
   const backdrop = document.getElementById("confirm-modal-backdrop");
   const titleEl = document.getElementById("confirm-modal-title");
   const msgEl = document.getElementById("confirm-modal-message");
+  const altBtn = document.getElementById("confirm-modal-alt");
   const okBtn = document.getElementById("confirm-modal-ok");
   const cancelBtn = document.getElementById("confirm-modal-cancel");
   if (!backdrop || !titleEl || !msgEl || !okBtn || !cancelBtn) {
@@ -43,6 +52,10 @@ export function requestConfirm({ title, message, confirmLabel = "Xác nhận", d
 
   titleEl.textContent = title || "Xác nhận thao tác";
   msgEl.textContent = message || "";
+  if (altBtn) {
+    altBtn.hidden = !altLabel;
+    altBtn.textContent = altLabel || "";
+  }
   okBtn.textContent = confirmLabel;
   okBtn.className = danger ? "c-btn c-btn--danger" : "c-btn c-btn--primary";
   backdrop.hidden = false;
