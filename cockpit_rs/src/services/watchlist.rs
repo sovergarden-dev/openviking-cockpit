@@ -2,22 +2,22 @@
 //! and sequential probe worker with consecutive 401/403 auto-disable policy.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::net::IpAddr;
 use std::path::Path;
-use std::sync::OnceLock;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::conf_gate::AUDIT_TTL_FAILOVER_S;
+use crate::config::conf_gate::{normalize_endpoint, AUDIT_TTL_FAILOVER_S};
 use crate::config::safe_write::{
     apply_restricted_file_acl, safe_atomic_write_text_with_live_policy, sha256_hex,
     write_restricted_bytes_atomic, SafeWriteError,
 };
 use crate::secrets::secret_store::{dpapi_protect, resolve_secret, SecretStatus};
-use crate::services::auditor_cache::load_cached_audit_verdict;
+use crate::services::auditor_cache::{inspect_cached_audit_badge, AuditBadgeStatus};
+use crate::services::provider_probe::probe_chat_model;
 
 pub const MAX_WATCHES: usize = 4;
 pub const LEGACY_MAX_WATCHES: usize = 7;
@@ -158,15 +158,27 @@ pub enum WatchError {
     RevisionConflict { expected: String, actual: String },
 }
 
+fn deserialize_optional_probe<'de, D>(deserializer: D) -> Result<Option<ProbeOutcome>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<Value>::deserialize(deserializer)?;
+    Ok(opt.and_then(|v| serde_json::from_value::<ProbeOutcome>(v).ok()))
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProbeOutcome {
     pub ok: bool,
+    #[serde(default)]
     pub category: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "http_code", skip_serializing_if = "Option::is_none")]
     pub status_code: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ms: Option<u64>,
+    #[serde(default)]
     pub at: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -192,7 +204,11 @@ pub struct WatchRecord {
     pub next_probe_at: f64,
     #[serde(default)]
     pub cooldown_until: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_probe"
+    )]
     pub last_probe: Option<ProbeOutcome>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -220,6 +236,12 @@ pub struct SpareModelRecord {
     pub api_key: String,
     #[serde(default)]
     pub note: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_probe"
+    )]
+    pub last_probe: Option<ProbeOutcome>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -301,6 +323,14 @@ pub struct WatchRowView {
     pub secret_status: SecretStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_audit_level: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_audit_age_s: Option<u64>,
+    #[serde(default)]
+    pub cached_audit_expired: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_audit_expired_level: Option<u8>,
+    #[serde(default)]
+    pub cached_audit_ttl_s: u64,
     pub auto_enabled: bool,
     pub auto_disabled_reason: String,
     pub rev: u64,
@@ -318,6 +348,16 @@ pub struct ReserveRowView {
     pub secret_status: SecretStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_audit_level: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_audit_age_s: Option<u64>,
+    #[serde(default)]
+    pub cached_audit_expired: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_audit_expired_level: Option<u8>,
+    #[serde(default)]
+    pub cached_audit_ttl_s: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_probe: Option<ProbeOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -335,7 +375,18 @@ pub struct MonitorStateSummary {
 }
 
 pub fn compute_reserves_sha256(spares: &[SpareModelRecord]) -> String {
-    let bytes = serde_json::to_vec(spares).unwrap_or_default();
+    let structural: Vec<(&str, &str, &str, &str)> = spares
+        .iter()
+        .map(|s| {
+            (
+                s.model.as_str(),
+                s.api_base.as_str(),
+                s.api_key.as_str(),
+                s.note.as_str(),
+            )
+        })
+        .collect();
+    let bytes = serde_json::to_vec(&structural).unwrap_or_default();
     sha256_hex(&bytes)
 }
 
@@ -590,6 +641,24 @@ pub fn summarize_monitor_state(
     summarize_monitor_state_with_audits(state, sha256, env_map, None)
 }
 
+fn resolve_badge(
+    reports_dir: Option<&Path>,
+    status: SecretStatus,
+    api_base: &str,
+    model: &str,
+    resolved_key: &str,
+) -> AuditBadgeStatus {
+    match (reports_dir, status) {
+        (Some(dir), SecretStatus::SecretReady) => {
+            inspect_cached_audit_badge(dir, api_base, model, resolved_key, AUDIT_TTL_FAILOVER_S)
+        }
+        _ => AuditBadgeStatus {
+            ttl_s: AUDIT_TTL_FAILOVER_S as u64,
+            ..AuditBadgeStatus::default()
+        },
+    }
+}
+
 pub fn summarize_monitor_state_with_audits(
     state: &MonitorState,
     sha256: &str,
@@ -601,24 +670,24 @@ pub fn summarize_monitor_state_with_audits(
         .iter()
         .map(|w| {
             let resolved = resolve_secret(&w.api_key, env_map);
-            let cached_audit_level = match (reports_dir, resolved.status) {
-                (Some(dir), SecretStatus::SecretReady) => load_cached_audit_verdict(
-                    dir,
-                    &w.api_base,
-                    &w.model,
-                    &resolved.value,
-                    AUDIT_TTL_FAILOVER_S,
-                )
-                .map(|v| v.verdict_level),
-                _ => None,
-            };
+            let badge = resolve_badge(
+                reports_dir,
+                resolved.status,
+                &w.api_base,
+                &w.model,
+                &resolved.value,
+            );
             WatchRowView {
                 id: w.id.clone(),
                 alias: w.alias.clone(),
                 model: w.model.clone(),
                 api_base: w.api_base.clone(),
                 secret_status: resolved.status,
-                cached_audit_level,
+                cached_audit_level: badge.level,
+                cached_audit_age_s: badge.age_s,
+                cached_audit_expired: badge.expired,
+                cached_audit_expired_level: badge.expired_level,
+                cached_audit_ttl_s: badge.ttl_s,
                 auto_enabled: w.auto_enabled,
                 auto_disabled_reason: w.auto_disabled_reason.clone(),
                 rev: w.rev,
@@ -635,24 +704,25 @@ pub fn summarize_monitor_state_with_audits(
         .enumerate()
         .map(|(idx, r)| {
             let resolved = resolve_secret(&r.api_key, env_map);
-            let cached_audit_level = match (reports_dir, resolved.status) {
-                (Some(dir), SecretStatus::SecretReady) => load_cached_audit_verdict(
-                    dir,
-                    &r.api_base,
-                    &r.model,
-                    &resolved.value,
-                    AUDIT_TTL_FAILOVER_S,
-                )
-                .map(|v| v.verdict_level),
-                _ => None,
-            };
+            let badge = resolve_badge(
+                reports_dir,
+                resolved.status,
+                &r.api_base,
+                &r.model,
+                &resolved.value,
+            );
             ReserveRowView {
                 index: idx,
                 model: r.model.clone(),
                 api_base: r.api_base.clone(),
                 note: r.note.clone(),
                 secret_status: resolved.status,
-                cached_audit_level,
+                cached_audit_level: badge.level,
+                cached_audit_age_s: badge.age_s,
+                cached_audit_expired: badge.expired,
+                cached_audit_expired_level: badge.expired_level,
+                cached_audit_ttl_s: badge.ttl_s,
+                last_probe: r.last_probe.clone(),
             }
         })
         .collect();
@@ -723,6 +793,15 @@ pub fn upsert_watch_record(
             .as_ref()
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty());
+
+        if new_key_opt.is_none()
+            && normalize_endpoint(&rec.api_base) != normalize_endpoint(&api_base)
+        {
+            return Err(WatchError::Validation(
+                "Base URL changed; provide an API key or inherit from matching endpoint"
+                    .to_string(),
+            ));
+        }
 
         let target_changed =
             rec.model != model || rec.api_base != api_base || new_key_opt.is_some();
@@ -826,16 +905,29 @@ pub fn upsert_reserve_record(
         let rec = state.spare_models.get_mut(idx).ok_or_else(|| {
             WatchError::Validation("Reserve entry index out of range".to_string())
         })?;
-        rec.model = model;
-        rec.api_base = api_base;
-        rec.note = note;
-        if let Some(raw_k) = input
+        let new_key_opt = input
             .api_key
             .as_ref()
             .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty())
+            .filter(|k| !k.is_empty());
+        if new_key_opt.is_none()
+            && normalize_endpoint(&rec.api_base) != normalize_endpoint(&api_base)
         {
+            return Err(WatchError::Validation(
+                "Base URL changed; provide an API key or inherit from matching endpoint"
+                    .to_string(),
+            ));
+        }
+        let target_changed =
+            rec.model != model || rec.api_base != api_base || new_key_opt.is_some();
+        rec.model = model;
+        rec.api_base = api_base;
+        rec.note = note;
+        if let Some(raw_k) = new_key_opt {
             rec.api_key = encrypt_for_monitor_storage(&raw_k)?;
+        }
+        if target_changed {
+            rec.last_probe = None;
         }
         return Ok(idx);
     }
@@ -854,9 +946,220 @@ pub fn upsert_reserve_record(
         api_base,
         api_key: stored_key,
         note,
+        last_probe: None,
         extra: BTreeMap::new(),
     });
     Ok(state.spare_models.len() - 1)
+}
+
+fn sanitize_monitor_label(raw: &str, fallback: &str) -> String {
+    let trimmed = raw.trim();
+    let chosen = if trimmed.is_empty() {
+        fallback.trim()
+    } else {
+        trimmed
+    };
+    chosen
+        .chars()
+        .filter(|&c| (c as u32) >= 32 && (c as u32) != 127)
+        .take(120)
+        .collect()
+}
+
+fn prepare_stored_monitor_key(
+    raw_or_env: &str,
+    env_map: Option<&HashMap<String, String>>,
+) -> Result<(String, String), WatchError> {
+    let resolved = resolve_secret(raw_or_env, env_map);
+    if resolved.status != SecretStatus::SecretReady {
+        return Err(WatchError::Validation(format!(
+            "Credential is not ready ({:?})",
+            resolved.status
+        )));
+    }
+    let trimmed = raw_or_env.trim();
+    let stored =
+        if crate::secrets::secret_store::is_env_ref(trimmed) || trimmed.starts_with("dpapi:") {
+            trimmed.to_string()
+        } else {
+            encrypt_for_monitor_storage(&resolved.value)?
+        };
+    Ok((stored, resolved.value))
+}
+
+struct CredentialRef<'a> {
+    model: &'a str,
+    api_base: &'a str,
+    key: &'a str,
+}
+
+fn same_credential_tuple(
+    existing: CredentialRef<'_>,
+    target: CredentialRef<'_>,
+    target_resolved: &str,
+    env_map: Option<&HashMap<String, String>>,
+) -> bool {
+    if existing.model.trim() != target.model.trim() {
+        return false;
+    }
+    let same_base = validate_watch_base_url(existing.api_base)
+        .map(|b| b == target.api_base)
+        .unwrap_or_else(|_| {
+            normalize_endpoint(existing.api_base) == normalize_endpoint(target.api_base)
+        });
+    if !same_base {
+        return false;
+    }
+    if existing.key.trim() == target.key.trim() {
+        return true;
+    }
+    let other_resolved = resolve_secret(existing.key, env_map);
+    other_resolved.status == SecretStatus::SecretReady && other_resolved.value == target_resolved
+}
+
+pub fn set_reserve_probe_outcome(
+    state: &mut MonitorState,
+    index: usize,
+    outcome: ProbeOutcome,
+) -> Result<(), WatchError> {
+    let rec = state
+        .spare_models
+        .get_mut(index)
+        .ok_or_else(|| WatchError::Validation("Reserve entry index out of range".to_string()))?;
+    rec.last_probe = Some(outcome);
+    Ok(())
+}
+
+/// Inserts a slot or inline credential directly into `spare_models` in Rust memory, encrypting plaintext via DPAPI.
+pub fn upsert_slot_credential_into_reserve(
+    state: &mut MonitorState,
+    model: &str,
+    api_base: &str,
+    raw_key: &str,
+    note: &str,
+    env_map: Option<&HashMap<String, String>>,
+) -> Result<usize, WatchError> {
+    let clean_model = model.trim().to_string();
+    if clean_model.is_empty() {
+        return Err(WatchError::Validation(
+            "Reserve model cannot be empty".to_string(),
+        ));
+    }
+    let clean_base = validate_watch_base_url(api_base)?;
+    let (stored_key, resolved_value) = prepare_stored_monitor_key(raw_key, env_map)?;
+
+    if state.spare_models.iter().any(|r| {
+        same_credential_tuple(
+            CredentialRef {
+                model: &r.model,
+                api_base: &r.api_base,
+                key: &r.api_key,
+            },
+            CredentialRef {
+                model: &clean_model,
+                api_base: &clean_base,
+                key: &stored_key,
+            },
+            &resolved_value,
+            env_map,
+        )
+    }) {
+        return Err(WatchError::Validation(format!(
+            "Credential already exists in Reserve ('{}')",
+            clean_model
+        )));
+    }
+
+    state.spare_models.push(SpareModelRecord {
+        model: clean_model,
+        api_base: clean_base,
+        api_key: stored_key,
+        note: sanitize_monitor_label(note, ""),
+        last_probe: None,
+        extra: BTreeMap::new(),
+    });
+    Ok(state.spare_models.len() - 1)
+}
+
+/// Inserts a slot or inline credential directly into `watch_keys` (`auto_enabled: false`) in Rust memory.
+pub fn upsert_slot_credential_into_watchlist(
+    state: &mut MonitorState,
+    model: &str,
+    api_base: &str,
+    raw_key: &str,
+    alias: &str,
+    env_map: Option<&HashMap<String, String>>,
+) -> Result<String, WatchError> {
+    let clean_model = model.trim().to_string();
+    if clean_model.is_empty() {
+        return Err(WatchError::Validation(
+            "Watch model cannot be empty".to_string(),
+        ));
+    }
+    let clean_base = validate_watch_base_url(api_base)?;
+    let (stored_key, resolved_value) = prepare_stored_monitor_key(raw_key, env_map)?;
+
+    if let Some(existing) = state.watch_keys.iter().find(|w| {
+        same_credential_tuple(
+            CredentialRef {
+                model: &w.model,
+                api_base: &w.api_base,
+                key: &w.api_key,
+            },
+            CredentialRef {
+                model: &clean_model,
+                api_base: &clean_base,
+                key: &stored_key,
+            },
+            &resolved_value,
+            env_map,
+        )
+    }) {
+        let label = if existing.alias.trim().is_empty() {
+            existing.id.as_str()
+        } else {
+            existing.alias.trim()
+        };
+        return Err(WatchError::Validation(format!(
+            "Credential already exists in watchlist ('{}')",
+            label
+        )));
+    }
+
+    if state.watch_keys.len() >= MAX_WATCHES {
+        return Err(WatchError::Validation(format!(
+            "Maximum {} watch credentials reached",
+            MAX_WATCHES
+        )));
+    }
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let new_id = format!(
+        "watch-{}",
+        &sha256_hex(format!("{}:{}:{}", clean_model, clean_base, nanos).as_bytes())[..16]
+    );
+
+    let clean_alias = sanitize_monitor_label(alias, &clean_model);
+    state.watch_keys.push(WatchRecord {
+        id: new_id.clone(),
+        alias: clean_alias,
+        model: clean_model,
+        api_base: clean_base,
+        api_key: stored_key,
+        auto_enabled: false,
+        auto_disabled_reason: String::new(),
+        rev: 1,
+        fail_streak: 0,
+        auth_fail_streak: 0,
+        next_probe_at: 0.0,
+        cooldown_until: 0.0,
+        last_probe: None,
+        extra: BTreeMap::new(),
+    });
+    Ok(new_id)
 }
 
 /// Clones an existing Reserve model into the bounded Watchlist (`auto_enabled: false`) in Rust memory
@@ -1017,6 +1320,7 @@ pub fn copy_watch_into_reserve(
         api_base,
         api_key: watch.api_key,
         note,
+        last_probe: None,
         extra: BTreeMap::new(),
     });
     Ok(state.spare_models.len() - 1)
@@ -1089,24 +1393,6 @@ pub fn record_watch_probe_outcome(
     None
 }
 
-static WATCH_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
-fn watch_http_client() -> Option<&'static reqwest::Client> {
-    if let Some(c) = WATCH_HTTP_CLIENT.get() {
-        return Some(c);
-    }
-    let built = reqwest::Client::builder()
-        .timeout(Duration::from_millis(WATCH_PROBE_TIMEOUT_MS))
-        .connect_timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .user_agent("OpenViking-Monitor/1.0")
-        .build()
-        .ok()?;
-    let _ = WATCH_HTTP_CLIENT.set(built);
-    WATCH_HTTP_CLIENT.get()
-}
-
 /// Executes a bounded chat-completions probe (`20s` timeout, `max_tokens: 64`, zero redirect, Monitor UA).
 /// Never logs or persists response bodies or bearer secrets.
 pub async fn probe_watch_credential(
@@ -1128,6 +1414,7 @@ pub async fn probe_watch_credential(
             status_code: None,
             ms: None,
             at: now,
+            text: Some("secret_error".to_string()),
         };
     }
 
@@ -1140,79 +1427,12 @@ pub async fn probe_watch_credential(
                 status_code: None,
                 ms: None,
                 at: now,
+                text: Some("invalid_url".to_string()),
             };
         }
     };
 
-    let Some(client) = watch_http_client() else {
-        return ProbeOutcome {
-            ok: false,
-            category: "client_error".to_string(),
-            status_code: None,
-            ms: None,
-            at: now,
-        };
-    };
-
-    let url = format!("{}/chat/completions", clean_base);
-    let body = json!({
-        "model": model,
-        "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": WATCH_MAX_TOKENS,
-        "temperature": 0
-    });
-
-    let start = Instant::now();
-    match client
-        .post(&url)
-        .bearer_auth(&resolved.value)
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            let ms = start.elapsed().as_millis() as u64;
-            let code = resp.status().as_u16();
-            if resp.status().is_success() {
-                ProbeOutcome {
-                    ok: true,
-                    category: "ok".to_string(),
-                    status_code: Some(code),
-                    ms: Some(ms),
-                    at: now,
-                }
-            } else {
-                let cat = match code {
-                    401 | 403 => "auth",
-                    402 | 429 => "quota",
-                    400 | 404 | 422 => "request",
-                    _ if code >= 500 => "upstream",
-                    _ => "http_error",
-                };
-                ProbeOutcome {
-                    ok: false,
-                    category: cat.to_string(),
-                    status_code: Some(code),
-                    ms: Some(ms),
-                    at: now,
-                }
-            }
-        }
-        Err(e) => {
-            let ms = start.elapsed().as_millis() as u64;
-            ProbeOutcome {
-                ok: false,
-                category: if e.is_timeout() {
-                    "timeout".to_string()
-                } else {
-                    "network".to_string()
-                },
-                status_code: None,
-                ms: Some(ms),
-                at: now,
-            }
-        }
-    }
+    probe_chat_model(model, &clean_base, &resolved.value, WATCH_PROBE_TIMEOUT_MS).await
 }
 
 #[cfg(test)]
@@ -1339,6 +1559,7 @@ mod tests {
                 status_code: Some(401),
                 ms: Some(120),
                 at: 1000.0,
+                text: Some("auth · HTTP 401".to_string()),
             },
             60.0,
         );
@@ -1355,6 +1576,7 @@ mod tests {
                 status_code: Some(403),
                 ms: Some(115),
                 at: 1100.0,
+                text: Some("auth · HTTP 403".to_string()),
             },
             60.0,
         )
@@ -1533,5 +1755,128 @@ mod tests {
             format_window_geometry(1200, 840, Some(-320), Some(48)).as_deref(),
             Some("1200x840+-320+48")
         );
+    }
+
+    #[test]
+    fn test_legacy_reserve_last_probe_compatibility_and_slot_credential_imports() {
+        let dir = tempdir().expect("tempdir");
+        let mon_path = dir.path().join("monitor.json");
+        let legacy_json = r#"{
+  "spare_models": [
+    {
+      "model": "gpt-reserve",
+      "api_base": "https://api.example.com/v1",
+      "api_key": "${SPARE_ENV}",
+      "note": "legacy",
+      "last_probe": {"ok": true, "text": "340 ms", "ms": 340, "at": 1700000000.0}
+    },
+    {
+      "model": "gpt-bad-probe",
+      "api_base": "https://api.example.com/v1",
+      "api_key": "${SPARE_ENV}",
+      "last_probe": "corrupted-legacy-string"
+    },
+    {
+      "model": "gpt-http-code",
+      "api_base": "https://api.example.com/v1",
+      "api_key": "${SPARE_ENV}",
+      "last_probe": {"ok": false, "category": "quota", "http_code": 429, "ms": 95, "at": 1700000001.0}
+    }
+  ]
+}"#;
+        std::fs::write(&mon_path, legacy_json).expect("write legacy monitor.json");
+        let (mut st, _sha) = load_monitor_state(&mon_path).expect("load legacy spare last_probe");
+        let sum = summarize_monitor_state(&st, "sha", None);
+        assert_eq!(
+            sum.reserves[0].last_probe.as_ref().and_then(|p| p.ms),
+            Some(340)
+        );
+        assert_eq!(
+            sum.reserves[0]
+                .last_probe
+                .as_ref()
+                .and_then(|p| p.text.as_deref()),
+            Some("340 ms")
+        );
+        assert!(sum.reserves[1].last_probe.is_none());
+        assert_eq!(
+            sum.reserves[2]
+                .last_probe
+                .as_ref()
+                .and_then(|p| p.status_code),
+            Some(429)
+        );
+
+        let r_sha_before = sum.reserves_sha256.clone();
+        set_reserve_probe_outcome(
+            &mut st,
+            1,
+            ProbeOutcome {
+                ok: true,
+                category: "ok".to_string(),
+                status_code: Some(200),
+                ms: Some(150),
+                at: 1700000002.0,
+                text: Some("150 ms".to_string()),
+            },
+        )
+        .expect("set reserve probe outcome");
+        assert_eq!(compute_reserves_sha256(&st.spare_models), r_sha_before);
+
+        // Changing base URL on update without a key must fail closed
+        let mut env = HashMap::new();
+        env.insert("SPARE_ENV".to_string(), "SYNTHETIC_SPARE_VAL".to_string());
+        let cross_ep = upsert_reserve_record(
+            &mut st,
+            &UpsertReserveInput {
+                index: Some(0),
+                model: "gpt-reserve".to_string(),
+                api_base: "https://other.example.com/v1".to_string(),
+                api_key: None,
+                note: "legacy".to_string(),
+            },
+        );
+        assert!(matches!(cross_ep, Err(WatchError::Validation(_))));
+
+        // Slot credential imports protect secrets and reject cross-salt duplicates
+        let slot_res = upsert_slot_credential_into_reserve(
+            &mut st,
+            "slot-model-a",
+            "https://slot.example.com/v1",
+            "SYNTHETIC_SLOT_SECRET_999",
+            "From Slot 0",
+            Some(&env),
+        )
+        .expect("import slot into reserve");
+        assert_eq!(st.spare_models[slot_res].model, "slot-model-a");
+        #[cfg(windows)]
+        assert!(st.spare_models[slot_res].api_key.starts_with("dpapi:"));
+
+        let dup_res = upsert_slot_credential_into_reserve(
+            &mut st,
+            "slot-model-a",
+            "https://slot.example.com/v1",
+            "SYNTHETIC_SLOT_SECRET_999",
+            "dup",
+            Some(&env),
+        )
+        .expect_err("duplicate reserve import must fail");
+        assert!(!dup_res.to_string().contains("SYNTHETIC_SLOT_SECRET_999"));
+
+        let watch_id = upsert_slot_credential_into_watchlist(
+            &mut st,
+            "slot-model-a",
+            "https://slot.example.com/v1",
+            "SYNTHETIC_SLOT_SECRET_999",
+            "Slot Watch",
+            Some(&env),
+        )
+        .expect("import slot into watchlist");
+        let w = st.watch_keys.iter().find(|x| x.id == watch_id).unwrap();
+        assert!(!w.auto_enabled);
+        let summary_json =
+            serde_json::to_string(&summarize_monitor_state(&st, "s", Some(&env))).unwrap();
+        assert!(!summary_json.contains("SYNTHETIC_SLOT_SECRET_999"));
+        assert!(!summary_json.contains("dpapi:"));
     }
 }

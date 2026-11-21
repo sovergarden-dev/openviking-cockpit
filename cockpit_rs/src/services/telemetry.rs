@@ -820,12 +820,15 @@ impl TelemetryClient {
     }
 }
 
+pub const COLD_BOOT_GRACE_SECS: u64 = 75;
+
 /// Stateful per-incident tracker preventing repeat tray notification storms during sustained outages.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IncidentTracker {
     pub server_down_notified: bool,
     pub embedding_missing_notified: bool,
     pub failover_slot_notified: Option<usize>,
+    pub boot_ready_seen: bool,
 }
 
 /// Evaluates `snapshot` against `notify_on_down` / `notify_on_failover` preferences and updates `tracker`,
@@ -836,6 +839,24 @@ pub fn evaluate_telemetry_incidents(
     notify_on_down: bool,
     notify_on_failover: bool,
 ) -> Vec<(String, String)> {
+    evaluate_telemetry_incidents_with_uptime(
+        tracker,
+        snapshot,
+        notify_on_down,
+        notify_on_failover,
+        COLD_BOOT_GRACE_SECS,
+    )
+}
+
+/// Uptime-aware incident evaluator that suppresses cold-boot warnings for the first `75s`
+/// until the server reaches `/ready` once after launch.
+pub fn evaluate_telemetry_incidents_with_uptime(
+    tracker: &mut IncidentTracker,
+    snapshot: &TelemetrySnapshot,
+    notify_on_down: bool,
+    notify_on_failover: bool,
+    uptime_secs: u64,
+) -> Vec<(String, String)> {
     let mut alerts = Vec::new();
 
     let server_healthy = snapshot.health_status == EndpointStatus::Ok
@@ -843,8 +864,13 @@ pub fn evaluate_telemetry_incidents(
         && snapshot.ready_status == EndpointStatus::Ok
         && snapshot.ready.as_ref().is_some_and(|r| r.status == "ready");
 
+    if server_healthy {
+        tracker.boot_ready_seen = true;
+    }
+    let in_cold_boot_grace = !tracker.boot_ready_seen && uptime_secs < COLD_BOOT_GRACE_SECS;
+
     if !server_healthy {
-        if notify_on_down && !tracker.server_down_notified {
+        if notify_on_down && !in_cold_boot_grace && !tracker.server_down_notified {
             tracker.server_down_notified = true;
             alerts.push((
                 "CẢNH BÁO: OpenViking ngắt kết nối".to_string(),
@@ -857,7 +883,7 @@ pub fn evaluate_telemetry_incidents(
 
     match snapshot.embedding_model_ready {
         Some(false) => {
-            if notify_on_down && !tracker.embedding_missing_notified {
+            if notify_on_down && !in_cold_boot_grace && !tracker.embedding_missing_notified {
                 tracker.embedding_missing_notified = true;
                 let model = snapshot
                     .expected_embedding_model
@@ -1245,6 +1271,84 @@ mod tests {
         let f1 = evaluate_telemetry_incidents(&mut tracker, &snap, true, true);
         assert_eq!(f1.len(), 1);
         assert!(evaluate_telemetry_incidents(&mut tracker, &snap, true, true).is_empty());
+    }
+
+    #[test]
+    fn test_cold_boot_grace_window_suppresses_early_alerts_until_75s_or_ready() {
+        let mut down_snap = TelemetrySnapshot {
+            timestamp_ms: 1,
+            health: None,
+            health_status: EndpointStatus::Unreachable,
+            health_latency_ms: 0,
+            ready: None,
+            ready_status: EndpointStatus::Unreachable,
+            ready_latency_ms: 0,
+            vlm: None,
+            vlm_status: EndpointStatus::Unreachable,
+            vlm_latency_ms: 0,
+            vikingdb: None,
+            vikingdb_status: EndpointStatus::Unreachable,
+            vikingdb_latency_ms: 0,
+            memories: None,
+            memories_status: EndpointStatus::Unreachable,
+            memories_latency_ms: 0,
+            queue: None,
+            queue_status: EndpointStatus::Unreachable,
+            queue_latency_ms: 0,
+            ollama_status: EndpointStatus::Unreachable,
+            ollama_models: Vec::new(),
+            ollama_latency_ms: 0,
+            expected_embedding_model: None,
+            embedding_model_ready: None,
+            lifecycle: None,
+        };
+
+        let mut tracker = IncidentTracker::default();
+        assert!(
+            evaluate_telemetry_incidents_with_uptime(&mut tracker, &down_snap, true, true, 10)
+                .is_empty()
+        );
+        assert!(!tracker.server_down_notified);
+
+        let after_grace =
+            evaluate_telemetry_incidents_with_uptime(&mut tracker, &down_snap, true, true, 75);
+        assert_eq!(after_grace.len(), 1);
+        assert!(tracker.server_down_notified);
+
+        // If server comes up early (t=20s) and drops later (t=25s), alert fires immediately without waiting 75s
+        let mut boot_tracker = IncidentTracker::default();
+        down_snap.health = Some(HealthResponse {
+            status: "ok".to_string(),
+            healthy: true,
+            version: Some("0.5.5".to_string()),
+            auth_mode: None,
+        });
+        down_snap.health_status = EndpointStatus::Ok;
+        down_snap.ready = Some(ReadyResponse {
+            status: "ready".to_string(),
+            checks: ReadyChecks {
+                agfs: None,
+                vectordb: None,
+                api_key_manager: None,
+                embedding: None,
+                ollama: None,
+            },
+        });
+        down_snap.ready_status = EndpointStatus::Ok;
+        assert!(evaluate_telemetry_incidents_with_uptime(
+            &mut boot_tracker,
+            &down_snap,
+            true,
+            true,
+            20
+        )
+        .is_empty());
+        assert!(boot_tracker.boot_ready_seen);
+
+        down_snap.health_status = EndpointStatus::Unreachable;
+        let dropped =
+            evaluate_telemetry_incidents_with_uptime(&mut boot_tracker, &down_snap, true, true, 25);
+        assert_eq!(dropped.len(), 1);
     }
 
     #[test]

@@ -2,7 +2,15 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::config::conf_gate::display_clean_path;
+use crate::services::auditor_cache::presentation_sanitize_text;
+
+pub const LOG_TAIL_MAX_READ_BYTES: u64 = 262_144;
+pub const STALE_CRON_MIN_AGE_SECS: u64 = 7 * 86_400;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirFootprint {
@@ -35,6 +43,18 @@ pub struct SessionsStorageStat {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HygieneDryRunSummary {
+    pub quarantine_files: usize,
+    pub quarantine_bytes: u64,
+    pub monitor_scratch_files: usize,
+    pub monitor_scratch_bytes: u64,
+    pub stale_cron_sessions: usize,
+    pub stale_cron_bytes: u64,
+    pub monitor_state_snapshots: usize,
+    pub total_reclaimable_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageFootprint {
     pub data_dir_name: String,
     pub vectordb: DirFootprint,
@@ -43,6 +63,18 @@ pub struct StorageFootprint {
     pub sessions: SessionsStorageStat,
     pub quarantine: DirFootprint,
     pub logs: DirFootprint,
+    #[serde(default)]
+    pub hygiene: HygieneDryRunSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogTailOutcome {
+    pub log_name: String,
+    pub file_path: String,
+    pub exists: bool,
+    pub file_size_bytes: u64,
+    pub truncated: bool,
+    pub lines: Vec<String>,
 }
 
 #[cfg(windows)]
@@ -166,10 +198,176 @@ fn resolve_active_data_dir(ov_home: &Path) -> Option<std::path::PathBuf> {
     candidates.into_iter().next()
 }
 
+fn scan_dir_stats_and_latest_mtime(root: &Path) -> (DirFootprint, u64) {
+    let mut out = DirFootprint::default();
+    let Ok(root_meta) = fs::symlink_metadata(root) else {
+        return (out, 0);
+    };
+    if is_reparse_point(&root_meta) || !root_meta.is_dir() {
+        return (out, 0);
+    }
+    let mtime_secs = |m: &fs::Metadata| -> u64 {
+        m.modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    };
+    let mut latest = mtime_secs(&root_meta);
+
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if is_reparse_point(&meta) {
+                continue;
+            }
+            latest = latest.max(mtime_secs(&meta));
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file() {
+                out.files += 1;
+                out.bytes = out.bytes.saturating_add(meta.len());
+            }
+        }
+    }
+    (out, latest)
+}
+
+fn scan_monitor_scratch(monitor_dir: &Path) -> (usize, u64) {
+    let mut files = 0usize;
+    let mut bytes = 0u64;
+    let Ok(entries) = fs::read_dir(monitor_dir) else {
+        return (0, 0);
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if is_reparse_point(&meta) || !meta.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('_') && (name.ends_with(".py") || name.ends_with(".json")) {
+            files += 1;
+            bytes = bytes.saturating_add(meta.len());
+        }
+    }
+    (files, bytes)
+}
+
+fn count_monitor_state_snapshots(state_root: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(state_root) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| {
+            let Ok(meta) = fs::symlink_metadata(entry.path()) else {
+                return false;
+            };
+            if is_reparse_point(&meta) || !meta.is_dir() {
+                return false;
+            }
+            let name = entry.file_name();
+            let s = name.to_string_lossy();
+            s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+        })
+        .count()
+}
+
+pub fn resolve_allowed_log_path(ov_home: &Path, log_name: &str) -> Result<PathBuf, String> {
+    match log_name.trim() {
+        "server.log" => Ok(ov_home.join("logs").join("server.log")),
+        "ollama.log" => Ok(ov_home.join("logs").join("ollama.log")),
+        "lifecycle.jsonl" => Ok(ov_home.join("logs").join("lifecycle.jsonl")),
+        "monitor_app.log" => Ok(ov_home.join("monitor").join("app.log")),
+        _ => Err(format!("Unsupported log file '{}'", log_name.trim())),
+    }
+}
+
+/// Reads the sanitized trailing lines from one allowlisted log file (`<= 256 KiB` tail, no symlinks).
+pub fn read_allowed_log_tail(
+    ov_home: &Path,
+    log_name: &str,
+    max_lines: usize,
+) -> Result<LogTailOutcome, String> {
+    let path = resolve_allowed_log_path(ov_home, log_name)?;
+    let display_path = display_clean_path(&path);
+    let capped_lines = max_lines.clamp(50, 1000);
+
+    let Ok(meta) = fs::symlink_metadata(&path) else {
+        return Ok(LogTailOutcome {
+            log_name: log_name.trim().to_string(),
+            file_path: display_path,
+            exists: false,
+            file_size_bytes: 0,
+            truncated: false,
+            lines: Vec::new(),
+        });
+    };
+    if is_reparse_point(&meta) || !meta.is_file() {
+        return Err("Refusing non-regular or symlinked log file".to_string());
+    }
+
+    let len = meta.len();
+    let truncated = len > LOG_TAIL_MAX_READ_BYTES;
+    let mut file = fs::File::open(&path).map_err(|e| format!("Failed to open log: {}", e))?;
+    if truncated {
+        file.seek(SeekFrom::Start(len - LOG_TAIL_MAX_READ_BYTES))
+            .map_err(|e| format!("Failed to seek log: {}", e))?;
+    }
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)
+        .map_err(|e| format!("Failed to read log: {}", e))?;
+
+    let lossy = String::from_utf8_lossy(&buf);
+    let mut raw_lines: Vec<&str> = lossy.lines().collect();
+    if truncated && !raw_lines.is_empty() {
+        raw_lines.remove(0);
+    }
+    let start = raw_lines.len().saturating_sub(capped_lines);
+    let lines = raw_lines[start..]
+        .iter()
+        .map(|ln| presentation_sanitize_text(ln, None))
+        .collect();
+
+    Ok(LogTailOutcome {
+        log_name: log_name.trim().to_string(),
+        file_path: display_path,
+        exists: true,
+        file_size_bytes: len,
+        truncated,
+        lines,
+    })
+}
+
 /// Computes a bounded, read-only local disk breakdown without traversing `backups/pre-*` recovery archives.
 pub fn inspect_storage_footprint(ov_home: &Path) -> StorageFootprint {
     let quarantine = scan_dir_recursive(&ov_home.join("backups").join("quarantine"));
     let logs = scan_dir_recursive(&ov_home.join("logs"));
+    let (monitor_scratch_files, monitor_scratch_bytes) =
+        scan_monitor_scratch(&ov_home.join("monitor"));
+    let monitor_state_snapshots =
+        count_monitor_state_snapshots(&ov_home.join("backups").join("monitor-state"));
+
+    let mut base_hygiene = HygieneDryRunSummary {
+        quarantine_files: quarantine.files,
+        quarantine_bytes: quarantine.bytes,
+        monitor_scratch_files,
+        monitor_scratch_bytes,
+        stale_cron_sessions: 0,
+        stale_cron_bytes: 0,
+        monitor_state_snapshots,
+        total_reclaimable_bytes: quarantine.bytes.saturating_add(monitor_scratch_bytes),
+    };
 
     let Some(data_dir) = resolve_active_data_dir(ov_home) else {
         return StorageFootprint {
@@ -180,6 +378,7 @@ pub fn inspect_storage_footprint(ov_home: &Path) -> StorageFootprint {
             sessions: SessionsStorageStat::default(),
             quarantine,
             logs,
+            hygiene: base_hygiene,
         };
     };
 
@@ -223,6 +422,10 @@ pub fn inspect_storage_footprint(ov_home: &Path) -> StorageFootprint {
             .then_with(|| a.peer_id.cmp(&b.peer_id))
     });
 
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let mut sessions = SessionsStorageStat::default();
     let sessions_dir = user_default.join("sessions");
     if let Ok(entries) = fs::read_dir(&sessions_dir) {
@@ -237,20 +440,32 @@ pub fn inspect_storage_footprint(ov_home: &Path) -> StorageFootprint {
             if meta.is_dir() {
                 sessions.total_sessions += 1;
                 let lower = entry.file_name().to_string_lossy().to_ascii_lowercase();
-                if lower.starts_with("cron_") || lower.starts_with("cron-") {
+                let is_cron = lower.starts_with("cron_") || lower.starts_with("cron-");
+                if is_cron {
                     sessions.cron_sessions += 1;
                 } else if lower.starts_with("hermes") {
                     sessions.hermes_sessions += 1;
                 }
-                let sub = scan_dir_recursive(&path);
+                let (sub, latest_mtime) = scan_dir_stats_and_latest_mtime(&path);
                 sessions.files += sub.files;
                 sessions.bytes = sessions.bytes.saturating_add(sub.bytes);
+                if is_cron
+                    && latest_mtime > 0
+                    && now_secs.saturating_sub(latest_mtime) >= STALE_CRON_MIN_AGE_SECS
+                {
+                    base_hygiene.stale_cron_sessions += 1;
+                    base_hygiene.stale_cron_bytes =
+                        base_hygiene.stale_cron_bytes.saturating_add(sub.bytes);
+                }
             } else if meta.is_file() {
                 sessions.files += 1;
                 sessions.bytes = sessions.bytes.saturating_add(meta.len());
             }
         }
     }
+    base_hygiene.total_reclaimable_bytes = base_hygiene
+        .total_reclaimable_bytes
+        .saturating_add(base_hygiene.stale_cron_bytes);
 
     StorageFootprint {
         data_dir_name,
@@ -260,6 +475,7 @@ pub fn inspect_storage_footprint(ov_home: &Path) -> StorageFootprint {
         sessions,
         quarantine,
         logs,
+        hygiene: base_hygiene,
     }
 }
 
@@ -345,5 +561,31 @@ mod tests {
         assert_eq!(snap.sessions.files, 3);
         assert_eq!(snap.quarantine.files, 1);
         assert_eq!(snap.quarantine.bytes, 200);
+        assert_eq!(snap.hygiene.quarantine_files, 1);
+        assert_eq!(snap.hygiene.quarantine_bytes, 200);
+
+        let monitor_dir = ov.join("monitor");
+        fs::create_dir_all(&monitor_dir).unwrap();
+        fs::write(monitor_dir.join("_scratch_test.py"), vec![b'a'; 128]).unwrap();
+        fs::write(monitor_dir.join("keep_me.json"), vec![b'b'; 64]).unwrap();
+
+        let logs_dir = ov.join("logs");
+        fs::create_dir_all(&logs_dir).unwrap();
+        fs::write(
+            logs_dir.join("server.log"),
+            "INFO started\nERROR token=SYNTHETIC_LOG_SECRET_888 failed\nWARN slow\n",
+        )
+        .unwrap();
+
+        let snap2 = inspect_storage_footprint(ov);
+        assert_eq!(snap2.hygiene.monitor_scratch_files, 1);
+        assert_eq!(snap2.hygiene.monitor_scratch_bytes, 128);
+        assert_eq!(snap2.hygiene.total_reclaimable_bytes, 328);
+
+        let tail = read_allowed_log_tail(ov, "server.log", 100).expect("read server log");
+        assert!(tail.exists);
+        assert_eq!(tail.lines.len(), 3);
+        assert!(!tail.lines.join("\n").contains("SYNTHETIC_LOG_SECRET_888"));
+        assert!(read_allowed_log_tail(ov, "../ov.conf", 100).is_err());
     }
 }

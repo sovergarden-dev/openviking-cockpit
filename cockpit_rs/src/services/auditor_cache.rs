@@ -157,13 +157,25 @@ pub struct AuditReportSummaryView {
     pub why: String,
 }
 
-/// Reads and validates a cached Taxonomy V3.1 report from `reports_dir/audit_<scope_id>.json`.
-pub fn load_cached_audit_verdict(
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditBadgeStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub age_s: Option<u64>,
+    #[serde(default)]
+    pub expired: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expired_level: Option<u8>,
+    #[serde(default)]
+    pub ttl_s: u64,
+}
+
+fn load_cached_audit_verdict_any_age(
     reports_dir: &Path,
     api_base: &str,
     model: &str,
     api_key: &str,
-    max_age_s: f64,
 ) -> Option<CachedAuditVerdict> {
     let (scope_id, expected_scope) = compute_audit_scope_id(api_base, model, api_key)?;
     let file_path = reports_dir.join(format!("audit_{}.json", scope_id));
@@ -202,9 +214,6 @@ pub fn load_cached_audit_verdict(
         return None;
     }
     let age_s = (now - epoch_ts).max(0.0);
-    if age_s > max_age_s {
-        return None;
-    }
 
     let verdict = obj.get("verdict")?.as_object()?;
     let mut rows: Vec<ProbeRow> = serde_json::from_value(obj.get("results")?.clone()).ok()?;
@@ -241,6 +250,57 @@ pub fn load_cached_audit_verdict(
         safety_stop,
         why,
     })
+}
+
+/// Reads and validates a cached Taxonomy V3.1 report from `reports_dir/audit_<scope_id>.json`.
+pub fn load_cached_audit_verdict(
+    reports_dir: &Path,
+    api_base: &str,
+    model: &str,
+    api_key: &str,
+    max_age_s: f64,
+) -> Option<CachedAuditVerdict> {
+    load_cached_audit_verdict_any_age(reports_dir, api_base, model, api_key)
+        .filter(|v| v.report_age_s <= max_age_s)
+}
+
+/// Returns UI freshness metadata for cached reports without relaxing TTL enforcement on slot admission.
+pub fn inspect_cached_audit_badge(
+    reports_dir: &Path,
+    api_base: &str,
+    model: &str,
+    api_key: &str,
+    max_age_s: f64,
+) -> AuditBadgeStatus {
+    let ttl_s = max_age_s.max(0.0).round() as u64;
+    let Some(verdict) = load_cached_audit_verdict_any_age(reports_dir, api_base, model, api_key)
+    else {
+        return AuditBadgeStatus {
+            level: None,
+            age_s: None,
+            expired: false,
+            expired_level: None,
+            ttl_s,
+        };
+    };
+    let age_s = verdict.report_age_s.round() as u64;
+    if verdict.report_age_s <= max_age_s {
+        AuditBadgeStatus {
+            level: Some(verdict.verdict_level),
+            age_s: Some(age_s),
+            expired: false,
+            expired_level: None,
+            ttl_s,
+        }
+    } else {
+        AuditBadgeStatus {
+            level: None,
+            age_s: Some(age_s),
+            expired: true,
+            expired_level: Some(verdict.verdict_level),
+            ttl_s,
+        }
+    }
 }
 
 /// Loads and validates a full cached `AuditReportDocument` (compatible with both Python and Rust reports)
@@ -422,11 +482,24 @@ mod tests {
             load_cached_audit_verdict(dir.path(), base, model, "DIFFERENT_KEY", 86_400.0).is_none()
         );
 
+        let fresh_badge = inspect_cached_audit_badge(dir.path(), base, model, key, 86_400.0);
+        assert_eq!(fresh_badge.level, Some(5));
+        assert!(!fresh_badge.expired);
+        assert!(fresh_badge.age_s.is_some());
+
+        let expired_badge = inspect_cached_audit_badge(dir.path(), base, model, key, 10.0);
+        assert_eq!(expired_badge.level, None);
+        assert!(expired_badge.expired);
+        assert_eq!(expired_badge.expired_level, Some(5));
+
         // Forged verdict_level inconsistent with incomplete/failed results must be rejected
         let mut tampered = report.clone();
         tampered["results"] = json!([{"id": "transport_routing", "status": "PASS"}]);
         fs::write(&path, serde_json::to_vec(&tampered).unwrap()).expect("write tampered report");
         assert!(load_cached_audit_verdict(dir.path(), base, model, key, 86_400.0).is_none());
         assert!(load_cached_audit_document(dir.path(), base, model, key, 86_400.0).is_none());
+        let tampered_badge = inspect_cached_audit_badge(dir.path(), base, model, key, 86_400.0);
+        assert_eq!(tampered_badge.level, None);
+        assert!(!tampered_badge.expired);
     }
 }

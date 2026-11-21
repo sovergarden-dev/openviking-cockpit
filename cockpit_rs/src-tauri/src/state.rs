@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 use tauri::ipc::Channel;
 use tokio::sync::watch;
 
@@ -70,6 +70,7 @@ impl CockpitPaths {
 pub struct CockpitState {
     pub paths: CockpitPaths,
     pub server_port: u16,
+    pub started_at: Instant,
     pub telemetry_client: TelemetryClient,
     pub latest_snapshot: RwLock<Option<TelemetrySnapshot>>,
     pub incident_tracker: Mutex<IncidentTracker>,
@@ -77,6 +78,8 @@ pub struct CockpitState {
     pub monitor_lock: tokio::sync::Mutex<()>,
     pub service_lock: tokio::sync::Mutex<()>,
     pub pending_geometry: Mutex<Option<String>>,
+    pub benchmark_cancel: Mutex<Option<watch::Sender<bool>>>,
+    pub reserve_batch_cancel: Mutex<Option<watch::Sender<bool>>>,
     pub subscribers: Mutex<Vec<Channel<TelemetrySnapshot>>>,
     pub shutdown_tx: watch::Sender<bool>,
 }
@@ -115,6 +118,7 @@ impl CockpitState {
         let state = Arc::new(Self {
             paths,
             server_port,
+            started_at: Instant::now(),
             telemetry_client,
             latest_snapshot: RwLock::new(None),
             incident_tracker: Mutex::new(IncidentTracker::default()),
@@ -122,10 +126,25 @@ impl CockpitState {
             monitor_lock: tokio::sync::Mutex::new(()),
             service_lock: tokio::sync::Mutex::new(()),
             pending_geometry: Mutex::new(None),
+            benchmark_cancel: Mutex::new(None),
+            reserve_batch_cancel: Mutex::new(None),
             subscribers: Mutex::new(Vec::new()),
             shutdown_tx,
         });
         (state, shutdown_rx)
+    }
+
+    pub fn signal_background_cancellations(&self) {
+        if let Ok(mut guard) = self.benchmark_cancel.lock() {
+            if let Some(tx) = guard.take() {
+                let _ = tx.send(true);
+            }
+        }
+        if let Ok(mut guard) = self.reserve_batch_cancel.lock() {
+            if let Some(tx) = guard.take() {
+                let _ = tx.send(true);
+            }
+        }
     }
 
     pub fn invalidate_poll_meta_cache(&self) {

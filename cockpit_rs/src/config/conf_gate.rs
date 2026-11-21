@@ -9,11 +9,31 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::safe_write::{sha256_hex, write_restricted_bytes_atomic, SafeWriteError};
-use crate::secrets::secret_store::{get_env_var_name, resolve_secret, SecretStatus};
+use crate::secrets::secret_store::{
+    get_env_var_name, resolve_secret, ResolvedSecret, SecretStatus,
+};
+use crate::services::auditor_cache::{inspect_cached_audit_badge, AuditBadgeStatus};
 use crate::services::telemetry::VlmActiveResult;
 
 pub const AUDIT_TTL_PRIMARY_S: f64 = 86_400.0;
 pub const AUDIT_TTL_FAILOVER_S: f64 = 7.0 * 86_400.0;
+pub const FAILBACK_REQUEST_COUNT_UNLIMITED: u32 = 2_147_483_647;
+
+pub fn stored_failback_request_count(ui_value: u32) -> u32 {
+    if ui_value == 0 {
+        FAILBACK_REQUEST_COUNT_UNLIMITED
+    } else {
+        ui_value
+    }
+}
+
+pub fn ui_failback_request_count(stored: Option<u32>) -> u32 {
+    match stored {
+        None | Some(0) => 0,
+        Some(v) if v >= 2_000_000_000 => 0,
+        Some(v) => v,
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfGateError {
@@ -133,6 +153,14 @@ pub struct SlotSummary {
     pub env_var_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_audit_level: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_audit_age_s: Option<u64>,
+    #[serde(default)]
+    pub cached_audit_expired: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_audit_expired_level: Option<u8>,
+    #[serde(default)]
+    pub cached_audit_ttl_s: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,9 +178,18 @@ pub struct ConfigSummary {
     pub embedding_model: Option<String>,
     pub embedding_api_base: Option<String>,
     pub embedding_dimension: Option<usize>,
+    pub max_retries: Option<u32>,
     pub failback_timeout_seconds: Option<u64>,
+    pub failback_request_count: u32,
     pub slots: Vec<SlotSummary>,
     pub drift: SlotDriftStatus,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum SlotReorderOp {
+    Swap { a: usize, b: usize },
+    PromoteToPrimary { index: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -393,18 +430,14 @@ pub fn summarize_slots_with_audits(
             } else {
                 AUDIT_TTL_FAILOVER_S
             };
-            let cached_audit_level = match (reports_dir, resolved.status) {
+            let badge = match (reports_dir, resolved.status) {
                 (Some(dir), SecretStatus::SecretReady) => {
-                    crate::services::auditor_cache::load_cached_audit_verdict(
-                        dir,
-                        &s.api_base,
-                        &s.model,
-                        &resolved.value,
-                        ttl,
-                    )
-                    .map(|v| v.verdict_level)
+                    inspect_cached_audit_badge(dir, &s.api_base, &s.model, &resolved.value, ttl)
                 }
-                _ => None,
+                _ => AuditBadgeStatus {
+                    ttl_s: ttl as u64,
+                    ..AuditBadgeStatus::default()
+                },
             };
             SlotSummary {
                 slot_index: idx,
@@ -419,7 +452,11 @@ pub fn summarize_slots_with_audits(
                 api_base: s.api_base,
                 secret_status: resolved.status,
                 env_var_name: get_env_var_name(&s.raw_key).or(resolved.env_var_name),
-                cached_audit_level,
+                cached_audit_level: badge.level,
+                cached_audit_age_s: badge.age_s,
+                cached_audit_expired: badge.expired,
+                cached_audit_expired_level: badge.expired_level,
+                cached_audit_ttl_s: badge.ttl_s,
             }
         })
         .collect()
@@ -450,7 +487,18 @@ pub fn resolve_slot_audit_target(
     config: &OpenVikingConfig,
     slot_index: usize,
     env_map: Option<&HashMap<String, String>>,
-) -> Result<(String, String, crate::secrets::secret_store::ResolvedSecret), ConfGateError> {
+) -> Result<(String, String, ResolvedSecret), ConfGateError> {
+    let (model, api_base, _raw, resolved) =
+        resolve_slot_raw_credential(config, slot_index, env_map)?;
+    Ok((model, api_base, resolved))
+}
+
+/// Resolves `(model, api_base, raw_key, ResolvedSecret)` for an existing slot strictly inside Rust backend memory.
+pub fn resolve_slot_raw_credential(
+    config: &OpenVikingConfig,
+    slot_index: usize,
+    env_map: Option<&HashMap<String, String>>,
+) -> Result<(String, String, String, ResolvedSecret), ConfGateError> {
     let slots = extract_effective_slots(config, env_map);
     let slot = slots
         .get(slot_index)
@@ -462,7 +510,12 @@ pub fn resolve_slot_audit_target(
             slot_index, resolved.status
         )));
     }
-    Ok((slot.model.clone(), slot.api_base.clone(), resolved))
+    Ok((
+        slot.model.clone(),
+        slot.api_base.clone(),
+        slot.raw_key.clone(),
+        resolved,
+    ))
 }
 
 pub fn compute_slot_drift(
@@ -562,7 +615,11 @@ pub fn summarize_config_with_audits(
         embedding_model,
         embedding_api_base,
         embedding_dimension,
+        max_retries: config.vlm.as_ref().and_then(|v| v.max_retries),
         failback_timeout_seconds: config.vlm.as_ref().and_then(|v| v.failback_timeout_seconds),
+        failback_request_count: ui_failback_request_count(
+            config.vlm.as_ref().and_then(|v| v.failback_request_count),
+        ),
         slots,
         drift,
     }
@@ -790,20 +847,60 @@ where
     )
 }
 
+fn materialize_credentials(
+    vlm: &mut VlmConfig,
+    existing_effective: &[EffectiveSlot],
+) -> Vec<VlmCredentialSlot> {
+    match vlm.credentials.take() {
+        Some(list) if !list.is_empty() => list,
+        _ => existing_effective
+            .iter()
+            .map(|e| VlmCredentialSlot {
+                id: Some(e.id.clone()),
+                provider: e.provider.clone(),
+                model: Some(e.model.clone()),
+                api_base: Some(e.api_base.clone()),
+                api_key: Some(e.raw_key.clone()),
+                extra: BTreeMap::new(),
+            })
+            .collect(),
+    }
+}
+
+fn sync_primary_vlm_fields(vlm: &mut VlmConfig, creds: &[VlmCredentialSlot]) {
+    if let Some(first) = creds.first() {
+        if let Some(ref model) = first.model {
+            vlm.model = model.clone();
+        }
+        if let Some(ref api_base) = first.api_base {
+            vlm.api_base = api_base.clone();
+        }
+        if let Some(ref api_key) = first.api_key {
+            vlm.api_key = api_key.clone();
+        }
+        if first.provider.is_some() {
+            vlm.provider = first.provider.clone();
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-fn apply_slot_update_internal<F>(
+fn commit_vlm_mutation_internal<F, M>(
     conf_path: &Path,
     backups_dir: &Path,
     expected_sha: &str,
-    input: &SlotUpdateInput,
+    allow_unaudited: bool,
+    manual_save: bool,
     env_map: Option<&HashMap<String, String>>,
     reports_dir: Option<&Path>,
     home_dir: Option<&Path>,
     allow_live_write: bool,
     lookup_audit: F,
+    mutate: M,
 ) -> Result<ApplySlotOutcome, ConfGateError>
 where
     F: FnMut(&str, &str, &str) -> Option<CachedAuditVerdict>,
+    M: FnOnce(&mut OpenVikingConfig, &[EffectiveSlot]) -> Result<(), ConfGateError>,
 {
     verify_live_path_for_home(conf_path, home_dir, allow_live_write)?;
     let (before, _, current_sha) = load_raw_config(conf_path)?;
@@ -818,91 +915,15 @@ where
         });
     }
 
-    let mut after = before.clone();
-    let vlm = after.vlm.as_mut().ok_or_else(|| {
-        ConfGateError::Validation("Configuration has no vlm section to update".to_string())
-    })?;
-
-    let clean_model = input.model.trim().to_string();
-    let clean_base = validate_endpoint_url(&input.api_base)?;
-
-    // Ensure `credentials` array is materialized when editing multi-slot configs or appending a fallback slot.
     let existing_effective = extract_effective_slots(&before, env_map);
-    if input.slot_index > existing_effective.len() {
-        return Err(ConfGateError::Validation(format!(
-            "Slot index {} is out of range (current count: {})",
-            input.slot_index,
-            existing_effective.len()
-        )));
-    }
-
-    let mut creds: Vec<VlmCredentialSlot> = match vlm.credentials.take() {
-        Some(list) if !list.is_empty() => list,
-        _ => existing_effective
-            .iter()
-            .map(|e| VlmCredentialSlot {
-                id: Some(e.id.clone()),
-                provider: e.provider.clone(),
-                model: Some(e.model.clone()),
-                api_base: Some(e.api_base.clone()),
-                api_key: Some(e.raw_key.clone()),
-                extra: BTreeMap::new(),
-            })
-            .collect(),
-    };
-
-    let provided_key = input
-        .api_key
-        .as_ref()
-        .map(|k| k.trim().to_string())
-        .filter(|k| !k.is_empty());
-
-    if input.slot_index == creds.len() {
-        let new_key = provided_key.ok_or_else(|| {
-            ConfGateError::Validation(
-                "New slot requires a non-empty API key or ${ENV_VAR}".to_string(),
-            )
-        })?;
-        let new_id = credential_id(&clean_model, &clean_base, &new_key, env_map);
-        creds.push(VlmCredentialSlot {
-            id: Some(new_id),
-            provider: input.provider.clone().or_else(|| vlm.provider.clone()),
-            model: Some(clean_model.clone()),
-            api_base: Some(clean_base.clone()),
-            api_key: Some(new_key),
-            extra: BTreeMap::new(),
-        });
-    } else {
-        let target = &mut creds[input.slot_index];
-        let effective_key = provided_key
-            .or_else(|| target.api_key.clone())
-            .unwrap_or_else(|| vlm.api_key.clone());
-        let new_id = credential_id(&clean_model, &clean_base, &effective_key, env_map);
-        target.id = Some(new_id);
-        if input.provider.is_some() {
-            target.provider = input.provider.clone();
-        }
-        target.model = Some(clean_model.clone());
-        target.api_base = Some(clean_base.clone());
-        target.api_key = Some(effective_key.clone());
-
-        if input.slot_index == 0 {
-            vlm.model = clean_model;
-            vlm.api_base = clean_base;
-            vlm.api_key = effective_key;
-            if input.provider.is_some() {
-                vlm.provider = input.provider.clone();
-            }
-        }
-    }
-
-    vlm.credentials = Some(creds);
+    let mut after = before.clone();
+    mutate(&mut after, &existing_effective)?;
 
     let warnings = validate_conf_transition(
         &before,
         &after,
-        input.allow_unaudited,
-        input.manual_save,
+        allow_unaudited,
+        manual_save,
         env_map,
         lookup_audit,
     )?;
@@ -923,6 +944,293 @@ where
         conditional_warnings: warnings,
         slots,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_slot_update_internal<F>(
+    conf_path: &Path,
+    backups_dir: &Path,
+    expected_sha: &str,
+    input: &SlotUpdateInput,
+    env_map: Option<&HashMap<String, String>>,
+    reports_dir: Option<&Path>,
+    home_dir: Option<&Path>,
+    allow_live_write: bool,
+    lookup_audit: F,
+) -> Result<ApplySlotOutcome, ConfGateError>
+where
+    F: FnMut(&str, &str, &str) -> Option<CachedAuditVerdict>,
+{
+    let clean_model = input.model.trim().to_string();
+    let clean_base = validate_endpoint_url(&input.api_base)?;
+    commit_vlm_mutation_internal(
+        conf_path,
+        backups_dir,
+        expected_sha,
+        input.allow_unaudited,
+        input.manual_save,
+        env_map,
+        reports_dir,
+        home_dir,
+        allow_live_write,
+        lookup_audit,
+        move |after, existing_effective| {
+            let vlm = after.vlm.as_mut().ok_or_else(|| {
+                ConfGateError::Validation("Configuration has no vlm section to update".to_string())
+            })?;
+            if input.slot_index > existing_effective.len() {
+                return Err(ConfGateError::Validation(format!(
+                    "Slot index {} is out of range (current count: {})",
+                    input.slot_index,
+                    existing_effective.len()
+                )));
+            }
+            let mut creds = materialize_credentials(vlm, existing_effective);
+            let provided_key = input
+                .api_key
+                .as_ref()
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty());
+
+            if input.slot_index == creds.len() {
+                let new_key = provided_key.ok_or_else(|| {
+                    ConfGateError::Validation(
+                        "New slot requires a non-empty API key or ${ENV_VAR}".to_string(),
+                    )
+                })?;
+                let new_id = credential_id(&clean_model, &clean_base, &new_key, env_map);
+                creds.push(VlmCredentialSlot {
+                    id: Some(new_id),
+                    provider: input.provider.clone().or_else(|| vlm.provider.clone()),
+                    model: Some(clean_model),
+                    api_base: Some(clean_base),
+                    api_key: Some(new_key),
+                    extra: BTreeMap::new(),
+                });
+            } else {
+                let target = &mut creds[input.slot_index];
+                let existing_base = target
+                    .api_base
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or(&vlm.api_base);
+                if provided_key.is_none()
+                    && normalize_endpoint(&clean_base) != normalize_endpoint(existing_base)
+                {
+                    return Err(ConfGateError::Validation(
+                        "Base URL changed; provide an API key or inherit from matching endpoint"
+                            .to_string(),
+                    ));
+                }
+                let effective_key = provided_key
+                    .or_else(|| target.api_key.clone())
+                    .unwrap_or_else(|| vlm.api_key.clone());
+                let new_id = credential_id(&clean_model, &clean_base, &effective_key, env_map);
+                target.id = Some(new_id);
+                if input.provider.is_some() {
+                    target.provider = input.provider.clone();
+                }
+                target.model = Some(clean_model);
+                target.api_base = Some(clean_base);
+                target.api_key = Some(effective_key);
+                sync_primary_vlm_fields(vlm, &creds);
+            }
+            vlm.credentials = Some(creds);
+            Ok(())
+        },
+    )
+}
+
+/// Reorders two VLM slots (`Swap`) or promotes a fallback slot to Primary `#0` with full audit-gate verification.
+#[allow(clippy::too_many_arguments)]
+pub fn reorder_slot_with_live_policy<F>(
+    conf_path: &Path,
+    backups_dir: &Path,
+    expected_sha: &str,
+    op: &SlotReorderOp,
+    env_map: Option<&HashMap<String, String>>,
+    reports_dir: Option<&Path>,
+    allow_live_write: bool,
+    lookup_audit: F,
+) -> Result<ApplySlotOutcome, ConfGateError>
+where
+    F: FnMut(&str, &str, &str) -> Option<CachedAuditVerdict>,
+{
+    let home_var = std::env::var_os("USERPROFILE");
+    let home_path = home_var.as_ref().map(Path::new);
+    commit_vlm_mutation_internal(
+        conf_path,
+        backups_dir,
+        expected_sha,
+        false,
+        false,
+        env_map,
+        reports_dir,
+        home_path,
+        allow_live_write,
+        lookup_audit,
+        move |after, existing_effective| {
+            let vlm = after.vlm.as_mut().ok_or_else(|| {
+                ConfGateError::Validation("Configuration has no vlm section".to_string())
+            })?;
+            let mut creds = materialize_credentials(vlm, existing_effective);
+            let len = creds.len();
+            match *op {
+                SlotReorderOp::Swap { a, b } => {
+                    if a >= len || b >= len {
+                        return Err(ConfGateError::Validation(format!(
+                            "Swap indices ({}, {}) out of range (count: {})",
+                            a, b, len
+                        )));
+                    }
+                    if a != b {
+                        creds.swap(a, b);
+                    }
+                }
+                SlotReorderOp::PromoteToPrimary { index } => {
+                    if index >= len {
+                        return Err(ConfGateError::Validation(format!(
+                            "Slot {} out of range (count: {})",
+                            index, len
+                        )));
+                    }
+                    if index > 0 {
+                        let chosen = creds.remove(index);
+                        creds.insert(0, chosen);
+                    }
+                }
+            }
+            sync_primary_vlm_fields(vlm, &creds);
+            vlm.credentials = Some(creds);
+            Ok(())
+        },
+    )
+}
+
+/// Removes a fallback slot (`slot_index >= 1`), refusing removal of Primary slot `#0`.
+#[allow(clippy::too_many_arguments)]
+pub fn delete_fallback_slot_with_live_policy<F>(
+    conf_path: &Path,
+    backups_dir: &Path,
+    expected_sha: &str,
+    slot_index: usize,
+    env_map: Option<&HashMap<String, String>>,
+    reports_dir: Option<&Path>,
+    allow_live_write: bool,
+    lookup_audit: F,
+) -> Result<ApplySlotOutcome, ConfGateError>
+where
+    F: FnMut(&str, &str, &str) -> Option<CachedAuditVerdict>,
+{
+    let home_var = std::env::var_os("USERPROFILE");
+    let home_path = home_var.as_ref().map(Path::new);
+    commit_vlm_mutation_internal(
+        conf_path,
+        backups_dir,
+        expected_sha,
+        false,
+        false,
+        env_map,
+        reports_dir,
+        home_path,
+        allow_live_write,
+        lookup_audit,
+        move |after, existing_effective| {
+            if slot_index == 0 {
+                return Err(ConfGateError::Validation(
+                    "Cannot delete Primary Slot #0; replace or promote another slot instead"
+                        .to_string(),
+                ));
+            }
+            let vlm = after.vlm.as_mut().ok_or_else(|| {
+                ConfGateError::Validation("Configuration has no vlm section".to_string())
+            })?;
+            let mut creds = materialize_credentials(vlm, existing_effective);
+            if slot_index >= creds.len() {
+                return Err(ConfGateError::Validation(format!(
+                    "Slot {} out of range (count: {})",
+                    slot_index,
+                    creds.len()
+                )));
+            }
+            creds.remove(slot_index);
+            sync_primary_vlm_fields(vlm, &creds);
+            vlm.credentials = Some(creds);
+            Ok(())
+        },
+    )
+}
+
+/// Atomically updates `vlm.max_retries`, `failback_timeout_seconds`, and `failback_request_count` in `ov.conf`.
+#[allow(clippy::too_many_arguments)]
+pub fn update_failback_policy_with_live_policy(
+    conf_path: &Path,
+    backups_dir: &Path,
+    expected_sha: &str,
+    max_retries: u32,
+    failback_timeout_seconds: u64,
+    failback_request_count_ui: u32,
+    env_map: Option<&HashMap<String, String>>,
+    reports_dir: Option<&Path>,
+    live_vlm: Option<&VlmActiveResult>,
+    allow_live_write: bool,
+) -> Result<ConfigSummary, ConfGateError> {
+    if max_retries > 10 {
+        return Err(ConfGateError::Validation(
+            "max_retries must be between 0 and 10".to_string(),
+        ));
+    }
+    if !(60..=86_400).contains(&failback_timeout_seconds) {
+        return Err(ConfGateError::Validation(
+            "failback_timeout_seconds must be between 60 and 86400".to_string(),
+        ));
+    }
+    if failback_request_count_ui > 10_000 {
+        return Err(ConfGateError::Validation(
+            "failback_request_count must be between 0 and 10000".to_string(),
+        ));
+    }
+
+    let home_var = std::env::var_os("USERPROFILE");
+    let home_path = home_var.as_ref().map(Path::new);
+    verify_live_path_for_home(conf_path, home_path, allow_live_write)?;
+    let (before, _, current_sha) = load_raw_config(conf_path)?;
+    if current_sha != expected_sha {
+        return Err(ConfGateError::RevisionMismatch {
+            file: conf_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            expected: expected_sha.to_string(),
+            actual: current_sha,
+        });
+    }
+
+    let mut after = before.clone();
+    let vlm = after
+        .vlm
+        .as_mut()
+        .ok_or_else(|| ConfGateError::Validation("Configuration has no vlm section".to_string()))?;
+    vlm.max_retries = Some(max_retries);
+    vlm.failback_timeout_seconds = Some(failback_timeout_seconds);
+    vlm.failback_request_count = Some(stored_failback_request_count(failback_request_count_ui));
+
+    let (new_sha, _) = save_config_with_backup_for_home(
+        conf_path,
+        backups_dir,
+        &after,
+        Some(expected_sha),
+        home_path,
+        allow_live_write,
+    )?;
+    Ok(summarize_config_with_audits(
+        conf_path,
+        &after,
+        &new_sha,
+        live_vlm,
+        env_map,
+        reports_dir,
+    ))
 }
 
 fn verify_live_path_for_home(
@@ -1423,5 +1731,160 @@ mod tests {
             serde_json::from_str(r#"{"server":{"root_api_key":"dpapi:AAA"}}"#)
                 .expect("parse dpapi root_api_key");
         assert_eq!(resolve_server_root_api_key(&dpapi_cfg, None), None);
+    }
+
+    #[test]
+    fn test_slot_reorder_delete_failback_and_cross_endpoint_rejection() {
+        let dir = tempdir().expect("tempdir");
+        let conf_path = dir.path().join("ov.conf");
+        let backups_dir = dir.path().join("backups");
+
+        let mut env = HashMap::new();
+        env.insert("K0".to_string(), "SYNTHETIC_S0".to_string());
+        env.insert("K1".to_string(), "SYNTHETIC_S1".to_string());
+        env.insert("K2".to_string(), "SYNTHETIC_S2".to_string());
+
+        let initial_json = r#"{
+  "vlm": {
+    "provider": "openai",
+    "model": "m0",
+    "api_base": "https://a.example.com/v1",
+    "api_key": "${K0}",
+    "credentials": [
+      {"id": "c0", "provider": "openai", "model": "m0", "api_base": "https://a.example.com/v1", "api_key": "${K0}"},
+      {"id": "c1", "provider": "openai", "model": "m1", "api_base": "https://b.example.com/v1", "api_key": "${K1}"},
+      {"id": "c2", "provider": "openai", "model": "m2", "api_base": "https://c.example.com/v1", "api_key": "${K2}"}
+    ]
+  }
+}"#;
+        fs::write(&conf_path, initial_json).expect("write initial ov.conf");
+        let (_, _, sha1) = load_raw_config(&conf_path).expect("load initial");
+
+        // Changing base URL on existing slot without key must fail closed
+        let cross_ep = apply_slot_update(
+            &conf_path,
+            &backups_dir,
+            &sha1,
+            &SlotUpdateInput {
+                slot_index: 1,
+                provider: None,
+                model: "m1".to_string(),
+                api_base: "https://evil.example.com/v1".to_string(),
+                api_key: None,
+                allow_unaudited: true,
+                manual_save: false,
+            },
+            Some(&env),
+            |_, _, _| None,
+        );
+        assert!(matches!(cross_ep, Err(ConfGateError::Validation(_))));
+
+        // Swap fallback slots 1 <-> 2 works cleanly
+        let swapped = reorder_slot_with_live_policy(
+            &conf_path,
+            &backups_dir,
+            &sha1,
+            &SlotReorderOp::Swap { a: 1, b: 2 },
+            Some(&env),
+            None,
+            false,
+            |_, _, _| None,
+        )
+        .expect("swap fallback slots 1 <-> 2");
+        assert_eq!(swapped.slots[1].model, "m2");
+        assert_eq!(swapped.slots[2].model, "m1");
+
+        // Promote to primary fails without fresh audit
+        let blocked_promote = reorder_slot_with_live_policy(
+            &conf_path,
+            &backups_dir,
+            &swapped.new_sha256,
+            &SlotReorderOp::PromoteToPrimary { index: 1 },
+            Some(&env),
+            None,
+            false,
+            |_, _, _| None,
+        );
+        assert!(matches!(
+            blocked_promote,
+            Err(ConfGateError::AuditRequired { .. })
+        ));
+
+        // Promote succeeds when M5 fresh audit is present and syncs top-level vlm.*
+        let promoted = reorder_slot_with_live_policy(
+            &conf_path,
+            &backups_dir,
+            &swapped.new_sha256,
+            &SlotReorderOp::PromoteToPrimary { index: 1 },
+            Some(&env),
+            None,
+            false,
+            |_, model, _| {
+                if model == "m2" {
+                    Some(CachedAuditVerdict {
+                        report_age_s: 30.0,
+                        verdict_level: 5,
+                        memory_permitted: true,
+                        safety_stop: false,
+                        why: String::new(),
+                    })
+                } else {
+                    None
+                }
+            },
+        )
+        .expect("promote m2 to primary");
+        assert_eq!(promoted.slots[0].model, "m2");
+        let (reloaded_cfg, _, _) = load_raw_config(&conf_path).unwrap();
+        assert_eq!(reloaded_cfg.vlm.as_ref().unwrap().model, "m2");
+
+        // Deleting Primary #0 must be rejected; deleting #2 succeeds
+        assert!(delete_fallback_slot_with_live_policy(
+            &conf_path,
+            &backups_dir,
+            &promoted.new_sha256,
+            0,
+            Some(&env),
+            None,
+            false,
+            |_, _, _| None,
+        )
+        .is_err());
+
+        let deleted = delete_fallback_slot_with_live_policy(
+            &conf_path,
+            &backups_dir,
+            &promoted.new_sha256,
+            2,
+            Some(&env),
+            None,
+            false,
+            |_, _, _| None,
+        )
+        .expect("delete fallback slot 2");
+        assert_eq!(deleted.slots.len(), 2);
+
+        // Failback policy 0 <-> INT32_MAX roundtrip
+        let pol = update_failback_policy_with_live_policy(
+            &conf_path,
+            &backups_dir,
+            &deleted.new_sha256,
+            4,
+            1800,
+            0,
+            Some(&env),
+            None,
+            None,
+            false,
+        )
+        .expect("update failback policy");
+        assert_eq!(pol.max_retries, Some(4));
+        assert_eq!(pol.failback_timeout_seconds, Some(1800));
+        assert_eq!(pol.failback_request_count, 0);
+        let (cfg_after_pol, _, _) = load_raw_config(&conf_path).unwrap();
+        assert_eq!(
+            cfg_after_pol.vlm.as_ref().unwrap().failback_request_count,
+            Some(FAILBACK_REQUEST_COUNT_UNLIMITED)
+        );
     }
 }

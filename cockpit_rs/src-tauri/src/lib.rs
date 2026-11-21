@@ -204,6 +204,7 @@ fn persist_geometry_on_shutdown(st: &CockpitState) {
 fn quit_application(app: &AppHandle) {
     if let Some(st) = app.try_state::<std::sync::Arc<CockpitState>>() {
         let _ = st.shutdown_tx.send(true);
+        st.signal_background_cancellations();
         persist_geometry_on_shutdown(&st);
     }
     let _ = app.remove_tray_by_id("main-tray");
@@ -361,6 +362,11 @@ pub fn run() {
             commands::switch_active_slot,
             commands::read_config,
             commands::apply_slot,
+            commands::reorder_slot,
+            commands::delete_fallback_slot,
+            commands::update_failback_policy,
+            commands::copy_slot_to_reserve,
+            commands::copy_slot_to_watch,
             commands::read_monitor_state,
             commands::upsert_watch_entry,
             commands::set_watch_auto_state,
@@ -371,9 +377,17 @@ pub fn run() {
             commands::copy_reserve_to_watch,
             commands::copy_watch_to_reserve,
             commands::probe_watch_entry,
+            commands::probe_reserve_entry,
+            commands::probe_reserves_batch,
+            commands::cancel_reserve_batch_probe,
+            commands::list_provider_models,
+            commands::probe_credential,
+            commands::run_provider_benchmark,
+            commands::cancel_provider_benchmark,
             commands::run_security_audit,
             commands::control_openviking_service,
             commands::open_logs_folder,
+            commands::read_log_tail,
             commands::get_memory_overview,
             commands::search_memories,
             commands::read_viking_content,
