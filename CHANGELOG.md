@@ -2,6 +2,21 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
+## [1.9.2] - 2026-11-21
+
+### Changed
+- Shared `execute_service_action_and_wait` readiness logic between Tauri command `control_openviking_service` and the System Tray `restart_server` menu action, emitting `service://restarted` after `/ready` synchronization so config drift and slot state update immediately upon tray restart.
+- Removed the unused non-interactive `<span>` branch in `createAuditBadgeElement` (`cockpit_rs/ui/src/utils/format.js`) since all callers attach interactive audit handlers.
+- Added dynamic column headers (`Loại` / `Tên mục` vs `Điểm` / `Tóm tắt`) and `↑ Thư mục cha` parent navigation in the read-only Memory Directory Explorer (`cockpit_rs/ui/src/panels/memory.js`, `cockpit_rs/ui/index.html`).
+
+### Fixed
+- Replaced forward-slash filesystem paths with Windows backslashes across `ops/start-openviking-hidden.cmd` so `cmd.exe` built-ins (`del /f /q` stale-lock cleanup and `move /y` 4MB log rotation) execute instead of failing silently under `>nul 2>&1`.
+- Reaped the hung child process via `child.wait(timeout=10)` before retrying `data_lock_path` deletion (`_unlink_with_retry`), and removed unused `urllib.error` import in `ops/ov_lifecycle.py`.
+- Stripped the `viking://` scheme prefix when deriving `VikingDirEntry::name` in `TelemetryClient::list_dir` (`telemetry.rs`) and `ov_mcp_bridge.py` (`list_dir`), skipping empty bare `"viking://"` root entries instead of returning `"viking:"`.
+- Prevented unbounded recursive `AuditRequired` prompt loops across `drawer.js`, `reserve.js`, and `slots.js`, aligned `safeFallback` (`audit.js`) with `conf_gate.rs` `memory_permitted` rules for Level >= 4 slots, and captured `slotIndex` at submit time in `drawer.js`.
+- Reset loaded `/v1/models` checklist state in `openProviderTester` (`provider_tester.js`) when opening with a different source key so models from a previous provider cannot leak into a new benchmark run.
+- Cleared stale `#drift-banner` warnings when live `state.liveVlm.credential_ids` already matches `state.slots`, detected swapped-slot changes in `overview.js`, disabled `#btn-drift-apply-restart` while `state.serviceBusy`, disabled `#btn-watch-probe-all` when the Watch table is empty, and awaited `refreshAll()` before reporting `F5`/`Ctrl+R` refresh outcomes in `main.js`.
+
 ## [1.9.1] - 2026-11-21
 
 ### Fixed
