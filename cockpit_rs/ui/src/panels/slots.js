@@ -19,7 +19,7 @@ function setDriftBanner(message) {
   el.textContent = message || "";
 }
 
-export async function hotSwitchSlot(slotIndex, btn) {
+async function hotSwitchSlot(slotIndex, btn) {
   if (btn) btn.disabled = true;
   try {
     const res = await invokeCmd("switch_active_slot", { slotIndex });
@@ -33,22 +33,22 @@ export async function hotSwitchSlot(slotIndex, btn) {
   }
 }
 
-async function probeSingleSlot(slotIndex, btn) {
+async function probeSingleSlot(slot, btn) {
   if (btn) btn.disabled = true;
   try {
     const outcome = await invokeCmd("probe_credential", {
-      target: { source: "slot", slot_index: slotIndex },
+      target: { source: "slot", slot_index: slot.slot_index },
       modelOverride: null,
     });
-    state.slotProbes.set(slotIndex, outcome);
+    state.slotProbes.set(slot.id, outcome);
     renderSlotsPanel();
     if (outcome.ok) {
-      showToast(`Slot #${slotIndex}: OK (${outcome.ms ?? "?"} ms)`, "ok");
+      showToast(`Slot #${slot.slot_index}: OK (${outcome.ms ?? "?"} ms)`, "ok");
     } else {
-      showToast(`Slot #${slotIndex}: ${outcome.text || outcome.category}`, "warn");
+      showToast(`Slot #${slot.slot_index}: ${outcome.text || outcome.category}`, "warn");
     }
   } catch (err) {
-    showToast(`Lỗi thử Slot #${slotIndex}: ${err}`, "danger");
+    showToast(`Lỗi thử Slot #${slot.slot_index}: ${err}`, "danger");
   } finally {
     if (btn && btn.isConnected) btn.disabled = false;
   }
@@ -195,7 +195,7 @@ export function renderSlotsPanel() {
     const probeTd = document.createElement("td");
     const probeWrap = document.createElement("div");
     probeWrap.className = "c-cell-inline";
-    const lastProbe = state.slotProbes.get(slot.slot_index) || null;
+    const lastProbe = state.slotProbes.get(slot.id) || null;
     probeWrap.appendChild(createProbeStatusBadge(lastProbe));
     if (lastProbe?.ms != null) {
       const msSpan = document.createElement("span");
@@ -232,7 +232,7 @@ export function renderSlotsPanel() {
     probeBtn.type = "button";
     probeBtn.className = "c-btn c-btn--sm";
     probeBtn.textContent = "Thử";
-    probeBtn.addEventListener("click", () => probeSingleSlot(slot.slot_index, probeBtn));
+    probeBtn.addEventListener("click", () => probeSingleSlot(slot, probeBtn));
 
     const switchBtn = document.createElement("button");
     switchBtn.type = "button";
@@ -358,9 +358,9 @@ export function setupSlotsPanel() {
               target: { source: "slot", slot_index: s.slot_index },
               modelOverride: null,
             });
-            state.slotProbes.set(s.slot_index, outcome);
+            state.slotProbes.set(s.id, outcome);
           } catch (err) {
-            state.slotProbes.set(s.slot_index, {
+            state.slotProbes.set(s.id, {
               ok: false,
               category: "error",
               text: String(err),

@@ -4,11 +4,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::net::IpAddr;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
+use crate::config::conf_gate::is_loopback_host;
 use crate::services::auditor_cache::presentation_sanitize_text;
 use crate::services::watchlist::ProbeOutcome;
 
@@ -64,9 +64,6 @@ pub enum BenchmarkProgressEvent {
         cancelled: bool,
         results: Vec<BenchmarkModelSummary>,
     },
-    Failed {
-        message: String,
-    },
 }
 
 static PROBE_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -107,11 +104,7 @@ pub fn validate_provider_probe_url(raw: &str) -> Result<String, String> {
     let host = parsed
         .host_str()
         .ok_or_else(|| "Missing hostname in Provider Base URL".to_string())?;
-    let is_local = host.eq_ignore_ascii_case("localhost")
-        || host
-            .trim_matches(['[', ']'])
-            .parse::<IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback());
+    let is_local = is_loopback_host(host);
     if scheme == "http" && !is_local {
         return Err("Remote Provider endpoints must use HTTPS".to_string());
     }

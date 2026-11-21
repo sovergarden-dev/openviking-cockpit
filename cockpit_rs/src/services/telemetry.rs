@@ -831,23 +831,6 @@ pub struct IncidentTracker {
     pub boot_ready_seen: bool,
 }
 
-/// Evaluates `snapshot` against `notify_on_down` / `notify_on_failover` preferences and updates `tracker`,
-/// returning newly triggered `(title, body)` OS tray notifications (at most once per distinct incident).
-pub fn evaluate_telemetry_incidents(
-    tracker: &mut IncidentTracker,
-    snapshot: &TelemetrySnapshot,
-    notify_on_down: bool,
-    notify_on_failover: bool,
-) -> Vec<(String, String)> {
-    evaluate_telemetry_incidents_with_uptime(
-        tracker,
-        snapshot,
-        notify_on_down,
-        notify_on_failover,
-        COLD_BOOT_GRACE_SECS,
-    )
-}
-
 /// Uptime-aware incident evaluator that suppresses cold-boot warnings for the first `75s`
 /// until the server reaches `/ready` once after launch.
 pub fn evaluate_telemetry_incidents_with_uptime(
@@ -1239,14 +1222,34 @@ mod tests {
         };
 
         // 1. Missing embedding fires once, then suppresses duplicates until restored
-        let a1 = evaluate_telemetry_incidents(&mut tracker, &snap, true, true);
+        let a1 = evaluate_telemetry_incidents_with_uptime(
+            &mut tracker,
+            &snap,
+            true,
+            true,
+            COLD_BOOT_GRACE_SECS,
+        );
         assert_eq!(a1.len(), 1);
         assert!(a1[0].1.contains("qwen3-embedding:0.6b"));
-        assert!(evaluate_telemetry_incidents(&mut tracker, &snap, true, true).is_empty());
+        assert!(evaluate_telemetry_incidents_with_uptime(
+            &mut tracker,
+            &snap,
+            true,
+            true,
+            COLD_BOOT_GRACE_SECS,
+        )
+        .is_empty());
 
         // Restore embedding -> resets latch
         snap.embedding_model_ready = Some(true);
-        assert!(evaluate_telemetry_incidents(&mut tracker, &snap, true, true).is_empty());
+        assert!(evaluate_telemetry_incidents_with_uptime(
+            &mut tracker,
+            &snap,
+            true,
+            true,
+            COLD_BOOT_GRACE_SECS,
+        )
+        .is_empty());
         assert!(!tracker.embedding_missing_notified);
 
         // 2. Manual switch (manual_hold=true) must NOT trigger failover alarm
@@ -1258,7 +1261,14 @@ mod tests {
             .as_mut()
             .unwrap()
             .manual_hold = Some(true);
-        assert!(evaluate_telemetry_incidents(&mut tracker, &snap, true, true).is_empty());
+        assert!(evaluate_telemetry_incidents_with_uptime(
+            &mut tracker,
+            &snap,
+            true,
+            true,
+            COLD_BOOT_GRACE_SECS,
+        )
+        .is_empty());
 
         // 3. Automatic failover (index=1, manual_hold=false) fires once
         snap.vlm
@@ -1268,9 +1278,22 @@ mod tests {
             .as_mut()
             .unwrap()
             .manual_hold = Some(false);
-        let f1 = evaluate_telemetry_incidents(&mut tracker, &snap, true, true);
+        let f1 = evaluate_telemetry_incidents_with_uptime(
+            &mut tracker,
+            &snap,
+            true,
+            true,
+            COLD_BOOT_GRACE_SECS,
+        );
         assert_eq!(f1.len(), 1);
-        assert!(evaluate_telemetry_incidents(&mut tracker, &snap, true, true).is_empty());
+        assert!(evaluate_telemetry_incidents_with_uptime(
+            &mut tracker,
+            &snap,
+            true,
+            true,
+            COLD_BOOT_GRACE_SECS,
+        )
+        .is_empty());
     }
 
     #[test]

@@ -23,6 +23,11 @@ function renderConfig(cfg) {
   state.confSha = cfg.sha256;
   state.slots = cfg.slots || [];
 
+  const validIds = new Set(state.slots.map((s) => s.id));
+  for (const k of Array.from(state.slotProbes.keys())) {
+    if (!validIds.has(k)) state.slotProbes.delete(k);
+  }
+
   const targetSlotSel = document.getElementById("reserve-target-slot");
   if (targetSlotSel) {
     const prevVal = targetSlotSel.value || "1";
@@ -63,7 +68,6 @@ function renderConfig(cfg) {
 function renderMonitorState(summary) {
   if (!summary) return;
   state.lastMonitorSummary = summary;
-  state.monitorSha = summary.sha256;
   state.reservesSha = summary.reserves_sha256 || "";
 
   const startupEl = document.getElementById("pref-run-startup");
@@ -251,7 +255,6 @@ async function setupStreaming() {
 function bootstrap() {
   state.onRefreshRequested = refreshAll;
   state.onRenderSlots = renderSlotsPanel;
-  state.onRenderReserve = () => renderReserveTable(renderMonitorState);
   state.onOpenAudit = launchSecurityAudit;
   state.onOpenProviderTester = openProviderTester;
   state.onOpenSettingsPopover = setSettingsPopoverOpen;

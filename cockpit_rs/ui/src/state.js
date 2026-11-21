@@ -2,12 +2,10 @@ export const MAX_WATCHES = 4;
 
 export const state = {
   confSha: "",
-  monitorSha: "",
   reservesSha: "",
   config: null,
   slots: [],
   liveVlm: null,
-  lastTelemetry: null,
   lastMonitorSummary: null,
   watchCount: 0,
   slotProbes: new Map(),
@@ -32,10 +30,8 @@ export const state = {
   previewRequestSeq: 0,
   onRefreshRequested: null,
   onRenderSlots: null,
-  onRenderReserve: null,
   onOpenAudit: null,
   onOpenProviderTester: null,
-  onOpenEditorDrawer: null,
   onOpenSettingsPopover: null,
 };
 

@@ -274,6 +274,14 @@ pub fn normalize_endpoint(base: &str) -> String {
     trimmed.trim_end_matches('/').to_string()
 }
 
+pub fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 pub fn validate_endpoint_url(base: &str) -> Result<String, ConfGateError> {
     let trimmed = base.trim();
     let parsed = reqwest::Url::parse(trimmed).map_err(|_| {
@@ -285,14 +293,23 @@ pub fn validate_endpoint_url(base: &str) -> Result<String, ConfGateError> {
             "Endpoint URL scheme must be http or https".to_string(),
         ));
     }
-    if parsed.host_str().is_none()
-        || !parsed.username().is_empty()
+    let Some(host) = parsed.host_str() else {
+        return Err(ConfGateError::Validation(
+            "Endpoint URL must not embed credentials, query parameters, or fragments".to_string(),
+        ));
+    };
+    if !parsed.username().is_empty()
         || parsed.password().is_some()
         || parsed.query().is_some()
         || parsed.fragment().is_some()
     {
         return Err(ConfGateError::Validation(
             "Endpoint URL must not embed credentials, query parameters, or fragments".to_string(),
+        ));
+    }
+    if scheme == "http" && !is_loopback_host(host) {
+        return Err(ConfGateError::Validation(
+            "Remote endpoint URLs must use https".to_string(),
         ));
     }
     Ok(trimmed.trim_end_matches('/').to_string())
@@ -406,13 +423,6 @@ fn extract_effective_slots(
         api_base: vlm.api_base.clone(),
         raw_key: vlm.api_key.clone(),
     }]
-}
-
-pub fn summarize_slots(
-    config: &OpenVikingConfig,
-    env_map: Option<&HashMap<String, String>>,
-) -> Vec<SlotSummary> {
-    summarize_slots_with_audits(config, env_map, None)
 }
 
 pub fn summarize_slots_with_audits(
@@ -1246,12 +1256,6 @@ fn verify_live_path_for_home(
         ));
     }
     Ok(())
-}
-
-pub fn verify_not_live_path(dest_path: &Path) -> Result<(), ConfGateError> {
-    let home_var = std::env::var_os("USERPROFILE");
-    let home_path = home_var.as_ref().map(Path::new);
-    verify_live_path_for_home(dest_path, home_path, false)
 }
 
 pub fn load_raw_config(path: &Path) -> Result<(OpenVikingConfig, String, String), ConfGateError> {

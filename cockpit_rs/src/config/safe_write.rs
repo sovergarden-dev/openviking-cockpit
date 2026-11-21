@@ -653,18 +653,6 @@ pub fn write_restricted_bytes_atomic(
     Ok(actual_sha)
 }
 
-/// Serializes and atomically writes JSON data.
-pub fn safe_atomic_write_json<T: serde::Serialize>(
-    dest_path: &Path,
-    data: &T,
-    restrict_acl: bool,
-) -> Result<String, SafeWriteError> {
-    let payload = serde_json::to_string_pretty(data)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        + "\n";
-    safe_atomic_write_text(dest_path, &payload, restrict_acl, None)
-}
-
 // ============================================================================
 // Unit Tests
 // ============================================================================

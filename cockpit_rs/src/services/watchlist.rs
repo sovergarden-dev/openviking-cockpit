@@ -6,11 +6,10 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs;
-use std::net::IpAddr;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::conf_gate::{normalize_endpoint, AUDIT_TTL_FAILOVER_S};
+use crate::config::conf_gate::{is_loopback_host, normalize_endpoint, AUDIT_TTL_FAILOVER_S};
 use crate::config::safe_write::{
     apply_restricted_file_acl, safe_atomic_write_text_with_live_policy, sha256_hex,
     write_restricted_bytes_atomic, SafeWriteError,
@@ -23,7 +22,6 @@ pub const MAX_WATCHES: usize = 4;
 pub const LEGACY_MAX_WATCHES: usize = 7;
 pub const MAX_MONITOR_STATE_BACKUPS: usize = 30;
 pub const WATCH_PROBE_TIMEOUT_MS: u64 = 20_000;
-pub const WATCH_MAX_TOKENS: u32 = 64;
 pub const BACKOFF_CAP_SECS: f64 = 3_600.0;
 pub const MIN_WINDOW_WIDTH: u32 = 880;
 pub const MIN_WINDOW_HEIGHT: u32 = 560;
@@ -462,11 +460,7 @@ pub fn validate_watch_base_url(raw: &str) -> Result<String, WatchError> {
     let host = parsed
         .host_str()
         .ok_or_else(|| WatchError::Validation("Missing hostname in Watch Base URL".to_string()))?;
-    let is_local = host.eq_ignore_ascii_case("localhost")
-        || host
-            .trim_matches(['[', ']'])
-            .parse::<IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback());
+    let is_local = is_loopback_host(host);
     if scheme == "http" && !is_local {
         return Err(WatchError::Validation(
             "Remote Watch endpoints must use HTTPS".to_string(),
@@ -509,10 +503,6 @@ pub fn validate_watch_records_with_cap(
         }
     }
     Ok(())
-}
-
-pub fn validate_watch_records(items: &[WatchRecord]) -> Result<(), WatchError> {
-    validate_watch_records_with_cap(items, MAX_WATCHES)
 }
 
 /// Loads `monitor.json` fail-closed: damaged existing files error instead of silently resetting to empty defaults.
@@ -1187,18 +1177,20 @@ pub fn copy_reserve_into_watchlist(
 
     let target_model = reserve.model.trim();
     if let Some(existing) = state.watch_keys.iter().find(|w| {
-        let same_model = w.model.trim() == target_model;
-        let same_base = validate_watch_base_url(&w.api_base)
-            .map(|b| b == api_base)
-            .unwrap_or_else(|_| w.api_base.trim().trim_end_matches('/') == api_base);
-        if !same_model || !same_base {
-            return false;
-        }
-        if w.api_key.trim() == reserve.api_key.trim() {
-            return true;
-        }
-        let w_resolved = resolve_secret(&w.api_key, env_map);
-        w_resolved.status == SecretStatus::SecretReady && w_resolved.value == resolved.value
+        same_credential_tuple(
+            CredentialRef {
+                model: &w.model,
+                api_base: &w.api_base,
+                key: &w.api_key,
+            },
+            CredentialRef {
+                model: target_model,
+                api_base: &api_base,
+                key: &reserve.api_key,
+            },
+            &resolved.value,
+            env_map,
+        )
     }) {
         let label = if existing.alias.trim().is_empty() {
             existing.id.as_str()
@@ -1229,11 +1221,7 @@ pub fn copy_reserve_into_watchlist(
                 n
             }
         });
-    let alias: String = raw_alias
-        .chars()
-        .filter(|&c| (c as u32) >= 32 && (c as u32) != 127)
-        .take(120)
-        .collect();
+    let alias = sanitize_monitor_label(raw_alias, &reserve.model);
 
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1288,18 +1276,20 @@ pub fn copy_watch_into_reserve(
 
     let target_model = watch.model.trim();
     if state.spare_models.iter().any(|r| {
-        let same_model = r.model.trim() == target_model;
-        let same_base = validate_watch_base_url(&r.api_base)
-            .map(|b| b == api_base)
-            .unwrap_or_else(|_| r.api_base.trim().trim_end_matches('/') == api_base);
-        if !same_model || !same_base {
-            return false;
-        }
-        if r.api_key.trim() == watch.api_key.trim() {
-            return true;
-        }
-        let r_resolved = resolve_secret(&r.api_key, env_map);
-        r_resolved.status == SecretStatus::SecretReady && r_resolved.value == resolved.value
+        same_credential_tuple(
+            CredentialRef {
+                model: &r.model,
+                api_base: &r.api_base,
+                key: &r.api_key,
+            },
+            CredentialRef {
+                model: target_model,
+                api_base: &api_base,
+                key: &watch.api_key,
+            },
+            &resolved.value,
+            env_map,
+        )
     }) {
         return Err(WatchError::Validation(format!(
             "Watch credential already exists in Reserve ('{}')",
@@ -1307,13 +1297,7 @@ pub fn copy_watch_into_reserve(
         )));
     }
 
-    let note: String = watch
-        .alias
-        .trim()
-        .chars()
-        .filter(|&c| (c as u32) >= 32 && (c as u32) != 127)
-        .take(120)
-        .collect();
+    let note = sanitize_monitor_label(&watch.alias, "");
 
     state.spare_models.push(SpareModelRecord {
         model: watch.model,

@@ -1,4 +1,4 @@
-export const AUDIT_LEVEL_TITLES = {
+const AUDIT_LEVEL_TITLES = {
   1: "Mức 1: Nguy hiểm — Cấm dùng (Tier 0 vi phạm)",
   2: "Mức 2: Chưa xác minh (Thiếu bằng chứng Tier 0)",
   3: "Mức 3: Dùng tạm (Chỉ dùng chat/tra cứu, cấm VLM)",
@@ -52,7 +52,7 @@ export function formatAgeShort(ageSeconds) {
   return `${Math.round(secs / 86400)}d`;
 }
 
-export function formatTimestampTime(epochSeconds) {
+function formatTimestampTime(epochSeconds) {
   const n = Number(epochSeconds || 0);
   if (!Number.isFinite(n) || n <= 0) return "";
   try {

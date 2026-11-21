@@ -13,7 +13,7 @@ const MEMORY_CATEGORY_ROLES = {
   tools: "Thông tin công cụ tích hợp",
 };
 
-export function renderMemoryOverview(payload) {
+function renderMemoryOverview(payload) {
   if (!payload) return;
   const ret = payload.retrieval?.result?.status;
   document.getElementById("mem-ov-retrieval").textContent = ret

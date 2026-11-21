@@ -11,7 +11,8 @@ use cockpit_rs::config::conf_gate::{
     load_raw_config, normalize_endpoint, reorder_slot_with_live_policy,
     resolve_server_root_api_key, resolve_slot_audit_target, resolve_slot_raw_credential,
     summarize_config_with_audits, update_failback_policy_with_live_policy, ApplySlotOutcome,
-    ConfigSummary, SlotReorderOp, SlotUpdateInput, AUDIT_TTL_FAILOVER_S, AUDIT_TTL_PRIMARY_S,
+    CachedAuditVerdict, ConfigSummary, SlotReorderOp, SlotUpdateInput, AUDIT_TTL_FAILOVER_S,
+    AUDIT_TTL_PRIMARY_S,
 };
 use cockpit_rs::secrets::secret_store::{is_env_ref, resolve_secret, SecretStatus};
 use cockpit_rs::services::auditor::{run_provider_audit, AuditReportDocument};
@@ -38,8 +39,8 @@ use cockpit_rs::services::watchlist::{
     set_reserve_probe_outcome, set_watch_row_auto, summarize_monitor_state_with_audits,
     upsert_reserve_record, upsert_slot_credential_into_reserve,
     upsert_slot_credential_into_watchlist, upsert_watch_record, verify_reserves_sha,
-    AutoDisabledAlert, MonitorState, MonitorStateSummary, ProbeOutcome, UpsertReserveInput,
-    UpsertWatchInput,
+    AutoDisabledAlert, MonitorState, MonitorStateSummary, ProbeOutcome, SpareModelRecord,
+    UpsertReserveInput, UpsertWatchInput,
 };
 
 use crate::state::{CockpitPaths, CockpitState};
@@ -590,6 +591,40 @@ fn resolve_inherited_key_for_endpoint(
     Ok(Some(key_for_save))
 }
 
+fn lookup_failover_cached_audit(
+    reports_dir: &std::path::Path,
+    api_base: &str,
+    model: &str,
+    resolved_key: &str,
+) -> Option<CachedAuditVerdict> {
+    load_cached_audit_verdict(
+        reports_dir,
+        api_base,
+        model,
+        resolved_key,
+        AUDIT_TTL_FAILOVER_S,
+    )
+}
+
+fn find_reserve_fallback_index(
+    reserves: &[SpareModelRecord],
+    model: &str,
+    api_base: &str,
+    raw_key: &str,
+) -> Option<usize> {
+    let ep = normalize_endpoint(api_base);
+    reserves
+        .iter()
+        .position(|r| {
+            r.model == model && normalize_endpoint(&r.api_base) == ep && r.api_key == raw_key
+        })
+        .or_else(|| {
+            reserves
+                .iter()
+                .position(|r| r.model == model && normalize_endpoint(&r.api_base) == ep)
+        })
+}
+
 #[tauri::command]
 pub async fn apply_slot(
     state: State<'_, Arc<CockpitState>>,
@@ -617,12 +652,11 @@ pub async fn apply_slot(
             Some(&paths.security_reports_dir),
             true,
             |api_base, model, resolved_key| {
-                load_cached_audit_verdict(
+                lookup_failover_cached_audit(
                     &paths.security_reports_dir,
                     api_base,
                     model,
                     resolved_key,
-                    AUDIT_TTL_FAILOVER_S,
                 )
             },
         )
@@ -651,12 +685,11 @@ pub async fn reorder_slot(
             Some(&paths.security_reports_dir),
             true,
             |api_base, model, resolved_key| {
-                load_cached_audit_verdict(
+                lookup_failover_cached_audit(
                     &paths.security_reports_dir,
                     api_base,
                     model,
                     resolved_key,
-                    AUDIT_TTL_FAILOVER_S,
                 )
             },
         )
@@ -685,12 +718,11 @@ pub async fn delete_fallback_slot(
             Some(&paths.security_reports_dir),
             true,
             |api_base, model, resolved_key| {
-                load_cached_audit_verdict(
+                lookup_failover_cached_audit(
                     &paths.security_reports_dir,
                     api_base,
                     model,
                     resolved_key,
-                    AUDIT_TTL_FAILOVER_S,
                 )
             },
         )
@@ -1128,12 +1160,11 @@ pub async fn promote_reserve_to_slot(
             Some(&paths.security_reports_dir),
             true,
             |api_base, model, resolved_key| {
-                load_cached_audit_verdict(
+                lookup_failover_cached_audit(
                     &paths.security_reports_dir,
                     api_base,
                     model,
                     resolved_key,
-                    AUDIT_TTL_FAILOVER_S,
                 )
             },
         )
@@ -1393,10 +1424,7 @@ pub async fn probe_reserve_entry(
                 {
                     Some(index)
                 } else {
-                    st.spare_models.iter().position(|r| {
-                        r.model == model
-                            && normalize_endpoint(&r.api_base) == normalize_endpoint(&api_base)
-                    })
+                    find_reserve_fallback_index(&st.spare_models, &model, &api_base, &raw_key)
                 };
                 if let Some(real_idx) = target_idx {
                     set_reserve_probe_outcome(&mut st, real_idx, outcome)
@@ -1528,7 +1556,7 @@ pub async fn probe_reserves_batch(
                     model: model.clone(),
                     outcome: outcome.clone(),
                 });
-                out.push((idx, model, api_base, outcome));
+                out.push((idx, model, api_base, raw_key, outcome));
             }
             out
         }));
@@ -1568,14 +1596,11 @@ pub async fn probe_reserves_batch(
             let sha_still_matches =
                 verify_reserves_sha(&st.spare_models, &expected_reserves_sha).is_ok();
             let mut changed = false;
-            for (orig_idx, model, api_base, outcome) in results {
+            for (orig_idx, model, api_base, raw_key, outcome) in results {
                 let target_idx = if sha_still_matches && orig_idx < st.spare_models.len() {
                     Some(orig_idx)
                 } else {
-                    st.spare_models.iter().position(|r| {
-                        r.model == model
-                            && normalize_endpoint(&r.api_base) == normalize_endpoint(&api_base)
-                    })
+                    find_reserve_fallback_index(&st.spare_models, &model, &api_base, &raw_key)
                 };
                 if let Some(real_idx) = target_idx {
                     if set_reserve_probe_outcome(&mut st, real_idx, outcome).is_ok() {

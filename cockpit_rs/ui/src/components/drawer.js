@@ -87,15 +87,26 @@ function refreshInheritDropdown() {
     select.value = "";
   }
 
+  const isEditingExisting =
+    currentCtx?.kind === "slot" ? Boolean(currentCtx.isExistingSlot) : currentCtx?.mode === "edit";
   const baseChangedOnEdit =
-    currentCtx?.mode === "edit" && originalBaseNormalized && baseNorm !== originalBaseNormalized;
+    isEditingExisting && originalBaseNormalized && baseNorm !== originalBaseNormalized;
   if (baseChangedOnEdit) {
     keyLabel.textContent = "API Key / ${ENV_VAR} (bắt buộc nhập hoặc chọn kế thừa vì Endpoint đã đổi)";
-  } else if (currentCtx?.mode === "edit") {
+  } else if (isEditingExisting) {
     keyLabel.textContent = "API Key / ${ENV_VAR} (để trống = giữ nguyên)";
   } else {
     keyLabel.textContent = "API Key / ${ENV_VAR}";
   }
+}
+
+function syncSlotIndexBaseline() {
+  if (currentCtx?.kind !== "slot") return;
+  const targetIdx = Number(document.getElementById("drawer-slot-index")?.value ?? 0);
+  const existingSlot = (state.slots || []).find((s) => s.slot_index === targetIdx);
+  currentCtx.isExistingSlot = Boolean(existingSlot);
+  originalBaseNormalized = normalizeEndpoint(existingSlot?.api_base || "");
+  refreshInheritDropdown();
 }
 
 function resolveInheritSourceSelection() {
@@ -149,8 +160,10 @@ function buildActiveCredentialTarget() {
   }
   const inherited = resolveInheritSourceSelection();
   if (inherited) return inherited;
+  const isEditingExisting =
+    currentCtx?.kind === "slot" ? Boolean(currentCtx.isExistingSlot) : currentCtx?.mode === "edit";
   const baseNorm = normalizeEndpoint(document.getElementById("drawer-base").value);
-  if (currentCtx?.mode === "edit" && baseNorm === originalBaseNormalized) {
+  if (isEditingExisting && baseNorm && baseNorm === originalBaseNormalized) {
     if (currentCtx.kind === "slot") return { source: "slot", slot_index: Number(document.getElementById("drawer-slot-index").value) };
     if (currentCtx.kind === "reserve") return { source: "reserve", index: currentCtx.editIndex };
     if (currentCtx.kind === "watch") return { source: "watch", watch_id: currentCtx.editWatchId };
@@ -177,6 +190,7 @@ export function setupEditorDrawer() {
   });
 
   baseInput?.addEventListener("input", refreshInheritDropdown);
+  document.getElementById("drawer-slot-index")?.addEventListener("input", syncSlotIndexBaseline);
   searchInput?.addEventListener("input", renderModelPickerList);
 
   fetchBtn?.addEventListener("click", async () => {
@@ -347,16 +361,18 @@ export function openEditorDrawer({
   document.getElementById("drawer-note-field").hidden = !isReserve;
   document.getElementById("drawer-alias-field").hidden = !isWatch;
 
+  let slotExists = false;
   if (isSlot) {
     titleEl.textContent = mode === "edit" ? `Sửa Slot #${item.slot_index}` : "Thêm Slot định tuyến mới";
     const idxInput = document.getElementById("drawer-slot-index");
     const targetIdx = mode === "edit" ? item.slot_index : state.slots.length;
     idxInput.value = String(targetIdx);
     const existingSlot = (state.slots || []).find((s) => s.slot_index === Number(targetIdx));
+    slotExists = Boolean(existingSlot);
     document.getElementById("drawer-base").value = item?.api_base || "";
     document.getElementById("drawer-model").value = item?.model || "";
     document.getElementById("drawer-allow-unaudited").checked = false;
-    originalBaseNormalized = normalizeEndpoint(existingSlot?.api_base || item?.api_base || "");
+    originalBaseNormalized = normalizeEndpoint(existingSlot?.api_base || "");
   } else if (isReserve) {
     titleEl.textContent = mode === "edit" ? `Sửa Dự trữ #${item.index + 1}` : "Thêm model vào Dự trữ";
     document.getElementById("drawer-base").value = item?.api_base || "";
@@ -374,6 +390,7 @@ export function openEditorDrawer({
   currentCtx = {
     kind,
     mode,
+    isExistingSlot: isSlot ? slotExists : mode === "edit",
     editIndex: isReserve && mode === "edit" ? item.index : null,
     editWatchId: isWatch && mode === "edit" ? item.id : null,
     expectedReservesSha: state.reservesSha,

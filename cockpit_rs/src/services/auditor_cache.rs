@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::conf_gate::{display_clean_path, CachedAuditVerdict};
+use crate::config::conf_gate::{display_clean_path, is_loopback_host, CachedAuditVerdict};
 use crate::config::safe_write::sha256_hex;
 use crate::services::auditor::{
     evaluate_v31_decision, probe_tier, AuditReportDocument, ProbeRow, SecurityLatch,
@@ -92,7 +92,7 @@ pub fn safe_audit_endpoint(url: &str) -> Option<String> {
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return None;
     }
-    let is_loopback = matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1");
+    let is_loopback = is_loopback_host(host);
     if scheme != "https" && !(scheme == "http" && is_loopback) {
         return None;
     }
@@ -143,18 +143,6 @@ pub fn compute_audit_scope_id(
     let compact_ascii = ascii_escape_json_str(&compact_utf8);
     let scope_id = sha256_hex(compact_ascii.as_bytes());
     Some((scope_id, scope))
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuditReportSummaryView {
-    pub scope_id: String,
-    pub endpoint: String,
-    pub model: String,
-    pub report_age_s: f64,
-    pub verdict_level: u8,
-    pub memory_permitted: bool,
-    pub safety_stop: bool,
-    pub why: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

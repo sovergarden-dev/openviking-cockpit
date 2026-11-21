@@ -71,7 +71,7 @@ function syncBatchSelectionUi(visibleList) {
 
 function detectFailingSlotIndex() {
   for (const s of state.slots || []) {
-    const p = state.slotProbes.get(s.slot_index);
+    const p = state.slotProbes.get(s.id);
     if (p && !p.ok) return s.slot_index;
   }
   const activeIdx = state.liveVlm?.index;
@@ -79,6 +79,20 @@ function detectFailingSlotIndex() {
     return 0;
   }
   return state.slots.length > 1 ? 1 : 0;
+}
+
+function getFilteredReserves(reserves) {
+  const { query, endpoint, status } = state.reserveFilter;
+  const q = normalizeSearchText(query.trim());
+  return reserves.filter((res) => {
+    if (endpoint && res.api_base !== endpoint) return false;
+    if (!matchesStatusFilter(res, status)) return false;
+    if (!q) return true;
+    const haystack = normalizeSearchText(
+      `${res.model} ${res.api_base} ${res.note || ""} ${res.secret_status}`
+    );
+    return haystack.includes(q);
+  });
 }
 
 async function promoteReserveToSlot(reserveIndex, targetSlotOverride, btn, onDoneRefresh) {
@@ -195,17 +209,9 @@ export function renderReserveTable(onMonitorUpdated) {
   const clearBtn = document.getElementById("reserve-filter-clear");
   if (clearBtn) clearBtn.hidden = !isFiltered;
 
-  const filtered = reserves
-    .filter((res) => {
-      if (endpoint && res.api_base !== endpoint) return false;
-      if (!matchesStatusFilter(res, status)) return false;
-      if (!q) return true;
-      const haystack = normalizeSearchText(
-        `${res.model} ${res.api_base} ${res.note || ""} ${res.secret_status}`
-      );
-      return haystack.includes(q);
-    })
-    .sort((a, b) => compareReserves(a, b, sortBy, sortDir));
+  const filtered = getFilteredReserves(reserves).sort((a, b) =>
+    compareReserves(a, b, sortBy, sortDir)
+  );
 
   const badge = document.getElementById("reserve-count-badge");
   if (badge) {
@@ -379,7 +385,12 @@ export function renderReserveTable(onMonitorUpdated) {
                   expectedReservesSha: sha,
                   index: res.index,
                 });
-                state.selectedReserveIndices.delete(res.index);
+                const nextSelected = new Set();
+                for (const idx of state.selectedReserveIndices) {
+                  if (idx < res.index) nextSelected.add(idx);
+                  else if (idx > res.index) nextSelected.add(idx - 1);
+                }
+                state.selectedReserveIndices = nextSelected;
                 onMonitorUpdated?.(updated);
                 showToast(`Đã xóa '${res.model}'.`, "ok");
               } catch (err) {
@@ -457,20 +468,7 @@ export function setupReservePanel(onMonitorUpdated) {
     const summary = state.lastMonitorSummary;
     if (!summary) return;
     const checked = ev.target.checked;
-    const reserves = summary.reserves || [];
-    const { query, endpoint, status } = state.reserveFilter;
-    const q = normalizeSearchText(query.trim());
-    for (const res of reserves) {
-      if (endpoint && res.api_base !== endpoint) continue;
-      if (!matchesStatusFilter(res, status)) continue;
-      if (
-        q &&
-        !normalizeSearchText(
-          `${res.model} ${res.api_base} ${res.note || ""} ${res.secret_status}`
-        ).includes(q)
-      ) {
-        continue;
-      }
+    for (const res of getFilteredReserves(summary.reserves || [])) {
       if (checked) state.selectedReserveIndices.add(res.index);
       else state.selectedReserveIndices.delete(res.index);
     }

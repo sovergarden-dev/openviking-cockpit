@@ -115,6 +115,14 @@ function syncPickedCountUi() {
   if (benchBtn) benchBtn.disabled = disabled;
 }
 
+function syncBenchmarkWatchButtons() {
+  const full = state.watchCount >= MAX_WATCHES;
+  document.querySelectorAll('#pt-results-tbody button[data-watch-add="1"]').forEach((btn) => {
+    btn.disabled = full;
+    btn.title = full ? `Bảng Theo dõi đã đủ ${MAX_WATCHES} key` : "";
+  });
+}
+
 function renderModelChecklist() {
   const box = document.getElementById("pt-model-list");
   const filterEl = document.getElementById("pt-model-filter");
@@ -212,6 +220,7 @@ function renderBenchmarkRow(tbody, row, desc) {
   const addWatchBtn = document.createElement("button");
   addWatchBtn.type = "button";
   addWatchBtn.className = "c-btn c-btn--sm";
+  addWatchBtn.dataset.watchAdd = "1";
   addWatchBtn.textContent = "+ Theo dõi";
   addWatchBtn.disabled = state.watchCount >= MAX_WATCHES;
   if (addWatchBtn.disabled) {
@@ -232,6 +241,7 @@ function renderBenchmarkRow(tbody, row, desc) {
         });
         showToast(`Đã thêm '${row.model}' vào bảng Theo dõi.`, "ok");
         await state.onRefreshRequested?.();
+        syncBenchmarkWatchButtons();
       } catch (err) {
         showToast(`Không thêm được Theo dõi: ${err}`, "danger");
       }
@@ -435,5 +445,6 @@ export function openProviderTester(preferredSourceKey = "") {
 
   syncInlineVisibility();
   syncPickedCountUi();
+  syncBenchmarkWatchButtons();
   backdrop.hidden = false;
 }

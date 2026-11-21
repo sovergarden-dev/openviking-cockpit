@@ -29,7 +29,6 @@ function setBanner(id, message) {
 export function renderTelemetry(snap) {
   if (!snap) return;
   const prevVlm = state.liveVlm;
-  state.lastTelemetry = snap;
   state.liveVlm = snap.vlm?.result || null;
 
   const badge = document.getElementById("overall-badge");
