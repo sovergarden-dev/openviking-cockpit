@@ -230,6 +230,53 @@ function computeParentVikingUri(uri) {
   return `viking://${parts.slice(0, -1).join("/")}`;
 }
 
+function renderMemoryBreadcrumb(uri) {
+  const nav = document.getElementById("memory-breadcrumb");
+  if (!nav) return;
+  nav.replaceChildren();
+  const raw = String(uri || "").trim();
+  if (!raw.startsWith("viking://")) {
+    nav.hidden = true;
+    return;
+  }
+  const parts = raw.slice("viking://".length).split("/").filter(Boolean);
+  if (parts.length === 0) {
+    nav.hidden = true;
+    return;
+  }
+  nav.hidden = false;
+
+  const rootLabel = document.createElement("span");
+  rootLabel.className = "c-mono c-card-meta";
+  rootLabel.textContent = "viking://";
+  nav.appendChild(rootLabel);
+
+  for (let i = 0; i < parts.length; i += 1) {
+    if (i > 0) {
+      const sep = document.createElement("span");
+      sep.className = "c-breadcrumb-sep";
+      sep.textContent = "/";
+      nav.appendChild(sep);
+    }
+    const segUri = `viking://${parts.slice(0, i + 1).join("/")}`;
+    const isLast = i === parts.length - 1;
+    if (!isLast && i >= 1) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "c-btn c-btn--sm c-btn--ghost c-mono";
+      btn.textContent = parts[i];
+      btn.title = `Mở '${segUri}'`;
+      btn.addEventListener("click", () => browseMemoryDirectory(segUri));
+      nav.appendChild(btn);
+    } else {
+      const span = document.createElement("span");
+      span.className = isLast ? "c-mono" : "c-mono c-card-meta";
+      span.textContent = parts[i];
+      nav.appendChild(span);
+    }
+  }
+}
+
 async function browseMemoryDirectory(uri) {
   const reqSeq = ++state.searchRequestSeq;
   const searchBody = document.getElementById("memory-search-tbody");
@@ -241,6 +288,7 @@ async function browseMemoryDirectory(uri) {
     const entries = await invokeCmd("list_viking_dir", { uri, limit: 80 });
     if (reqSeq !== state.searchRequestSeq) return;
     setMemoryTableHeaders("browse");
+    renderMemoryBreadcrumb(uri);
     searchBody.replaceChildren();
     if (statusEl) statusEl.textContent = `Đang duyệt '${uri}': ${entries.length} mục (chỉ đọc).`;
     const parentUri = computeParentVikingUri(uri);
@@ -302,12 +350,14 @@ export async function refreshMemoryOverview() {
   if (statusEl) statusEl.textContent = "Đang đọc phân bổ bộ nhớ & dung lượng…";
   try {
     const payload = await invokeCmd("get_memory_overview");
-    if (reqSeq !== state.memoryOverviewSeq) return;
+    if (reqSeq !== state.memoryOverviewSeq) return true;
     renderMemoryOverview(payload);
     if (statusEl) statusEl.textContent = "";
+    return true;
   } catch (err) {
-    if (reqSeq !== state.memoryOverviewSeq) return;
+    if (reqSeq !== state.memoryOverviewSeq) return true;
     if (statusEl) statusEl.textContent = `Lỗi đọc tổng quan bộ nhớ: ${err}`;
+    return false;
   } finally {
     if (reqSeq === state.memoryOverviewSeq && btn && btn.isConnected) btn.disabled = false;
   }
@@ -395,6 +445,7 @@ export function setupMemoryPanel() {
       if (reqSeq !== state.searchRequestSeq) return;
       statusEl.textContent = `Tìm thấy ${out.hits.length} kết quả (tổng khớp: ${out.total}) trong ${out.latency_ms} ms.`;
       setMemoryTableHeaders("search");
+      renderMemoryBreadcrumb("");
       searchBody.replaceChildren();
       if (out.hits.length === 0) {
         searchBody.appendChild(

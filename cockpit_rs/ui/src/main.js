@@ -12,7 +12,12 @@ import {
   setupProviderTester,
 } from "./modals/provider_tester.js";
 import { refreshMemoryOverview, setupMemoryPanel } from "./panels/memory.js";
-import { renderTelemetry, renderWatchTable, setupOverviewPanel } from "./panels/overview.js";
+import {
+  renderTelemetry,
+  renderWatchTable,
+  setServiceButtonsBusy,
+  setupOverviewPanel,
+} from "./panels/overview.js";
 import { renderReserveTable, setupReservePanel, syncReserveEndpointOptions } from "./panels/reserve.js";
 import { renderSlotsPanel, setupSlotsPanel } from "./panels/slots.js";
 import { enqueueMonitorMutation, state } from "./state.js";
@@ -83,15 +88,15 @@ function renderMonitorState(summary) {
 }
 
 function activateTab(target) {
-  state.activeTab = target;
+  const safeTarget = target === "slots" ? "overview" : target;
+  state.activeTab = safeTarget;
   closeFloatingMenu();
   const tabs = document.querySelectorAll(".c-tab[data-tab]");
-  tabs.forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === target)));
-  document.getElementById("panel-overview").hidden = target !== "overview";
-  document.getElementById("panel-slots").hidden = target !== "slots";
-  document.getElementById("panel-reserve").hidden = target !== "reserve";
-  document.getElementById("panel-memory").hidden = target !== "memory";
-  if (target === "memory") {
+  tabs.forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === safeTarget)));
+  document.getElementById("panel-overview").hidden = safeTarget !== "overview";
+  document.getElementById("panel-reserve").hidden = safeTarget !== "reserve";
+  document.getElementById("panel-memory").hidden = safeTarget !== "memory";
+  if (safeTarget === "memory") {
     refreshMemoryOverview();
   }
 }
@@ -220,7 +225,7 @@ function setupGlobalKeyboard() {
     }
 
     if (ev.altKey && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey) {
-      const tabMap = { 1: "overview", 2: "slots", 3: "reserve", 4: "memory" };
+      const tabMap = { 1: "overview", 2: "reserve", 3: "memory" };
       const targetTab = tabMap[ev.key];
       if (targetTab) {
         ev.preventDefault();
@@ -251,14 +256,19 @@ async function refreshAll() {
   if (state.activeTab === "memory") {
     tasks.push(refreshMemoryOverview());
   }
-  const [snap, cfg, mon] = await Promise.allSettled(tasks);
+  const results = await Promise.allSettled(tasks);
+  const [snap, cfg, mon, memRes] = results;
   if (snap.status === "fulfilled") renderTelemetry(snap.value);
   if (cfg.status === "fulfilled") renderConfig(cfg.value);
   if (mon.status === "fulfilled") renderMonitorState(mon.value);
+  const memOk =
+    state.activeTab !== "memory" ||
+    (memRes?.status === "fulfilled" && memRes?.value !== false);
   return (
     snap.status === "fulfilled" &&
     cfg.status === "fulfilled" &&
-    mon.status === "fulfilled"
+    mon.status === "fulfilled" &&
+    memOk
   );
 }
 
@@ -271,6 +281,7 @@ async function setupStreaming() {
   await listenEvent("telemetry://snapshot", (ev) => renderTelemetry(ev.payload));
   await listenEvent("monitor://updated", (ev) => renderMonitorState(ev.payload));
   await listenEvent("tray://open-log", (ev) => openLogViewer(ev.payload || "server.log"));
+  await listenEvent("service://busy", (ev) => setServiceButtonsBusy(Boolean(ev.payload)));
   await listenEvent("service://restarted", () => refreshAll());
   await listenEvent("watchlist://auto-disabled", (ev) => {
     const p = ev.payload;

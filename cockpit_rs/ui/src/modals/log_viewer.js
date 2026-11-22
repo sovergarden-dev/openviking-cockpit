@@ -1,7 +1,9 @@
 import { invokeCmd } from "../api.js";
+import { showToast } from "../components/toast.js";
 import { formatMib, normalizeSearchText } from "../utils/format.js";
 
 let currentOutcome = null;
+let lastFilteredLines = [];
 
 export function closeLogViewer() {
   const backdrop = document.getElementById("log-modal-backdrop");
@@ -34,9 +36,21 @@ function renderLines() {
   }
 
   const q = normalizeSearchText(filterInput?.value?.trim() || "");
-  const filtered = q
-    ? (currentOutcome.lines || []).filter((ln) => normalizeSearchText(ln).includes(q))
-    : currentOutcome.lines || [];
+  const errorsOnly = Boolean(document.getElementById("log-errors-only")?.checked);
+  const filtered = (currentOutcome.lines || []).filter((ln) => {
+    if (errorsOnly) {
+      const upper = ln.toUpperCase();
+      const isAlert =
+        upper.includes("ERROR") ||
+        upper.includes("CRITICAL") ||
+        upper.includes("FATAL") ||
+        upper.includes("TRACEBACK") ||
+        upper.includes("WARN");
+      if (!isAlert) return false;
+    }
+    return !q || normalizeSearchText(ln).includes(q);
+  });
+  lastFilteredLines = filtered;
 
   const truncNote = currentOutcome.truncated ? " · đang xem phần cuối (≤256 KiB)" : "";
   metaEl.textContent = `${filtered.length} / ${currentOutcome.lines.length} dòng · ${formatMib(currentOutcome.file_size_bytes)}${truncNote}`;
@@ -92,9 +106,22 @@ export function setupLogViewer() {
   backdrop?.addEventListener("click", (ev) => {
     if (ev.target === backdrop) closeLogViewer();
   });
+  document.getElementById("log-modal-copy")?.addEventListener("click", async () => {
+    if (!lastFilteredLines.length) {
+      showToast("Không có dòng nhật ký nào đang hiển thị để chép.", "warn");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(lastFilteredLines.join("\n"));
+      showToast(`Đã chép ${lastFilteredLines.length} dòng nhật ký vào bộ nhớ tạm.`, "ok");
+    } catch (err) {
+      showToast(`Không chép được nhật ký: ${err}`, "danger");
+    }
+  });
   document.getElementById("log-modal-refresh")?.addEventListener("click", fetchLogTail);
   document.getElementById("log-file-select")?.addEventListener("change", fetchLogTail);
   document.getElementById("log-filter-input")?.addEventListener("input", renderLines);
+  document.getElementById("log-errors-only")?.addEventListener("change", renderLines);
 }
 
 export async function openLogViewer(defaultLog = "server.log") {
@@ -106,6 +133,9 @@ export async function openLogViewer(defaultLog = "server.log") {
     select.value = defaultLog;
   }
   document.getElementById("log-filter-input").value = "";
+  const errOnly = document.getElementById("log-errors-only");
+  if (errOnly) errOnly.checked = false;
+  lastFilteredLines = [];
   backdrop.hidden = false;
   await fetchLogTail();
 }

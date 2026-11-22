@@ -133,12 +133,10 @@ export function createAuditBadgeElement(row, onAuditClick) {
     el.className = `c-badge c-badge--interactive ${variantClass}`;
     el.title = `${titleText} · Bấm để mở/chạy Kiểm định V3.1`;
     el.textContent = text;
-    if (typeof onAuditClick === "function") {
-      el.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        onAuditClick();
-      });
-    }
+    el.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      onAuditClick();
+    });
     return el;
   };
 
@@ -166,26 +164,37 @@ export function createAuditBadgeElement(row, onAuditClick) {
   return wrap;
 }
 
-export function createProbeStatusBadge(probe) {
-  const badge = document.createElement("span");
+export function createProbeStatusBadge(probe, onProbeClick = null) {
+  const interactive = typeof onProbeClick === "function";
+  const badge = document.createElement(interactive ? "button" : "span");
+  if (interactive) {
+    badge.type = "button";
+    badge.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      onProbeClick();
+    });
+  }
+  const suffixClass = interactive ? " c-badge--interactive" : "";
+  const appendHint = (txt) => (interactive ? `${txt} · Bấm để thử ngay` : txt);
   if (!probe) {
-    badge.className = "c-badge c-badge--muted";
+    badge.className = `c-badge c-badge--muted${suffixClass}`;
     badge.textContent = "Chưa thử";
+    if (interactive) badge.title = "Bấm để thử kết nối ngay";
     return badge;
   }
   const timeStr = formatTimestampTime(probe.at);
   if (probe.ok) {
-    badge.className = "c-badge c-badge--ok";
+    badge.className = `c-badge c-badge--ok${suffixClass}`;
     badge.textContent = "OK";
-    badge.title = timeStr ? `Thành công lúc ${timeStr}` : "Thành công";
+    badge.title = appendHint(timeStr ? `Thành công lúc ${timeStr}` : "Thành công");
     return badge;
   }
-  badge.className = "c-badge c-badge--danger";
+  badge.className = `c-badge c-badge--danger${suffixClass}`;
   const detail =
     probe.text ||
     (probe.status_code ? `${probe.category || "lỗi"} · HTTP ${probe.status_code}` : probe.category || "Lỗi");
   badge.textContent = detail;
-  badge.title = timeStr ? `${detail} lúc ${timeStr}` : detail;
+  badge.title = appendHint(timeStr ? `${detail} lúc ${timeStr}` : detail);
   return badge;
 }
 

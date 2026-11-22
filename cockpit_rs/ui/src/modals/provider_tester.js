@@ -5,14 +5,25 @@ import { enqueueMonitorMutation, MAX_WATCHES, state } from "../state.js";
 import { createCell, filterModelIds, normalizeEndpoint } from "../utils/format.js";
 
 let sourceOptions = [];
-let activeSourceKey = "";
+let activeSourceSignature = "";
+let loadedSourceBase = "";
 let loadedIds = [];
 let selectedModels = new Set();
 let lastBenchmarkDesc = null;
 let lastBenchmarkRows = [];
 
+function computeSourceSignature(key) {
+  const found = sourceOptions.find((o) => o.key === key);
+  const rawBase =
+    !found || found.key === "inline"
+      ? document.getElementById("pt-inline-base")?.value || ""
+      : found.apiBase || "";
+  return `${key || ""}|${normalizeEndpoint(rawBase)}`;
+}
+
 function resetLoadedModelPicker() {
   loadedIds = [];
+  loadedSourceBase = "";
   selectedModels.clear();
   const filterEl = document.getElementById("pt-model-filter");
   if (filterEl) filterEl.value = "";
@@ -474,13 +485,18 @@ export function setupProviderTester() {
   });
 
   document.getElementById("pt-source-select")?.addEventListener("change", (ev) => {
-    activeSourceKey = ev.currentTarget.value || "";
+    activeSourceSignature = computeSourceSignature(ev.currentTarget.value || "");
     syncInlineVisibility();
     resetLoadedModelPicker();
     syncPickedCountUi();
   });
-  document.getElementById("pt-inline-base")?.addEventListener("input", () => {
-    if (loadedIds.length > 0) renderModelChecklist();
+  document.getElementById("pt-inline-base")?.addEventListener("input", (ev) => {
+    const curBase = normalizeEndpoint(ev.currentTarget.value);
+    if (loadedIds.length > 0 && curBase !== loadedSourceBase) {
+      activeSourceSignature = `inline|${curBase}`;
+      resetLoadedModelPicker();
+      syncPickedCountUi();
+    }
   });
   document.getElementById("pt-model-filter")?.addEventListener("input", renderModelChecklist);
 
@@ -499,6 +515,8 @@ export function setupProviderTester() {
         return;
       }
       loadedIds = res.ids || [];
+      loadedSourceBase = normalizeEndpoint(desc.apiBase);
+      activeSourceSignature = `${desc.key}|${loadedSourceBase}`;
       selectedModels.clear();
       document.getElementById("pt-model-filter").value = "";
       pickerSection.hidden = false;
@@ -596,9 +614,10 @@ export function openProviderTester(preferredSourceKey = "") {
     nextKey = sourceOptions[0].key;
   }
   select.value = nextKey;
-  if (nextKey !== activeSourceKey) {
+  const nextSig = computeSourceSignature(nextKey);
+  if (nextSig !== activeSourceSignature) {
     resetLoadedModelPicker();
-    activeSourceKey = nextKey;
+    activeSourceSignature = nextSig;
   } else if (loadedIds.length > 0) {
     renderModelChecklist();
   }

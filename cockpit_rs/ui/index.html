@@ -19,10 +19,6 @@
         <button class="c-tab" role="tab" data-tab="overview" aria-selected="true">
           <span>Tổng quan</span>
         </button>
-        <button class="c-tab" role="tab" data-tab="slots" aria-selected="false">
-          <span>Định tuyến Slot</span>
-          <span id="tab-count-slots" class="c-tab-count">0</span>
-        </button>
         <button class="c-tab" role="tab" data-tab="reserve" aria-selected="false">
           <span>Dự trữ</span>
           <span id="tab-count-reserve" class="c-tab-count">0</span>
@@ -86,53 +82,93 @@
       <div id="alert-banner" class="c-banner c-banner--danger" hidden></div>
 
       <section id="panel-overview" class="c-panel">
-        <div class="c-grid">
-          <article class="c-card">
+        <div class="c-grid--kpi">
+          <article class="c-card c-card--kpi">
             <span class="c-card-title">OpenViking Server (19330)</span>
-            <div id="metric-server" class="c-card-metric">—</div>
+            <div id="metric-server" class="c-card-metric c-card-metric--single">—</div>
             <div id="meta-server" class="c-card-meta">Chưa có dữ liệu</div>
-            <div class="c-actions">
-              <button id="btn-server-start" type="button" class="c-btn c-btn--sm c-btn--primary" hidden>Chạy Server</button>
+            <div class="c-row-actions">
+              <button id="btn-server-start" type="button" class="c-btn c-btn--sm c-btn--primary" hidden>Chạy</button>
               <button id="btn-server-restart" type="button" class="c-btn c-btn--sm">Khởi động lại</button>
               <button id="btn-server-cancel-restart" type="button" class="c-btn c-btn--sm" hidden>Hủy</button>
-              <button id="btn-view-logs" type="button" class="c-btn c-btn--sm" title="Xem nhật ký trực tiếp trong ứng dụng">Xem Logs</button>
-              <button id="btn-open-logs" type="button" class="c-btn c-btn--sm" title="Mở thư mục nhật ký logs/ trong Windows Explorer">Thư mục Logs</button>
+              <button id="btn-view-logs" type="button" class="c-btn c-btn--sm" title="Xem nhật ký trực tiếp trong ứng dụng">Logs</button>
+              <button id="btn-open-logs" type="button" class="c-btn c-btn--sm" title="Mở thư mục nhật ký logs/ trong Windows Explorer">Thư mục</button>
             </div>
             <div id="server-action-status" class="c-card-meta" hidden></div>
           </article>
 
-          <article id="card-jump-ollama" class="c-card c-card--interactive" role="button" tabindex="0" title="Bấm để xem nhật ký ollama.log">
+          <article id="card-jump-ollama" class="c-card c-card--kpi c-card--interactive" role="button" tabindex="0" title="Bấm để xem nhật ký ollama.log">
             <span class="c-card-title">Ollama &amp; Embedding (21434)</span>
-            <div id="metric-ollama" class="c-card-metric">—</div>
+            <div id="metric-ollama" class="c-card-metric c-card-metric--single">—</div>
             <div id="meta-ollama" class="c-card-meta">Chưa có dữ liệu</div>
           </article>
 
-          <article id="card-jump-vlm" class="c-card c-card--interactive" role="button" tabindex="0" title="Bấm để mở tab Định tuyến Slot">
+          <article id="card-jump-vlm" class="c-card c-card--kpi c-card--interactive" role="button" tabindex="0" title="Bấm để cuộn tới bảng Định tuyến Slot">
             <span class="c-card-title">VLM Đang Phục Vụ</span>
-            <div id="metric-vlm" class="c-card-metric">—</div>
+            <div id="metric-vlm" class="c-card-metric c-card-metric--single">—</div>
             <div id="meta-vlm" class="c-card-meta">Chưa có dữ liệu</div>
           </article>
 
-          <article id="card-jump-queue" class="c-card c-card--interactive" role="button" tabindex="0" title="Bấm để xem nhật ký trích xuất server.log">
+          <article id="card-jump-queue" class="c-card c-card--kpi c-card--interactive" role="button" tabindex="0" title="Bấm để xem nhật ký trích xuất server.log">
             <span class="c-card-title">Extraction Queue</span>
-            <div id="metric-queue" class="c-card-metric">—</div>
+            <div id="metric-queue" class="c-card-metric c-card-metric--single">—</div>
             <div id="meta-queue" class="c-card-meta">Chưa có dữ liệu</div>
           </article>
 
-          <article id="card-jump-vectors" class="c-card c-card--interactive" role="button" tabindex="0" title="Bấm để xem phân bổ chi tiết và tra cứu thử ngữ nghĩa">
+          <article id="card-jump-vectors" class="c-card c-card--kpi c-card--interactive" role="button" tabindex="0" title="Bấm để xem phân bổ chi tiết và tra cứu thử ngữ nghĩa">
             <span class="c-card-title">VikingDB Vectors</span>
-            <div id="metric-vikingdb" class="c-card-metric">—</div>
+            <div id="metric-vikingdb" class="c-card-metric c-card-metric--single">—</div>
             <div id="meta-vikingdb" class="c-card-meta">Chưa có dữ liệu</div>
           </article>
 
-          <article id="card-jump-memories" class="c-card c-card--interactive" role="button" tabindex="0" title="Bấm để xem phân bổ chi tiết và tra cứu thử ngữ nghĩa">
+          <article id="card-jump-memories" class="c-card c-card--kpi c-card--interactive" role="button" tabindex="0" title="Bấm để xem phân bổ chi tiết và tra cứu thử ngữ nghĩa">
             <span class="c-card-title">Long-Term Memories</span>
-            <div id="metric-memories" class="c-card-metric">—</div>
+            <div id="metric-memories" class="c-card-metric c-card-metric--single">—</div>
             <div id="meta-memories" class="c-card-meta">Chưa có dữ liệu</div>
           </article>
         </div>
 
-        <article class="c-card">
+        <div id="drift-banner" class="c-banner c-banner--warn" hidden>
+          <span id="drift-banner-text"></span>
+          <button id="btn-drift-apply-restart" type="button" class="c-btn c-btn--sm c-btn--primary">Áp dụng ngay (Khởi động lại Server)</button>
+        </div>
+
+        <article id="slots-section" class="c-card">
+          <div class="c-toolbar">
+            <div class="c-toolbar-group">
+              <span class="c-card-title">ĐỊNH TUYẾN SLOT</span>
+              <span id="tab-count-slots" class="c-badge c-badge--ok">0 Slot</span>
+              <span id="slot-runtime-summary" class="c-badge c-badge--muted">Đang đọc Slot chạy…</span>
+              <span id="slot-failback-summary" class="c-card-meta"></span>
+              <button id="btn-slot-release-hold" type="button" class="c-btn c-btn--sm c-btn--primary" hidden>Mở khóa → Về tự động (#0)</button>
+            </div>
+            <div class="c-toolbar-group">
+              <button id="btn-slots-open-failback" type="button" class="c-btn c-btn--sm">Chính sách Failback</button>
+              <button id="btn-slots-probe-all" type="button" class="c-btn c-btn--sm">Thử tất cả Slot</button>
+              <button id="btn-slots-provider-test" type="button" class="c-btn c-btn--sm">Thử Provider</button>
+              <button id="btn-slot-add" type="button" class="c-btn c-btn--sm c-btn--primary">+ Thêm Slot</button>
+            </div>
+          </div>
+
+          <div class="c-table-wrap">
+            <table class="c-table">
+              <thead>
+                <tr>
+                  <th>Slot</th>
+                  <th>Trạng thái chạy</th>
+                  <th>Model</th>
+                  <th>Endpoint</th>
+                  <th>Độ trễ / Thử</th>
+                  <th>Key · Kiểm định</th>
+                  <th>Thao tác</th>
+                </tr>
+              </thead>
+              <tbody id="slots-tbody"></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article id="watch-section" class="c-card">
           <div class="c-toolbar">
             <div class="c-toolbar-group">
               <span class="c-card-title">THEO DÕI (Tối đa 4 key độc lập · DPAPI)</span>
@@ -157,7 +193,9 @@
             </div>
           </div>
 
-          <div class="c-table-wrap">
+          <div id="watch-empty-hint" class="c-empty-inline" hidden>Chưa có key theo dõi nào (tối đa 4 key). Bấm "+ Thêm Theo dõi" hoặc sao chép từ Slot / Dự trữ.</div>
+
+          <div id="watch-table-wrap" class="c-table-wrap">
             <table class="c-table">
               <thead>
                 <tr>
@@ -174,44 +212,6 @@
             </table>
           </div>
         </article>
-      </section>
-
-      <section id="panel-slots" class="c-panel" hidden>
-        <div id="drift-banner" class="c-banner c-banner--warn" hidden>
-          <span id="drift-banner-text"></span>
-          <button id="btn-drift-apply-restart" type="button" class="c-btn c-btn--sm c-btn--primary">Áp dụng ngay (Khởi động lại Server)</button>
-        </div>
-
-        <div class="c-toolbar">
-          <div class="c-toolbar-group">
-            <span id="slot-runtime-summary" class="c-badge c-badge--muted">Đang đọc Slot chạy…</span>
-            <span id="slot-failback-summary" class="c-card-meta"></span>
-            <button id="btn-slot-release-hold" type="button" class="c-btn c-btn--sm c-btn--primary" hidden>Mở khóa → Về tự động (#0)</button>
-          </div>
-          <div class="c-toolbar-group">
-            <button id="btn-slots-open-failback" type="button" class="c-btn c-btn--sm">Chính sách Failback</button>
-            <button id="btn-slots-probe-all" type="button" class="c-btn c-btn--sm">Thử tất cả Slot</button>
-            <button id="btn-slots-provider-test" type="button" class="c-btn c-btn--sm">Thử Provider</button>
-            <button id="btn-slot-add" type="button" class="c-btn c-btn--sm c-btn--primary">+ Thêm Slot</button>
-          </div>
-        </div>
-
-        <div class="c-table-wrap">
-          <table class="c-table">
-            <thead>
-              <tr>
-                <th>Slot</th>
-                <th>Trạng thái chạy</th>
-                <th>Model</th>
-                <th>Endpoint</th>
-                <th>Độ trễ / Thử</th>
-                <th>Key · Kiểm định</th>
-                <th>Thao tác</th>
-              </tr>
-            </thead>
-            <tbody id="slots-tbody"></tbody>
-          </table>
-        </div>
       </section>
 
       <section id="panel-reserve" class="c-panel" hidden>
@@ -242,6 +242,7 @@
 
           <div class="c-toolbar-group">
             <button id="btn-reserve-probe-selected" type="button" class="c-btn c-btn--sm" hidden>Thử đã chọn</button>
+            <button id="btn-reserve-delete-selected" type="button" class="c-btn c-btn--sm c-btn--danger" hidden>Xóa đã chọn</button>
             <button id="btn-reserve-probe-all" type="button" class="c-btn c-btn--sm">Thử tất cả</button>
             <button id="btn-reserve-probe-cancel" type="button" class="c-btn c-btn--sm c-btn--danger" hidden>Dừng</button>
             <label class="c-check-inline" for="reserve-target-slot">
@@ -403,6 +404,7 @@
             </div>
           </form>
           <div id="memory-search-status" class="c-card-meta"></div>
+          <nav id="memory-breadcrumb" class="c-breadcrumb" aria-label="Đường dẫn thư mục ký ức" hidden></nav>
           <div class="c-table-wrap">
             <table class="c-table">
               <thead>
@@ -577,6 +579,7 @@
         <div class="c-modal-head">
           <span id="log-modal-title" class="c-modal-title">Trình xem Nhật ký Hệ thống (Chỉ đọc)</span>
           <div class="c-actions">
+            <button id="log-modal-copy" type="button" class="c-btn c-btn--sm">Sao chép</button>
             <button id="log-modal-refresh" type="button" class="c-btn c-btn--sm">Tải mới</button>
             <button id="log-modal-close" type="button" class="c-btn c-btn--sm">Đóng (Esc)</button>
           </div>
@@ -592,6 +595,10 @@
             </select>
           </label>
           <input id="log-filter-input" class="c-input c-input--sm" type="search" placeholder="Lọc dòng (ERROR, WARN, slot…)" />
+          <label class="c-check-inline">
+            <input id="log-errors-only" type="checkbox" />
+            Chỉ Lỗi / Cảnh báo
+          </label>
           <span id="log-meta-text" class="c-card-meta"></span>
         </div>
         <div id="log-lines-box" class="c-log-view"></div>

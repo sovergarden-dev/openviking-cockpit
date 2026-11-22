@@ -132,7 +132,7 @@ export function renderSlotsPanel() {
   const live = state.liveVlm;
 
   const countBadge = document.getElementById("tab-count-slots");
-  if (countBadge) countBadge.textContent = String(slots.length);
+  if (countBadge) countBadge.textContent = `${slots.length} Slot`;
 
   setDriftBanner(computeLiveSlotDriftReason(slots, cfg, live));
 
@@ -233,7 +233,7 @@ export function renderSlotsPanel() {
     const probeWrap = document.createElement("div");
     probeWrap.className = "c-cell-inline";
     const lastProbe = state.slotProbes.get(slot.id) || null;
-    probeWrap.appendChild(createProbeStatusBadge(lastProbe));
+    probeWrap.appendChild(createProbeStatusBadge(lastProbe, () => probeSingleSlot(slot, probeBtn)));
     if (lastProbe?.ms != null) {
       const msSpan = document.createElement("span");
       msSpan.className = "c-mono";
@@ -277,7 +277,7 @@ export function renderSlotsPanel() {
 
     const switchBtn = document.createElement("button");
     switchBtn.type = "button";
-    switchBtn.className = isActive ? "c-btn c-btn--sm" : "c-btn c-btn--sm c-btn--primary";
+    switchBtn.className = isActive ? "c-btn c-btn--sm" : "c-btn c-btn--sm c-btn--accent";
     switchBtn.textContent = isActive ? "Đang chạy" : "Chuyển nóng";
     switchBtn.disabled = isActive && !(live?.manual_hold && slot.slot_index === 0);
     switchBtn.addEventListener("click", () => hotSwitchSlot(slot.slot_index, switchBtn));

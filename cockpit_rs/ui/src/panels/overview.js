@@ -48,11 +48,12 @@ export function renderTelemetry(snap) {
     `Ready: ${snap.ready?.status || formatEndpointStatus(snap.ready_status)} · ${snap.health_latency_ms} ms`;
   const life = snap.lifecycle;
   let lifeSuffix = "";
-  if (life && (life.total_starts > 0 || life.total_crashes > 0)) {
+  if (life && (life.total_starts > 0 || life.total_crashes > 0 || life.total_hang_kills > 0)) {
+    const killTxt = life.total_hang_kills > 0 ? ` · Tự cứu treo: ${life.total_hang_kills}` : "";
     lifeSuffix =
       life.total_crashes > 0
-        ? ` · Chạy: ${life.total_starts} · Crash: ${life.total_crashes} (${life.last_exit_hex || "?"})`
-        : ` · Chạy: ${life.total_starts} · Crash: 0`;
+        ? ` · Chạy: ${life.total_starts} · Crash: ${life.total_crashes} (${life.last_exit_hex || "?"})${killTxt}`
+        : ` · Chạy: ${life.total_starts} · Crash: 0${killTxt}`;
   }
   document.getElementById("meta-server").textContent = `${baseServerMeta}${lifeSuffix}`;
 
@@ -78,7 +79,7 @@ export function renderTelemetry(snap) {
   const activeIdx = vlmRes?.index ?? 0;
   const activeSlot = (state.slots || []).find((s) => s.slot_index === activeIdx);
   document.getElementById("metric-vlm").textContent = vlmRes
-    ? `Slot #${activeIdx} / ${vlmRes.n ?? 1}${activeSlot?.model ? ` · ${activeSlot.model}` : ""}`
+    ? `Slot #${activeIdx} / ${vlmRes.n ?? 1}`
     : formatEndpointStatus(snap.vlm_status);
   const modeTxt = vlmRes?.manual_hold
     ? "🔒 Khóa thủ công"
@@ -86,7 +87,7 @@ export function renderTelemetry(snap) {
       ? "⚠ Failover tự động"
       : "Tự động (#0)";
   document.getElementById("meta-vlm").textContent = vlmRes
-    ? `${modeTxt} · ${snap.vlm_latency_ms} ms`
+    ? `${activeSlot?.model ? `${activeSlot.model} · ` : ""}${modeTxt} · ${snap.vlm_latency_ms} ms`
     : `${snap.vlm_latency_ms} ms`;
 
   const startBtn = document.getElementById("btn-server-start");
@@ -184,16 +185,15 @@ export function renderWatchTable(summary, onMonitorUpdated) {
     minsSelect.value = minsStr;
   }
 
+  const emptyHint = document.getElementById("watch-empty-hint");
+  const tableWrap = document.getElementById("watch-table-wrap");
+  if (emptyHint) emptyHint.hidden = watches.length > 0;
+  if (tableWrap) tableWrap.hidden = watches.length === 0;
+
   const wBody = document.getElementById("watch-tbody");
   if (!wBody) return;
   wBody.replaceChildren();
   if (watches.length === 0) {
-    wBody.appendChild(
-      createEmptyRow(
-        7,
-        'Chưa có key theo dõi nào (tối đa 4 key). Bấm "+ Thêm Theo dõi" hoặc sao chép từ Slot / Dự trữ.'
-      )
-    );
     return;
   }
 
@@ -377,24 +377,35 @@ function resetRestartConfirm() {
   if (cancelBtn) cancelBtn.hidden = true;
 }
 
-export async function runServiceAction(action) {
-  if (state.serviceBusy) return;
-  resetRestartConfirm();
-  state.serviceBusy = true;
+export function setServiceButtonsBusy(busy, message = "") {
+  state.serviceBusy = Boolean(busy);
   const startBtn = document.getElementById("btn-server-start");
   const restartBtn = document.getElementById("btn-server-restart");
   const driftRestartBtn = document.getElementById("btn-drift-apply-restart");
   const statusEl = document.getElementById("server-action-status");
-  if (startBtn) startBtn.disabled = true;
-  if (restartBtn) restartBtn.disabled = true;
-  if (driftRestartBtn) driftRestartBtn.disabled = true;
-  if (statusEl) {
+  if (startBtn) startBtn.disabled = state.serviceBusy;
+  if (restartBtn) restartBtn.disabled = state.serviceBusy;
+  if (driftRestartBtn) driftRestartBtn.disabled = state.serviceBusy;
+  if (statusEl && state.serviceBusy) {
     statusEl.hidden = false;
-    statusEl.textContent =
-      action === "restart"
-        ? "Đang dừng tiến trình cũ, dọn khóa stale và khởi chạy lại OpenViking…"
-        : "Đang kích hoạt tác vụ OpenViking Autostart…";
+    if (message) {
+      statusEl.textContent = message;
+    } else if (!statusEl.textContent || !statusEl.textContent.startsWith("Đang")) {
+      statusEl.textContent = "Đang thực thi lệnh điều khiển OpenViking Server…";
+    }
   }
+}
+
+export async function runServiceAction(action) {
+  if (state.serviceBusy) return;
+  resetRestartConfirm();
+  const statusEl = document.getElementById("server-action-status");
+  setServiceButtonsBusy(
+    true,
+    action === "restart"
+      ? "Đang dừng tiến trình cũ, dọn khóa stale và khởi chạy lại OpenViking…"
+      : "Đang kích hoạt tác vụ OpenViking Autostart…"
+  );
   try {
     const out = await invokeCmd("control_openviking_service", { action });
     const secs = ((out.elapsed_ms || 0) / 1000).toFixed(1);
@@ -416,10 +427,7 @@ export async function runServiceAction(action) {
     }
     showToast(`Lỗi dịch vụ: ${err}`, "danger");
   } finally {
-    state.serviceBusy = false;
-    if (startBtn) startBtn.disabled = false;
-    if (restartBtn) restartBtn.disabled = false;
-    if (driftRestartBtn) driftRestartBtn.disabled = false;
+    setServiceButtonsBusy(false);
   }
 }
 
@@ -526,7 +534,9 @@ export function setupOverviewPanel({ onActivateTab, onMonitorUpdated }) {
   });
 
   bindCardActivation("card-jump-ollama", () => openLogViewer("ollama.log"));
-  bindCardActivation("card-jump-vlm", () => onActivateTab("slots"));
+  bindCardActivation("card-jump-vlm", () =>
+    document.getElementById("slots-section")?.scrollIntoView({ behavior: "smooth", block: "nearest" })
+  );
   bindCardActivation("card-jump-queue", () => openLogViewer("server.log"));
   bindCardActivation("card-jump-vectors", () => onActivateTab("memory"));
   bindCardActivation("card-jump-memories", () => onActivateTab("memory"));

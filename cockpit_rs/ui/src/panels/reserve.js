@@ -13,6 +13,7 @@ import {
   createProbeStatusBadge,
   formatBackendError,
   isAuditRequiredError,
+  normalizeEndpoint,
   normalizeSearchText,
 } from "../utils/format.js";
 
@@ -51,6 +52,7 @@ function compareReserves(a, b, sortBy, sortDir) {
 function syncBatchSelectionUi(visibleList) {
   const selAll = document.getElementById("reserve-select-all");
   const probeSelBtn = document.getElementById("btn-reserve-probe-selected");
+  const deleteSelBtn = document.getElementById("btn-reserve-delete-selected");
   const probeAllBtn = document.getElementById("btn-reserve-probe-all");
   const cancelBtn = document.getElementById("btn-reserve-probe-cancel");
 
@@ -68,8 +70,23 @@ function syncBatchSelectionUi(visibleList) {
     probeSelBtn.hidden = selCount === 0 || state.reserveBatchBusy;
     probeSelBtn.textContent = `Thử đã chọn (${selCount})`;
   }
+  if (deleteSelBtn) {
+    deleteSelBtn.hidden = selCount === 0 || state.reserveBatchBusy;
+    deleteSelBtn.textContent = `Xóa đã chọn (${selCount})`;
+  }
   if (probeAllBtn) probeAllBtn.disabled = state.reserveBatchBusy || validLen === 0;
   if (cancelBtn) cancelBtn.hidden = !state.reserveBatchBusy;
+}
+
+function getReserveMembership(res) {
+  const normEp = normalizeEndpoint(res.api_base);
+  const slotIndices = (state.slots || [])
+    .filter((s) => s.model === res.model && normalizeEndpoint(s.api_base) === normEp)
+    .map((s) => s.slot_index);
+  const inWatch = (state.lastMonitorSummary?.watches || []).some(
+    (w) => w.model === res.model && normalizeEndpoint(w.api_base) === normEp
+  );
+  return { slotIndices, inWatch };
 }
 
 function detectFailingSlotIndex() {
@@ -283,7 +300,31 @@ export function renderReserveTable(onMonitorUpdated) {
     tr.appendChild(cbTd);
 
     tr.appendChild(createCell(String(res.index + 1), { mono: true, nowrap: true }));
-    tr.appendChild(createCell(res.model, { mono: true, truncate: true }));
+
+    const modelTd = document.createElement("td");
+    const modelWrap = document.createElement("div");
+    modelWrap.className = "c-cell-inline";
+    const modelSpan = document.createElement("span");
+    modelSpan.className = "c-truncate c-mono";
+    modelSpan.textContent = res.model;
+    modelSpan.title = res.model;
+    modelWrap.appendChild(modelSpan);
+    const membership = getReserveMembership(res);
+    for (const sIdx of membership.slotIndices) {
+      const b = document.createElement("span");
+      b.className = "c-badge c-badge--ok";
+      b.textContent = `Slot #${sIdx}`;
+      modelWrap.appendChild(b);
+    }
+    if (membership.inWatch) {
+      const b = document.createElement("span");
+      b.className = "c-badge c-badge--warn";
+      b.textContent = "Theo dõi";
+      modelWrap.appendChild(b);
+    }
+    modelTd.appendChild(modelWrap);
+    tr.appendChild(modelTd);
+
     tr.appendChild(createCell(res.api_base, { mono: true, truncate: true }));
 
     const stTd = document.createElement("td");
@@ -517,6 +558,43 @@ export function setupReservePanel(onMonitorUpdated) {
   document.getElementById("btn-reserve-probe-selected")?.addEventListener("click", () => {
     const picked = Array.from(state.selectedReserveIndices).sort((a, b) => a - b);
     if (picked.length > 0) runReserveBatch(picked, onMonitorUpdated);
+  });
+
+  document.getElementById("btn-reserve-delete-selected")?.addEventListener("click", async (ev) => {
+    const picked = Array.from(state.selectedReserveIndices).sort((a, b) => b - a);
+    if (picked.length === 0) return;
+    const ok = await requestConfirm({
+      title: "Xóa hàng loạt model Dự trữ",
+      message: `Xóa ${picked.length} model đã chọn khỏi kho Dự trữ (DPAPI)?`,
+      confirmLabel: `Xóa ${picked.length} model`,
+      danger: true,
+    });
+    if (!ok) return;
+
+    const btn = ev.currentTarget;
+    enqueueMonitorMutation(btn, async () => {
+      let curSha = state.reservesSha;
+      let lastSummary = null;
+      let deletedCount = 0;
+      try {
+        for (const idx of picked) {
+          lastSummary = await invokeCmd("delete_reserve_entry", {
+            expectedReservesSha: curSha,
+            index: idx,
+          });
+          curSha = lastSummary?.reserves_sha256 || curSha;
+          deletedCount += 1;
+        }
+        state.selectedReserveIndices.clear();
+        if (lastSummary) onMonitorUpdated?.(lastSummary);
+        showToast(`Đã xóa ${deletedCount} model khỏi kho Dự trữ.`, "ok");
+      } catch (err) {
+        state.selectedReserveIndices.clear();
+        if (lastSummary) onMonitorUpdated?.(lastSummary);
+        await state.onRefreshRequested?.();
+        showToast(`Đã xóa ${deletedCount} model trước khi gặp lỗi: ${err}`, "danger");
+      }
+    });
   });
 
   document.getElementById("btn-reserve-probe-all")?.addEventListener("click", () => {
