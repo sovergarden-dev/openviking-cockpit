@@ -251,15 +251,46 @@ async fn read_cached_poll_meta(
     .unwrap_or((None, true, true, None))
 }
 
-pub async fn collect_telemetry_once(state: &Arc<CockpitState>) -> TelemetrySnapshot {
+const SLOW_TELEMETRY_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+pub async fn collect_telemetry_once(
+    state: &Arc<CockpitState>,
+    force_slow_refresh: bool,
+) -> TelemetrySnapshot {
     let (expected_emb, notify_on_down, notify_on_failover, lifecycle_summary) =
         read_cached_poll_meta(state).await;
 
-    let mut snapshot = state
+    let cached_slow = if force_slow_refresh {
+        None
+    } else {
+        state.slow_telemetry_cache.lock().ok().and_then(|g| {
+            g.as_ref().and_then(|(ts, cache)| {
+                if ts.elapsed() < SLOW_TELEMETRY_TTL {
+                    Some(cache.clone())
+                } else {
+                    None
+                }
+            })
+        })
+    };
+
+    let (mut snapshot, new_slow_cache) = state
         .telemetry_client
-        .fetch_snapshot_with_embedding(expected_emb.as_deref())
+        .fetch_snapshot_tiered(expected_emb.as_deref(), cached_slow.as_ref())
         .await;
     snapshot.lifecycle = lifecycle_summary;
+
+    let server_up = snapshot.health_status == EndpointStatus::Ok
+        && snapshot.health.as_ref().is_some_and(|h| h.healthy);
+    if let Ok(mut guard) = state.slow_telemetry_cache.lock() {
+        if server_up {
+            if cached_slow.is_none() {
+                *guard = Some((std::time::Instant::now(), new_slow_cache));
+            }
+        } else {
+            *guard = None;
+        }
+    }
 
     let uptime_secs = state.started_at.elapsed().as_secs();
     let alerts = state
@@ -373,7 +404,7 @@ pub async fn run_due_watch_auto_pass(app: &AppHandle, state: &Arc<CockpitState>)
 pub async fn get_telemetry_status(
     state: State<'_, Arc<CockpitState>>,
 ) -> Result<TelemetrySnapshot, String> {
-    Ok(collect_telemetry_once(state.inner()).await)
+    Ok(collect_telemetry_once(state.inner(), true).await)
 }
 
 #[tauri::command]
@@ -403,7 +434,7 @@ pub async fn switch_active_slot(
         .telemetry_client
         .switch_active_vlm_slot(slot_index)
         .await?;
-    let _ = collect_telemetry_once(state.inner()).await;
+    let _ = collect_telemetry_once(state.inner(), false).await;
     Ok(res)
 }
 
@@ -1843,11 +1874,26 @@ pub struct ServiceControlOutcome {
     pub elapsed_ms: u64,
 }
 
+struct ServiceBusyGuard(AppHandle);
+
+impl Drop for ServiceBusyGuard {
+    fn drop(&mut self) {
+        let _ = self.0.emit("service://busy", false);
+    }
+}
+
 pub(crate) async fn execute_service_action_and_wait(
+    app: &AppHandle,
     state: &Arc<CockpitState>,
     parsed_action: ServiceAction,
 ) -> Result<(ServiceControlOutcome, TelemetrySnapshot), String> {
-    let _guard = state.service_lock.lock().await;
+    let Ok(_guard) = state.service_lock.try_lock() else {
+        return Err(
+            "Đang thực thi lệnh điều khiển OpenViking Server, vui lòng chờ hoàn tất.".to_string(),
+        );
+    };
+    let _ = app.emit("service://busy", true);
+    let _busy = ServiceBusyGuard(app.clone());
     let started = std::time::Instant::now();
     let ov_home = state.paths.ov_home.clone();
     let port = state.server_port;
@@ -1876,7 +1922,7 @@ pub(crate) async fn execute_service_action_and_wait(
     }
 
     state.invalidate_poll_meta_cache();
-    let snap = collect_telemetry_once(state).await;
+    let snap = collect_telemetry_once(state, true).await;
 
     let outcome = ServiceControlOutcome {
         action: step.action,
@@ -1893,11 +1939,12 @@ pub(crate) async fn execute_service_action_and_wait(
 
 #[tauri::command]
 pub async fn control_openviking_service(
+    app: AppHandle,
     state: State<'_, Arc<CockpitState>>,
     action: String,
 ) -> Result<ServiceControlOutcome, String> {
     let parsed_action = ServiceAction::parse(&action)?;
-    let (outcome, _) = execute_service_action_and_wait(state.inner(), parsed_action).await?;
+    let (outcome, _) = execute_service_action_and_wait(&app, state.inner(), parsed_action).await?;
     Ok(outcome)
 }
 

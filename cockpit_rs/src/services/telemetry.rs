@@ -347,6 +347,8 @@ pub enum EndpointStatus {
 pub struct LifecycleSummary {
     pub total_starts: usize,
     pub total_crashes: usize,
+    #[serde(default)]
+    pub total_hang_kills: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_exit_hex: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -371,6 +373,7 @@ pub fn read_lifecycle_summary(path: &Path) -> Option<LifecycleSummary> {
 
     let mut total_starts = 0usize;
     let mut total_crashes = 0usize;
+    let mut total_hang_kills = 0usize;
     let mut last_exit_hex = None;
     let mut last_uptime_s = None;
     let mut parsed_any = false;
@@ -389,6 +392,7 @@ pub fn read_lifecycle_summary(path: &Path) -> Option<LifecycleSummary> {
         parsed_any = true;
         match ev {
             "start" => total_starts += 1,
+            "hang-killed" => total_hang_kills += 1,
             "exit" => {
                 let code = val.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
                 if code != 0 {
@@ -413,6 +417,7 @@ pub fn read_lifecycle_summary(path: &Path) -> Option<LifecycleSummary> {
     Some(LifecycleSummary {
         total_starts,
         total_crashes,
+        total_hang_kills,
         last_exit_hex,
         last_uptime_s,
     })
@@ -503,11 +508,19 @@ pub enum TelemetryError {
 }
 
 #[derive(Debug, Clone)]
+pub struct SlowTelemetryCache {
+    pub vikingdb: (EndpointStatus, Option<VikingDbResponse>, u64),
+    pub memories: (EndpointStatus, Option<MemoriesStatsResponse>, u64),
+    pub queue: (EndpointStatus, Option<QueueResponse>, u64),
+}
+
+#[derive(Debug, Clone)]
 pub struct TelemetryClient {
     base_url: String,
     ollama_base_url: String,
     api_key: Arc<RwLock<Option<RedactedApiKey>>>,
     http: reqwest::Client,
+    slow_http: reqwest::Client,
     search_http: reqwest::Client,
 }
 
@@ -520,8 +533,13 @@ impl Default for TelemetryClient {
 impl TelemetryClient {
     pub fn try_new(base_url: &str) -> Result<Self, TelemetryError> {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_millis(800))
-            .connect_timeout(Duration::from_millis(300))
+            .timeout(Duration::from_millis(1500))
+            .connect_timeout(Duration::from_millis(400))
+            .no_proxy()
+            .build()?;
+        let slow_http = reqwest::Client::builder()
+            .timeout(Duration::from_millis(4000))
+            .connect_timeout(Duration::from_millis(500))
             .no_proxy()
             .build()?;
         let search_http = reqwest::Client::builder()
@@ -534,6 +552,7 @@ impl TelemetryClient {
             ollama_base_url: "http://127.0.0.1:21434".to_string(),
             api_key: Arc::new(RwLock::new(None)),
             http,
+            slow_http,
             search_http,
         })
     }
@@ -574,13 +593,14 @@ impl TelemetryClient {
         req
     }
 
-    async fn probe_url<T: for<'de> Deserialize<'de>>(
+    async fn probe_url_with_client<T: for<'de> Deserialize<'de>>(
         &self,
+        client: &reqwest::Client,
         url: &str,
         include_auth: bool,
     ) -> (EndpointStatus, Option<T>, u64) {
         let start = Instant::now();
-        let mut req = self.http.get(url);
+        let mut req = client.get(url);
         if include_auth {
             req = self.attach_auth(req);
         }
@@ -621,12 +641,30 @@ impl TelemetryClient {
         }
     }
 
+    async fn probe_url<T: for<'de> Deserialize<'de>>(
+        &self,
+        url: &str,
+        include_auth: bool,
+    ) -> (EndpointStatus, Option<T>, u64) {
+        self.probe_url_with_client(&self.http, url, include_auth)
+            .await
+    }
+
     async fn probe<T: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
     ) -> (EndpointStatus, Option<T>, u64) {
         let url = format!("{}{}", self.base_url, path);
-        self.probe_url(&url, true).await
+        self.probe_url_with_client(&self.http, &url, true).await
+    }
+
+    async fn probe_slow<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+    ) -> (EndpointStatus, Option<T>, u64) {
+        let url = format!("{}{}", self.base_url, path);
+        self.probe_url_with_client(&self.slow_http, &url, true)
+            .await
     }
 
     pub async fn fetch_health(&self) -> (EndpointStatus, Option<HealthResponse>, u64) {
@@ -673,21 +711,23 @@ impl TelemetryClient {
     }
 
     pub async fn fetch_vikingdb(&self) -> (EndpointStatus, Option<VikingDbResponse>, u64) {
-        self.probe("/api/v1/observer/vikingdb?format=json").await
+        self.probe_slow("/api/v1/observer/vikingdb?format=json")
+            .await
     }
 
     pub async fn fetch_memories(&self) -> (EndpointStatus, Option<MemoriesStatsResponse>, u64) {
-        self.probe("/api/v1/stats/memories").await
+        self.probe_slow("/api/v1/stats/memories").await
     }
 
     pub async fn fetch_queue(&self) -> (EndpointStatus, Option<QueueResponse>, u64) {
-        self.probe("/api/v1/observer/queue?format=json").await
+        self.probe_slow("/api/v1/observer/queue?format=json").await
     }
 
     pub async fn fetch_retrieval_observer(
         &self,
     ) -> (EndpointStatus, Option<RetrievalObserverResponse>, u64) {
-        self.probe("/api/v1/observer/retrieval?format=json").await
+        self.probe_slow("/api/v1/observer/retrieval?format=json")
+            .await
     }
 
     /// Read-only semantic search via `POST /api/v1/search/find` (uses local embedding model only, zero VLM calls).
@@ -865,24 +905,44 @@ impl TelemetryClient {
         (status, models, latency)
     }
 
-    pub async fn fetch_snapshot_with_embedding(
+    pub async fn fetch_snapshot_tiered(
         &self,
         expected_embedding_model: Option<&str>,
-    ) -> TelemetrySnapshot {
+        cached_slow: Option<&SlowTelemetryCache>,
+    ) -> (TelemetrySnapshot, SlowTelemetryCache) {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
-        let (h, r, v, db, m, q, ol) = tokio::join!(
+        let (h, r, v, ol) = tokio::join!(
             self.fetch_health(),
             self.fetch_ready(),
             self.fetch_vlm(),
-            self.fetch_vikingdb(),
-            self.fetch_memories(),
-            self.fetch_queue(),
             self.fetch_ollama_tags(),
         );
+
+        let server_up = h.0 == EndpointStatus::Ok && h.1.as_ref().is_some_and(|body| body.healthy);
+        let (db, m, q) = match (cached_slow, server_up) {
+            (Some(cache), true) => (
+                cache.vikingdb.clone(),
+                cache.memories.clone(),
+                cache.queue.clone(),
+            ),
+            _ => {
+                tokio::join!(
+                    self.fetch_vikingdb(),
+                    self.fetch_memories(),
+                    self.fetch_queue()
+                )
+            }
+        };
+
+        let slow_cache = SlowTelemetryCache {
+            vikingdb: db.clone(),
+            memories: m.clone(),
+            queue: q.clone(),
+        };
 
         let expected = expected_embedding_model
             .map(|s| s.trim().to_string())
@@ -928,7 +988,16 @@ impl TelemetryClient {
             snap.embedding_model_ready = Some(ready);
         }
 
-        snap
+        (snap, slow_cache)
+    }
+
+    pub async fn fetch_snapshot_with_embedding(
+        &self,
+        expected_embedding_model: Option<&str>,
+    ) -> TelemetrySnapshot {
+        self.fetch_snapshot_tiered(expected_embedding_model, None)
+            .await
+            .0
     }
 }
 
@@ -1493,6 +1562,8 @@ mod tests {
         let lines = concat!(
             r#"{"event":"start","run_id":"r1","child_pid":100}"#,
             "\n",
+            r#"{"event":"hang-killed","run_id":"r1","child_pid":100,"consecutive_failures":3,"uptime_s":12.0}"#,
+            "\n",
             r#"{"event":"exit","run_id":"r1","exit_code":3,"exit_code_hex":"0x00000003","uptime_s":12.5}"#,
             "\n",
             r#"{"event":"start","run_id":"r2","child_pid":101}"#,
@@ -1503,8 +1574,79 @@ mod tests {
         let sum = read_lifecycle_summary(&log_path).expect("parse lifecycle summary");
         assert_eq!(sum.total_starts, 2);
         assert_eq!(sum.total_crashes, 1);
+        assert_eq!(sum.total_hang_kills, 1);
         assert_eq!(sum.last_exit_hex.as_deref(), Some("0x00000003"));
         assert_eq!(sum.last_uptime_s, Some(12.5));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_snapshot_tiered_reuses_slow_cache_without_rehitting_memories() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let base_url = format!("http://127.0.0.1:{}", port);
+        let memories_hits = Arc::new(AtomicUsize::new(0));
+        let memories_hits_srv = Arc::clone(&memories_hits);
+
+        tokio::spawn(async move {
+            for _ in 0..11 {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req_str = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req_str.lines().next().unwrap_or("");
+                    let body = if first_line.starts_with("GET /health ") {
+                        r#"{"status":"ok","healthy":true,"version":"0.5.5"}"#
+                    } else if first_line.starts_with("GET /ready ") {
+                        r#"{"status":"ready","checks":{"vectordb":"ok"}}"#
+                    } else if first_line.starts_with("GET /api/v1/observer/vlm/active ") {
+                        r#"{"status":"ok","result":{"kind":"MultiCredentialVLM","index":0,"n":1,"manual_hold":false}}"#
+                    } else if first_line.starts_with("GET /api/v1/observer/vikingdb") {
+                        r#"{"status":"ok","result":{"is_healthy":true,"has_errors":false,"status":{"vector_count":99,"dimension":1024}}}"#
+                    } else if first_line.starts_with("GET /api/v1/stats/memories ") {
+                        memories_hits_srv.fetch_add(1, Ordering::SeqCst);
+                        r#"{"status":"ok","result":{"total_memories":55}}"#
+                    } else if first_line.starts_with("GET /api/v1/observer/queue") {
+                        r#"{"status":"ok","result":{"name":"queue","is_healthy":true,"has_errors":false,"status":{"queues":[]}}}"#
+                    } else {
+                        r#"{"models":[]}"#
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                }
+            }
+        });
+
+        let client = TelemetryClient::new(&base_url).with_ollama_base_url(&base_url);
+        let (snap1, cache1) = client.fetch_snapshot_tiered(None, None).await;
+        assert_eq!(memories_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            snap1
+                .memories
+                .as_ref()
+                .and_then(|m| m.result.as_ref())
+                .and_then(|r| r.total_memories),
+            Some(55)
+        );
+
+        let (snap2, _cache2) = client.fetch_snapshot_tiered(None, Some(&cache1)).await;
+        assert_eq!(memories_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(snap2.health_status, EndpointStatus::Ok);
+        assert_eq!(
+            snap2
+                .memories
+                .as_ref()
+                .and_then(|m| m.result.as_ref())
+                .and_then(|r| r.total_memories),
+            Some(55)
+        );
     }
 
     #[tokio::test]

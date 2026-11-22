@@ -7,7 +7,7 @@ use tauri::ipc::Channel;
 use tokio::sync::watch;
 
 use cockpit_rs::services::telemetry::{
-    IncidentTracker, LifecycleSummary, TelemetryClient, TelemetrySnapshot,
+    IncidentTracker, LifecycleSummary, SlowTelemetryCache, TelemetryClient, TelemetrySnapshot,
 };
 
 #[derive(Debug, Clone)]
@@ -73,6 +73,7 @@ pub struct CockpitState {
     pub started_at: Instant,
     pub telemetry_client: TelemetryClient,
     pub latest_snapshot: RwLock<Option<TelemetrySnapshot>>,
+    pub slow_telemetry_cache: Mutex<Option<(Instant, SlowTelemetryCache)>>,
     pub incident_tracker: Mutex<IncidentTracker>,
     pub poll_meta_cache: Mutex<TelemetryPollMetaCache>,
     pub monitor_lock: tokio::sync::Mutex<()>,
@@ -121,6 +122,7 @@ impl CockpitState {
             started_at: Instant::now(),
             telemetry_client,
             latest_snapshot: RwLock::new(None),
+            slow_telemetry_cache: Mutex::new(None),
             incident_tracker: Mutex::new(IncidentTracker::default()),
             poll_meta_cache: Mutex::new(TelemetryPollMetaCache::default()),
             monitor_lock: tokio::sync::Mutex::new(()),
@@ -151,6 +153,9 @@ impl CockpitState {
         if let Ok(mut guard) = self.poll_meta_cache.lock() {
             guard.conf_stamp = None;
             guard.monitor_stamp = None;
+        }
+        if let Ok(mut guard) = self.slow_telemetry_cache.lock() {
+            *guard = None;
         }
     }
 

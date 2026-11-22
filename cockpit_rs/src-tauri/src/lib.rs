@@ -295,6 +295,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                     let app_handle = app.clone();
                     tauri::async_runtime::spawn(async move {
                         let msg = match execute_service_action_and_wait(
+                            &app_handle,
                             &st_ref,
                             ServiceAction::Restart,
                         )
@@ -316,11 +317,16 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                                         .to_string()
                                 }
                             }
-                            Err(_) => {
-                                let snap = collect_telemetry_once(&st_ref).await;
-                                let _ = app_handle.emit("telemetry://snapshot", &snap);
-                                "Không thể khởi động lại OpenViking Server từ khay hệ thống."
-                                    .to_string()
+                            Err(err) => {
+                                if err.contains("Đang thực thi") {
+                                    "OpenViking Server đang khởi động lại, vui lòng chờ hoàn tất."
+                                        .to_string()
+                                } else {
+                                    let snap = collect_telemetry_once(&st_ref, true).await;
+                                    let _ = app_handle.emit("telemetry://snapshot", &snap);
+                                    "Không thể khởi động lại OpenViking Server từ khay hệ thống."
+                                        .to_string()
+                                }
                             }
                         };
                         let _ = tauri::async_runtime::spawn_blocking(move || {
@@ -422,7 +428,7 @@ pub fn run() {
                 loop {
                     tokio::select! {
                         _ = ticker.tick() => {
-                            let snap = collect_telemetry_once(&worker_state).await;
+                            let snap = collect_telemetry_once(&worker_state, false).await;
                             let new_tip = format_tray_tooltip(&snap);
                             if new_tip != last_tooltip {
                                 last_tooltip = new_tip;

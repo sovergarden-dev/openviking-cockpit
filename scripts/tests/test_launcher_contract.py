@@ -9,8 +9,6 @@ Verifies:
 4. ops/start-openviking-hidden.cmd redirects Ollama stdout to nul to suppress Gin access log spam.
 5. Files exist, are non-empty, and contain CRLF line endings.
 """
-import re
-import sys
 import unittest
 from pathlib import Path
 
