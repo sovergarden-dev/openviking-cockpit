@@ -2,6 +2,11 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- Removed unused `message` parameter from `setServiceButtonsBusy`, updated `#btn-server-start` visibility against `!backendServiceBusy` immediately after UI start/restart actions, cleared stale `selectedReserveIndices` on batch-delete errors, removed redundant DOM re-enable lines before `renderSlotsPanel()`, and shared `probingSlotIds` across `#btn-slots-probe-all` (`panels/overview.js`, `panels/reserve.js`, `panels/slots.js`).
+
 ## [1.10.1] - 2026-11-22
 
 ### Changed

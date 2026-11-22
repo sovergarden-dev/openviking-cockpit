@@ -90,7 +90,7 @@ export function renderTelemetry(snap) {
     : `${snap.vlm_latency_ms} ms`;
 
   const startBtn = document.getElementById("btn-server-start");
-  if (startBtn && !state.serviceBusy) {
+  if (startBtn && !backendServiceBusy) {
     const serverUp = snap.health_status === "Ok" && snap.health?.healthy === true;
     startBtn.hidden = serverUp;
   }
@@ -390,7 +390,7 @@ function syncServiceButtonsUi() {
   if (driftRestartBtn) driftRestartBtn.disabled = state.serviceBusy;
 }
 
-export function setServiceButtonsBusy(busy, message = "") {
+export function setServiceButtonsBusy(busy) {
   backendServiceBusy = Boolean(busy);
   if (backendServiceBusy) {
     resetRestartConfirm();
@@ -401,7 +401,7 @@ export function setServiceButtonsBusy(busy, message = "") {
   if (backendServiceBusy) {
     if (!localServiceActionInFlight) {
       statusEl.hidden = false;
-      statusEl.textContent = message || GENERIC_SERVICE_BUSY_TEXT;
+      statusEl.textContent = GENERIC_SERVICE_BUSY_TEXT;
     }
   } else if (!localServiceActionInFlight && statusEl.textContent === GENERIC_SERVICE_BUSY_TEXT) {
     statusEl.textContent = "";

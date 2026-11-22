@@ -79,8 +79,6 @@ async function probeSingleSlot(slot, btn, badgeBtn = null) {
     showToast(`Lỗi thử Slot #${slot.slot_index}: ${err}`, "danger");
   } finally {
     probingSlotIds.delete(slot.id);
-    if (btn && btn.isConnected) btn.disabled = false;
-    if (badgeBtn && badgeBtn.isConnected) badgeBtn.disabled = false;
     renderSlotsPanel();
   }
 }
@@ -419,11 +417,15 @@ export function setupSlotsPanel() {
   });
 
   document.getElementById("btn-slots-probe-all")?.addEventListener("click", async (ev) => {
+    const targets = (state.slots || []).filter((s) => !probingSlotIds.has(s.id));
+    if (targets.length === 0) return;
     const btn = ev.currentTarget;
     btn.disabled = true;
+    for (const s of targets) probingSlotIds.add(s.id);
+    renderSlotsPanel();
     try {
       await Promise.all(
-        (state.slots || []).map(async (s) => {
+        targets.map(async (s) => {
           try {
             const outcome = await invokeCmd("probe_credential", {
               target: { source: "slot", slot_index: s.slot_index },
@@ -438,8 +440,10 @@ export function setupSlotsPanel() {
               ms: null,
               at: Date.now() / 1000,
             });
+          } finally {
+            probingSlotIds.delete(s.id);
+            renderSlotsPanel();
           }
-          renderSlotsPanel();
         })
       );
       showToast("Đã thử kết nối tất cả Slot.", "ok");

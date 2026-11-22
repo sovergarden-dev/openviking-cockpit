@@ -584,6 +584,7 @@ export function setupReservePanel(onMonitorUpdated) {
         if (summary) onMonitorUpdated?.(summary);
         showToast(`Đã xóa ${picked.length} model khỏi kho Dự trữ.`, "ok");
       } catch (err) {
+        state.selectedReserveIndices.clear();
         await state.onRefreshRequested?.();
         showToast(`Không thể xóa hàng loạt: ${formatBackendError(err)}`, "danger");
       }
