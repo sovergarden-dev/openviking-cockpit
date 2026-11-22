@@ -13,6 +13,7 @@ import {
 } from "./modals/provider_tester.js";
 import { refreshMemoryOverview, setupMemoryPanel } from "./panels/memory.js";
 import {
+  applyExternalServiceResult,
   renderTelemetry,
   renderWatchTable,
   setServiceButtonsBusy,
@@ -68,6 +69,9 @@ function renderConfig(cfg) {
   }
 
   renderSlotsPanel();
+  if (state.lastMonitorSummary) {
+    renderReserveTable(renderMonitorState);
+  }
 }
 
 function renderMonitorState(summary) {
@@ -282,7 +286,12 @@ async function setupStreaming() {
   await listenEvent("monitor://updated", (ev) => renderMonitorState(ev.payload));
   await listenEvent("tray://open-log", (ev) => openLogViewer(ev.payload || "server.log"));
   await listenEvent("service://busy", (ev) => setServiceButtonsBusy(Boolean(ev.payload)));
-  await listenEvent("service://restarted", () => refreshAll());
+  await listenEvent("service://restarted", (ev) => {
+    if (typeof ev.payload === "string" && ev.payload) {
+      applyExternalServiceResult(ev.payload);
+    }
+    refreshAll();
+  });
   await listenEvent("watchlist://auto-disabled", (ev) => {
     const p = ev.payload;
     showToast(

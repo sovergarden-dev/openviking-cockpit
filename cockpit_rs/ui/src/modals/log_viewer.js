@@ -15,10 +15,25 @@ export function isLogViewerOpen() {
   return Boolean(backdrop && !backdrop.hidden);
 }
 
+function classifyLogLine(line) {
+  const upper = line.toUpperCase();
+  if (
+    upper.includes("ERROR") ||
+    upper.includes("CRITICAL") ||
+    upper.includes("FATAL") ||
+    upper.includes("TRACEBACK")
+  ) {
+    return "err";
+  }
+  if (upper.includes("WARN")) return "warn";
+  return "info";
+}
+
 function renderLines() {
   const box = document.getElementById("log-lines-box");
   const filterInput = document.getElementById("log-filter-input");
   const metaEl = document.getElementById("log-meta-text");
+  lastFilteredLines = [];
   if (!box || !metaEl) return;
 
   box.replaceChildren();
@@ -38,16 +53,7 @@ function renderLines() {
   const q = normalizeSearchText(filterInput?.value?.trim() || "");
   const errorsOnly = Boolean(document.getElementById("log-errors-only")?.checked);
   const filtered = (currentOutcome.lines || []).filter((ln) => {
-    if (errorsOnly) {
-      const upper = ln.toUpperCase();
-      const isAlert =
-        upper.includes("ERROR") ||
-        upper.includes("CRITICAL") ||
-        upper.includes("FATAL") ||
-        upper.includes("TRACEBACK") ||
-        upper.includes("WARN");
-      if (!isAlert) return false;
-    }
+    if (errorsOnly && classifyLogLine(ln) === "info") return false;
     return !q || normalizeSearchText(ln).includes(q);
   });
   lastFilteredLines = filtered;
@@ -65,14 +71,13 @@ function renderLines() {
 
   for (const line of filtered) {
     const row = document.createElement("div");
-    const upper = line.toUpperCase();
-    if (upper.includes("ERROR") || upper.includes("CRITICAL") || upper.includes("FATAL") || upper.includes("TRACEBACK")) {
-      row.className = "c-log-line c-log-line--err";
-    } else if (upper.includes("WARN")) {
-      row.className = "c-log-line c-log-line--warn";
-    } else {
-      row.className = "c-log-line";
-    }
+    const kind = classifyLogLine(line);
+    row.className =
+      kind === "err"
+        ? "c-log-line c-log-line--err"
+        : kind === "warn"
+          ? "c-log-line c-log-line--warn"
+          : "c-log-line";
     row.textContent = line;
     box.appendChild(row);
   }
@@ -94,6 +99,9 @@ async function fetchLogTail() {
     });
     renderLines();
   } catch (err) {
+    currentOutcome = null;
+    lastFilteredLines = [];
+    document.getElementById("log-lines-box")?.replaceChildren();
     if (metaEl) metaEl.textContent = `Không đọc được nhật ký: ${err}`;
   } finally {
     if (refreshBtn) refreshBtn.disabled = false;

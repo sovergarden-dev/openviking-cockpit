@@ -57,15 +57,19 @@ async function hotSwitchSlot(slotIndex, btn) {
   }
 }
 
-async function probeSingleSlot(slot, btn) {
+const probingSlotIds = new Set();
+
+async function probeSingleSlot(slot, btn, badgeBtn = null) {
+  if (probingSlotIds.has(slot.id)) return;
+  probingSlotIds.add(slot.id);
   if (btn) btn.disabled = true;
+  if (badgeBtn) badgeBtn.disabled = true;
   try {
     const outcome = await invokeCmd("probe_credential", {
       target: { source: "slot", slot_index: slot.slot_index },
       modelOverride: null,
     });
     state.slotProbes.set(slot.id, outcome);
-    renderSlotsPanel();
     if (outcome.ok) {
       showToast(`Slot #${slot.slot_index}: OK (${outcome.ms ?? "?"} ms)`, "ok");
     } else {
@@ -74,7 +78,10 @@ async function probeSingleSlot(slot, btn) {
   } catch (err) {
     showToast(`Lỗi thử Slot #${slot.slot_index}: ${err}`, "danger");
   } finally {
+    probingSlotIds.delete(slot.id);
     if (btn && btn.isConnected) btn.disabled = false;
+    if (badgeBtn && badgeBtn.isConnected) badgeBtn.disabled = false;
+    renderSlotsPanel();
   }
 }
 
@@ -229,11 +236,23 @@ export function renderSlotsPanel() {
     tr.appendChild(createCell(slot.model, { mono: true, truncate: true }));
     tr.appendChild(createCell(slot.api_base, { mono: true, truncate: true }));
 
+    const isProbing = probingSlotIds.has(slot.id);
+    const probeBtn = document.createElement("button");
+    probeBtn.type = "button";
+    probeBtn.className = "c-btn c-btn--sm";
+    probeBtn.textContent = "Thử";
+    probeBtn.disabled = isProbing;
+    probeBtn.addEventListener("click", () => probeSingleSlot(slot, probeBtn, probeBadge));
+
     const probeTd = document.createElement("td");
     const probeWrap = document.createElement("div");
     probeWrap.className = "c-cell-inline";
     const lastProbe = state.slotProbes.get(slot.id) || null;
-    probeWrap.appendChild(createProbeStatusBadge(lastProbe, () => probeSingleSlot(slot, probeBtn)));
+    const probeBadge = createProbeStatusBadge(lastProbe, () =>
+      probeSingleSlot(slot, probeBtn, probeBadge)
+    );
+    probeBadge.disabled = isProbing;
+    probeWrap.appendChild(probeBadge);
     if (lastProbe?.ms != null) {
       const msSpan = document.createElement("span");
       msSpan.className = "c-mono";
@@ -268,12 +287,6 @@ export function renderSlotsPanel() {
     const actTd = document.createElement("td");
     const rowAct = document.createElement("div");
     rowAct.className = "c-row-actions";
-
-    const probeBtn = document.createElement("button");
-    probeBtn.type = "button";
-    probeBtn.className = "c-btn c-btn--sm";
-    probeBtn.textContent = "Thử";
-    probeBtn.addEventListener("click", () => probeSingleSlot(slot, probeBtn));
 
     const switchBtn = document.createElement("button");
     switchBtn.type = "button";

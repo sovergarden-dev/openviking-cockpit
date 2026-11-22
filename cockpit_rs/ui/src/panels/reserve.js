@@ -561,6 +561,9 @@ export function setupReservePanel(onMonitorUpdated) {
   });
 
   document.getElementById("btn-reserve-delete-selected")?.addEventListener("click", async (ev) => {
+    const btn = ev.currentTarget;
+    if (!btn || btn.disabled) return;
+    const expectedReservesSha = state.reservesSha;
     const picked = Array.from(state.selectedReserveIndices).sort((a, b) => b - a);
     if (picked.length === 0) return;
     const ok = await requestConfirm({
@@ -571,28 +574,18 @@ export function setupReservePanel(onMonitorUpdated) {
     });
     if (!ok) return;
 
-    const btn = ev.currentTarget;
     enqueueMonitorMutation(btn, async () => {
-      let curSha = state.reservesSha;
-      let lastSummary = null;
-      let deletedCount = 0;
       try {
-        for (const idx of picked) {
-          lastSummary = await invokeCmd("delete_reserve_entry", {
-            expectedReservesSha: curSha,
-            index: idx,
-          });
-          curSha = lastSummary?.reserves_sha256 || curSha;
-          deletedCount += 1;
-        }
+        const summary = await invokeCmd("delete_reserve_entries", {
+          expectedReservesSha,
+          indices: picked,
+        });
         state.selectedReserveIndices.clear();
-        if (lastSummary) onMonitorUpdated?.(lastSummary);
-        showToast(`Đã xóa ${deletedCount} model khỏi kho Dự trữ.`, "ok");
+        if (summary) onMonitorUpdated?.(summary);
+        showToast(`Đã xóa ${picked.length} model khỏi kho Dự trữ.`, "ok");
       } catch (err) {
-        state.selectedReserveIndices.clear();
-        if (lastSummary) onMonitorUpdated?.(lastSummary);
         await state.onRefreshRequested?.();
-        showToast(`Đã xóa ${deletedCount} model trước khi gặp lỗi: ${err}`, "danger");
+        showToast(`Không thể xóa hàng loạt: ${formatBackendError(err)}`, "danger");
       }
     });
   });

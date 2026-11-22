@@ -8,7 +8,6 @@ import { enqueueMonitorMutation, MAX_WATCHES, state } from "../state.js";
 import {
   createAuditBadgeElement,
   createCell,
-  createEmptyRow,
   createProbeLatencyText,
   createProbeStatusBadge,
   formatEndpointStatus,
@@ -377,35 +376,59 @@ function resetRestartConfirm() {
   if (cancelBtn) cancelBtn.hidden = true;
 }
 
-export function setServiceButtonsBusy(busy, message = "") {
-  state.serviceBusy = Boolean(busy);
+const GENERIC_SERVICE_BUSY_TEXT = "Đang thực thi lệnh điều khiển OpenViking Server…";
+let localServiceActionInFlight = false;
+let backendServiceBusy = false;
+
+function syncServiceButtonsUi() {
+  state.serviceBusy = localServiceActionInFlight || backendServiceBusy;
   const startBtn = document.getElementById("btn-server-start");
   const restartBtn = document.getElementById("btn-server-restart");
   const driftRestartBtn = document.getElementById("btn-drift-apply-restart");
-  const statusEl = document.getElementById("server-action-status");
   if (startBtn) startBtn.disabled = state.serviceBusy;
   if (restartBtn) restartBtn.disabled = state.serviceBusy;
   if (driftRestartBtn) driftRestartBtn.disabled = state.serviceBusy;
-  if (statusEl && state.serviceBusy) {
-    statusEl.hidden = false;
-    if (message) {
-      statusEl.textContent = message;
-    } else if (!statusEl.textContent || !statusEl.textContent.startsWith("Đang")) {
-      statusEl.textContent = "Đang thực thi lệnh điều khiển OpenViking Server…";
-    }
+}
+
+export function setServiceButtonsBusy(busy, message = "") {
+  backendServiceBusy = Boolean(busy);
+  if (backendServiceBusy) {
+    resetRestartConfirm();
   }
+  syncServiceButtonsUi();
+  const statusEl = document.getElementById("server-action-status");
+  if (!statusEl) return;
+  if (backendServiceBusy) {
+    if (!localServiceActionInFlight) {
+      statusEl.hidden = false;
+      statusEl.textContent = message || GENERIC_SERVICE_BUSY_TEXT;
+    }
+  } else if (!localServiceActionInFlight && statusEl.textContent === GENERIC_SERVICE_BUSY_TEXT) {
+    statusEl.textContent = "";
+    statusEl.hidden = true;
+  }
+}
+
+export function applyExternalServiceResult(message) {
+  const statusEl = document.getElementById("server-action-status");
+  if (!statusEl || localServiceActionInFlight || !message) return;
+  statusEl.hidden = false;
+  statusEl.textContent = String(message);
 }
 
 export async function runServiceAction(action) {
   if (state.serviceBusy) return;
   resetRestartConfirm();
   const statusEl = document.getElementById("server-action-status");
-  setServiceButtonsBusy(
-    true,
-    action === "restart"
-      ? "Đang dừng tiến trình cũ, dọn khóa stale và khởi chạy lại OpenViking…"
-      : "Đang kích hoạt tác vụ OpenViking Autostart…"
-  );
+  localServiceActionInFlight = true;
+  syncServiceButtonsUi();
+  if (statusEl) {
+    statusEl.hidden = false;
+    statusEl.textContent =
+      action === "restart"
+        ? "Đang dừng tiến trình cũ, dọn khóa stale và khởi chạy lại OpenViking…"
+        : "Đang kích hoạt tác vụ OpenViking Autostart…";
+  }
   try {
     const out = await invokeCmd("control_openviking_service", { action });
     const secs = ((out.elapsed_ms || 0) / 1000).toFixed(1);
@@ -427,7 +450,8 @@ export async function runServiceAction(action) {
     }
     showToast(`Lỗi dịch vụ: ${err}`, "danger");
   } finally {
-    setServiceButtonsBusy(false);
+    localServiceActionInFlight = false;
+    syncServiceButtonsUi();
   }
 }
 
