@@ -539,26 +539,32 @@ impl Default for TelemetryClient {
 }
 
 impl TelemetryClient {
+    fn build_loopback_client(
+        timeout: Duration,
+        connect_timeout: Duration,
+    ) -> Result<reqwest::Client, TelemetryError> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONNECTION,
+            reqwest::header::HeaderValue::from_static("close"),
+        );
+        Ok(reqwest::Client::builder()
+            .timeout(timeout)
+            .connect_timeout(connect_timeout)
+            .pool_max_idle_per_host(0)
+            .default_headers(headers)
+            .no_proxy()
+            .build()?)
+    }
+
     pub fn try_new(base_url: &str) -> Result<Self, TelemetryError> {
-        // Loopback uvicorn closes idle keep-alive sockets after 5s; zero idle pool avoids WinError 10054 resets.
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_millis(1500))
-            .connect_timeout(Duration::from_millis(400))
-            .pool_max_idle_per_host(0)
-            .no_proxy()
-            .build()?;
-        let slow_http = reqwest::Client::builder()
-            .timeout(Duration::from_millis(4000))
-            .connect_timeout(Duration::from_millis(500))
-            .pool_max_idle_per_host(0)
-            .no_proxy()
-            .build()?;
-        let search_http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(12))
-            .connect_timeout(Duration::from_millis(500))
-            .pool_max_idle_per_host(0)
-            .no_proxy()
-            .build()?;
+        // Loopback uvicorn closes idle keep-alive sockets after 5s; Connection: close + zero idle pool avoids Cockpit-side keep-alive reset races.
+        let http =
+            Self::build_loopback_client(Duration::from_millis(1500), Duration::from_millis(400))?;
+        let slow_http =
+            Self::build_loopback_client(Duration::from_millis(4000), Duration::from_millis(500))?;
+        let search_http =
+            Self::build_loopback_client(Duration::from_secs(12), Duration::from_millis(500))?;
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             ollama_base_url: "http://127.0.0.1:21434".to_string(),
@@ -612,7 +618,7 @@ impl TelemetryClient {
         include_auth: bool,
     ) -> (EndpointStatus, Option<T>, u64) {
         let start = Instant::now();
-        let mut req = client.get(url).header(reqwest::header::CONNECTION, "close");
+        let mut req = client.get(url);
         if include_auth {
             req = self.attach_auth(req);
         }
@@ -1024,7 +1030,7 @@ pub struct IncidentTracker {
 }
 
 impl IncidentTracker {
-    pub fn reset_server_down_streak(&mut self) {
+    pub fn reset_outage_streaks(&mut self) {
         self.consecutive_down_ticks = 0;
         self.server_down_notified = false;
         self.consecutive_embedding_missing_ticks = 0;
@@ -1504,12 +1510,16 @@ mod tests {
         assert_eq!(tracker.consecutive_down_ticks, 0);
         assert!(!tracker.server_down_notified);
 
-        // reset_server_down_streak clears accumulated down/embedding streaks (used during Start/Restart)
+        // reset_outage_streaks clears accumulated down/embedding streaks (used during Start/Restart)
         tracker.consecutive_down_ticks = 2;
         tracker.server_down_notified = true;
-        tracker.reset_server_down_streak();
+        tracker.consecutive_embedding_missing_ticks = 2;
+        tracker.embedding_missing_notified = true;
+        tracker.reset_outage_streaks();
         assert_eq!(tracker.consecutive_down_ticks, 0);
         assert!(!tracker.server_down_notified);
+        assert_eq!(tracker.consecutive_embedding_missing_ticks, 0);
+        assert!(!tracker.embedding_missing_notified);
 
         // 2. Manual switch (manual_hold=true) must NOT trigger failover alarm
         snap.vlm.as_mut().unwrap().result.as_mut().unwrap().index = Some(1);

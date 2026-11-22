@@ -2,11 +2,16 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
+## [Unreleased]
+
+### Changed
+- Consolidated `TelemetryClient` loopback HTTP builders into `build_loopback_client` so `Connection: close` is applied by default across all loopback endpoints (including VLM slot switch, semantic search, content read, and directory listing), and renamed `IncidentTracker::reset_server_down_streak` to `reset_outage_streaks` (`cockpit_rs/src/services/telemetry.rs`, `cockpit_rs/src-tauri/src/commands.rs`).
+
 ## [1.10.2] - 2026-11-22
 
 ### Fixed
 - Added a 3-consecutive-tick (~6s) confirmation threshold (`SERVER_DOWN_CONSECUTIVE_FAILS`) to `IncidentTracker` for server-down and embedding-missing alerts, preventing single-tick transient disconnect warning balloons (`cockpit_rs/src/services/telemetry.rs`).
-- Disabled loopback HTTP keep-alive pooling (`pool_max_idle_per_host(0)`) and attached `Connection: close` on telemetry probes in `TelemetryClient` to eliminate Windows `uvicorn` 5s keep-alive `WinError 10054` connection-reset races (`cockpit_rs/src/services/telemetry.rs`).
+- Disabled loopback HTTP keep-alive pooling (`pool_max_idle_per_host(0)`) and attached `Connection: close` on telemetry probes in `TelemetryClient` to prevent Cockpit-side keep-alive connection-reset races against Windows `uvicorn`'s 5s idle timeout (`cockpit_rs/src/services/telemetry.rs`).
 - Suppressed disconnect and embedding tray warnings while resetting failure streaks whenever `service_lock` is held during intentional Start/Restart operations (`cockpit_rs/src-tauri/src/commands.rs`).
 - Removed unused `message` parameter from `setServiceButtonsBusy`, updated `#btn-server-start` visibility against `!backendServiceBusy` immediately after UI start/restart actions, cleared stale `selectedReserveIndices` on batch-delete errors, removed redundant DOM re-enable lines before `renderSlotsPanel()`, and shared `probingSlotIds` across `#btn-slots-probe-all` (`panels/overview.js`, `panels/reserve.js`, `panels/slots.js`).
 

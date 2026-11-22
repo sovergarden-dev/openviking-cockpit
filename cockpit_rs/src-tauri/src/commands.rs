@@ -304,7 +304,7 @@ pub async fn collect_telemetry_once(
         .ok()
         .map(|mut tracker| {
             if service_restarting {
-                tracker.reset_server_down_streak();
+                tracker.reset_outage_streaks();
                 Vec::new()
             } else {
                 evaluate_telemetry_incidents_with_uptime(
