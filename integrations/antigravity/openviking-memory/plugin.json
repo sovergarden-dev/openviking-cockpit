@@ -1,7 +1,7 @@
 {
   "name": "openviking-memory",
   "displayName": "OpenViking Shared Memory",
-  "version": "1.10.0",
+  "version": "1.10.1",
   "description": "Safe shared long-term memory bridge connecting Antigravity to local OpenViking (127.0.0.1:19330) with broad semantic recall and curated peer-scoped writes.",
   "logo": "assets/logo.svg",
   "repository": "https://github.com/sovergarden-dev/openviking-cockpit",

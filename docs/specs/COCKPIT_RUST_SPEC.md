@@ -70,10 +70,10 @@ G:/AI/openviking-cockpit/
     │       ├── main.rs          # Single-instance Win32 mutex & window activation
     │       ├── lib.rs           # System tray, NIF_INFO balloon, geometry persistence & clean X-close exit
     │       ├── state.rs         # CockpitState, monitor_lock, try_lock service_lock, geometry draft, slow_telemetry_cache & mtime poll cache
-    │       └── commands.rs      # 35 async Tauri IPC commands wrapping spawn_blocking, non-queueing service busy sync, Provider Explorer/Benchmark, Slot lifecycle, Log Tail, Memory Directory List & Startup .lnk sync
+    │       └── commands.rs      # 36 async Tauri IPC commands wrapping spawn_blocking, non-queueing service busy sync (ServiceActionError), atomic batch reserve delete (delete_reserve_entries), Provider Explorer/Benchmark, Slot lifecycle, Log Tail, Memory Directory List & Startup .lnk sync
     └── ui/                      # Vanilla ES Modules + CSS Design Token Frontend
         ├── package.json
-        ├── index.html           # 3-Tab UI: Unified Overview (3x2/6x1 KPI cards, active Slot routing + drift restart & collapsible Watch), Reserve (membership tags, batch probe/delete & guided V3.1 flow), Memory (interactive directory explorer + breadcrumb & Hygiene Dry-run); Slide-over Drawer, Settings Popover, Audit/Provider/Log Modals
+        ├── index.html           # 3-Tab UI: Unified Overview (3x2/6x1 ≥1600px KPI cards with wrapping Server actions, active Slot routing + drift restart & collapsible Watch), Reserve (membership tags, batch probe/delete & guided V3.1 flow), Memory (interactive directory explorer + breadcrumb & Hygiene Dry-run); Slide-over Drawer, Settings Popover, Audit/Provider/Log Modals
         ├── styles/
         │   ├── tokens.css       # Single source of visual tokens
         │   └── app.css          # Component pattern & modifier classes

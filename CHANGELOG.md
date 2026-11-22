@@ -2,11 +2,24 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
+## [1.10.1] - 2026-11-22
+
+### Changed
+- Added atomic batch reserve deletion command `delete_reserve_entries` (`cockpit_rs/src-tauri/src/commands.rs`, `lib.rs`, `cockpit_rs/src/services/watchlist.rs::remove_reserve_indices`) sharing single-transaction CAS SHA verification, backup, and DACL persistence with `delete_reserve_entry`.
+- Replaced string-based busy matching in Tray restarts with typed `ServiceActionError` (`commands.rs`, `lib.rs`), emitted tray status messages via `service://restarted`, and raised the 6-column KPI grid breakpoint to `1600px` with wrapping `.c-actions` on the Server KPI card (`index.html`, `styles/app.css`).
+- Updated `README.md` (`50 Rust + 13 Python CI`, `36` IPC commands), `docs/specs/COCKPIT_RUST_SPEC.md`, and corrected the `1.10.0` `CHANGELOG.md` Reserve membership badge description.
+
+### Fixed
+- Fixed `btn-reserve-delete-selected` reading `ev.currentTarget` after `await requestConfirm` (always `null`, leaving the button enabled) and snapshotted `reservesSha` before confirmation so batch deletion cannot double-submit or mutate shifted indices (`panels/reserve.js`).
+- Fixed `#server-action-status` staying stuck on `"Đang thực thi…"` after System Tray restarts and prevented premature UI button re-enable during post-restart `refreshAll()` by tracking local vs backend busy states (`panels/overview.js`, `main.js`).
+- Prevented `slow_telemetry_cache` from caching non-`Ok` (`Timeout`/`HttpError`) slow probes for 10s (`SlowTelemetryCache::all_ok` in `telemetry.rs`, `commands.rs`) and short-circuited slow telemetry calls when `/health` fails (`fetch_snapshot_tiered`).
+- Fixed Log Viewer `Sao chép` copying stale lines when switching to missing or unreadable log files (`modals/log_viewer.js`, unifying alert classification via `classifyLogLine`), prevented duplicate concurrent 1-tap Slot probe clicks (`probingSlotIds` in `panels/slots.js`), synced Reserve membership badges inside `renderConfig` (`main.js`), and removed dead `createEmptyRow` import (`panels/overview.js`), dead `#watch-section` ID (`index.html`), and unused `TelemetryClient::fetch_snapshot_with_embedding` (`telemetry.rs`).
+
 ## [1.10.0] - 2026-11-22
 
 ### Added
 - Tracked `total_hang_kills` (`hang-killed` events) from `logs/lifecycle.jsonl` in `LifecycleSummary` (`cockpit_rs/src/services/telemetry.rs`) and surfaced `Tự cứu treo` counters on the OpenViking Server KPI card when non-zero.
-- Added clickable Slot/Watch membership badges next to Reserve model names and guarded batch removal (`Xóa đã chọn`) in `cockpit_rs/ui/src/panels/reserve.js` using descending index commits with chained `reserves_sha256` verification.
+- Added Slot/Watch membership badges next to Reserve model names and guarded batch removal (`Xóa đã chọn`) in `cockpit_rs/ui/src/panels/reserve.js` using descending index commits with chained `reserves_sha256` verification.
 - Added interactive segment breadcrumb navigation (`#memory-breadcrumb`) in `cockpit_rs/ui/src/panels/memory.js`, 1-tap clickable Slot status probe badges (`createProbeStatusBadge` in `utils/format.js`), and `Chỉ Lỗi / Cảnh báo` + `Sao chép` actions in `cockpit_rs/ui/src/modals/log_viewer.js`.
 
 ### Changed

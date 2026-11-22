@@ -3,7 +3,7 @@
 [![Rust / Tauri V2](https://img.shields.io/badge/cockpit__rs-Rust%20%2B%20Tauri%20V2-orange.svg)]()
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![CI Verified](https://img.shields.io/badge/tests-47%20Rust%20%2B%2013%20Python%20CI-brightgreen.svg)]()
+[![CI Verified](https://img.shields.io/badge/tests-50%20Rust%20%2B%2013%20Python%20CI-brightgreen.svg)]()
 
 **OpenViking Cockpit** là bộ công cụ buồng lái giám sát vận hành thời gian thực (`cockpit_rs` bằng **Rust + Tauri V2** đóng gói `openviking-cockpit.exe` độc lập, cùng bộ core/legacy Python 3.11 stdlib-only), quản trị cân bằng tải định tuyến slot VLM, khám phá kho bộ nhớ VikingFS chỉ đọc, và **Khung kiểm định an toàn ranh giới hành vi nhà cung cấp AI (Taxonomy V3.1)** cho hệ sinh thái **OpenViking**.
 
@@ -98,7 +98,7 @@ openviking-cockpit/
 │   └── TAXONOMY_V2_2.md                # Đặc tả kiến trúc V2.2
 ├── cockpit_rs/                         # Phân hệ Rust / Tauri V2 độc lập (openviking-cockpit.exe)
 │   ├── src/                            # Lõi DPAPI, DACL Safe Write, Config Gate, Service Control, Storage Inspector (Hygiene Dry-run & Log Tail), Provider Probe & Benchmark, Telemetry 2 tầng (Search, VikingFS Dir List & hang-killed), Watchlist, Auditor V3.1
-│   ├── src-tauri/                      # Tauri V2 Desktop Host, Dynamic Tray Tooltip & Quick Actions (non-queueing try_lock + service://busy), Khởi động Windows, Quản lý vòng đời Slot & 35 lệnh IPC async
+│   ├── src-tauri/                      # Tauri V2 Desktop Host, Dynamic Tray Tooltip & Quick Actions (non-queueing try_lock + ServiceActionError + service://busy), Khởi động Windows, Quản lý vòng đời Slot & 36 lệnh IPC async
 │   └── ui/                             # Giao diện ES Modules Dark Dashboard 3 Tab (Tổng quan + Định tuyến Slot + Theo dõi thu gọn, Dự trữ + huy hiệu trùng + xóa hàng loạt, Bộ nhớ + breadcrumb + Hygiene Dry-run), Slide-over Drawer, Settings Popover, Audit / Provider / Log Tail Viewer Modals
 ├── integrations/antigravity/           # Plugin openviking-memory (MCP Stdio 5 công cụ an toàn dùng chung bộ nhớ cho Antigravity)
 ├── ops/                                # Trình khởi chạy ẩn watchdog tự phục hồi (/health watchdog), dọn khóa stale (ov_stale_lock_clean.py) & bọc vòng đời (ov_lifecycle.py)
