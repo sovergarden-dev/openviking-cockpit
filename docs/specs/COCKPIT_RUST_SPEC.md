@@ -54,7 +54,7 @@ G:/AI/openviking-cockpit/
     │   ├── secrets/
     │   │   └── secret_store.rs  # Native 64-bit Windows DPAPI & strict ${ENV} secret resolver
     │   └── services/
-    │       ├── telemetry.rs         # Async server, queue, retrieval, semantic search, Ollama & lifecycle.jsonl polling + incident debouncer (with 75s cold-boot grace)
+    │       ├── telemetry.rs         # 2-tier async polling (1.5s fast liveness + 4s 10s-cached stats/queue/memories), semantic search, VikingFS dir list, Ollama & lifecycle.jsonl (hang-killed) + incident debouncer (75s grace)
     │       ├── service_control.rs   # Guarded OpenViking Autostart task start/restart, socket-hang orphan cleanup & lock hygiene
     │       ├── storage_inspector.rs # Read-only storage & peer namespace footprint scanner, Hygiene Dry-run & 4-file allowlisted Log Tail reader
     │       ├── provider_probe.rs    # OpenAI-compatible /v1/models discovery, chat liveness probe & cancellable 1–5 round benchmark
@@ -69,22 +69,22 @@ G:/AI/openviking-cockpit/
     │   └── src/
     │       ├── main.rs          # Single-instance Win32 mutex & window activation
     │       ├── lib.rs           # System tray, NIF_INFO balloon, geometry persistence & clean X-close exit
-    │       ├── state.rs         # CockpitState, monitor_lock, service_lock, geometry draft & mtime poll cache
-    │       └── commands.rs      # 35 async Tauri IPC commands wrapping spawn_blocking, Provider Explorer/Benchmark, Slot lifecycle, Log Tail, Memory Directory List & Startup .lnk sync
+    │       ├── state.rs         # CockpitState, monitor_lock, try_lock service_lock, geometry draft, slow_telemetry_cache & mtime poll cache
+    │       └── commands.rs      # 35 async Tauri IPC commands wrapping spawn_blocking, non-queueing service busy sync, Provider Explorer/Benchmark, Slot lifecycle, Log Tail, Memory Directory List & Startup .lnk sync
     └── ui/                      # Vanilla ES Modules + CSS Design Token Frontend
         ├── package.json
-        ├── index.html           # 4-Tab UI: Overview (live cards & Watch probe-all), Slots (active highlight & live drift restart), Reserve (guided V3.1 slot flow), Memory (interactive directory explorer & Hygiene Dry-run); Slide-over Drawer, Settings Popover, Audit/Provider/Log Modals
+        ├── index.html           # 3-Tab UI: Unified Overview (3x2/6x1 KPI cards, active Slot routing + drift restart & collapsible Watch), Reserve (membership tags, batch probe/delete & guided V3.1 flow), Memory (interactive directory explorer + breadcrumb & Hygiene Dry-run); Slide-over Drawer, Settings Popover, Audit/Provider/Log Modals
         ├── styles/
         │   ├── tokens.css       # Single source of visual tokens
         │   └── app.css          # Component pattern & modifier classes
         └── src/                 # Native ES modules: main.js, api.js, state.js, utils/, components/, modals/, panels/
-            ├── main.js          # App bootstrap, Topbar/Settings popover, tray log events & keyboard shortcuts (Esc/F5/Alt+1..4/Ctrl+K)
+            ├── main.js          # App bootstrap, Topbar/Settings popover, tray & service://busy events & keyboard shortcuts (Esc/F5/Alt+1..3/Ctrl+K)
             ├── api.js           # Tauri IPC wrappers & event subscriptions
             ├── state.js         # Client store & FIFO queue
-            ├── utils/           # Formatting, interactive audit badge DOM builder & error helpers
+            ├── utils/           # Formatting, clickable audit/probe badge DOM builders & error helpers
             ├── components/      # Toast stack, context menu, 2/3-action confirm modal & Slide-over Drawer
-            ├── modals/          # 3-Tab Audit Modal & guided slot flow, Provider Explorer/Benchmark Modal (membership badges & batch save OK) & Log Tail Viewer Modal
-            └── panels/          # Overview, Slots, Reserve & Interactive Memory Browser + Hygiene Dry-run tab controllers
+            ├── modals/          # 3-Tab Audit Modal & guided slot flow, Provider Explorer/Benchmark Modal & Log Tail Viewer Modal (error-only filter + clipboard copy)
+            └── panels/          # Overview + Slots, Reserve (membership tags & batch delete) & Memory Browser (breadcrumb + Hygiene Dry-run) controllers
 ```
 
 ---

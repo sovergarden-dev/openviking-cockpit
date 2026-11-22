@@ -1,30 +1,27 @@
 # OpenViking Cockpit (Bảng Điều Khiển & Giám Sát Vận Hành OpenViking)
 
+[![Rust / Tauri V2](https://img.shields.io/badge/cockpit__rs-Rust%20%2B%20Tauri%20V2-orange.svg)]()
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests: 84/84 PASS](https://img.shields.io/badge/tests-84%2F84%20passed-brightgreen.svg)]()
-[![Standard Library Only](https://img.shields.io/badge/dependencies-stdlib--only-success.svg)]()
+[![CI Verified](https://img.shields.io/badge/tests-47%20Rust%20%2B%2013%20Python%20CI-brightgreen.svg)]()
 
-**OpenViking Cockpit** là bộ công cụ buồng lái giám sát vận hành thời gian thực, quản trị cân bằng tải định tuyến slot, và **Khung kiểm định an toàn ranh giới hành vi nhà cung cấp AI (Provider Behavioral Safety & Boundary Auditor — Taxonomy V3.1)** được phát triển dành riêng cho hệ sinh thái **OpenViking** (Local Vector DB & Autonomous AI Agent System).
+**OpenViking Cockpit** là bộ công cụ buồng lái giám sát vận hành thời gian thực (`cockpit_rs` bằng **Rust + Tauri V2** đóng gói `openviking-cockpit.exe` độc lập, cùng bộ core/legacy Python 3.11 stdlib-only), quản trị cân bằng tải định tuyến slot VLM, khám phá kho bộ nhớ VikingFS chỉ đọc, và **Khung kiểm định an toàn ranh giới hành vi nhà cung cấp AI (Taxonomy V3.1)** cho hệ sinh thái **OpenViking**.
 
-Hệ thống được thiết kế theo triết lý **Disaster Recovery Engineering** và tiêu chuẩn **Python 3.11 Standard Library Only** (không phụ thuộc vào bất kỳ thư viện ngoài nào).
+Hệ thống được thiết kế theo triết lý **Disaster Recovery Engineering** với nguyên tắc bảo mật DPAPI/DACL chặt chẽ: không gửi khóa bí mật thô qua IPC hay ghi ra log, mọi thao tác ghi cấu hình đều có sao lưu trước và kiểm soát CAS theo SHA-256.
 
 ---
 
 ## Tính Năng Cốt Lõi (Key Features)
 
-### 1. Bảng Điều Khiển Định Tuyến Slot (Routing & Failover Cockpit)
-- **4 Slot Định Tuyến Độc Lập:** 1 Slot Chính (Primary) và 3 Slot Dự Phòng (Fallbacks).
-- **Chuyển Mạch Nóng VLM (VLM Hot-Switching & Failback):** Tự động chuyển mạch slot khi phát hiện lỗi, lưu vết thời gian failback và tự động khôi phục slot chính khi hết thời gian chờ.
-- **Giám Sát Hạ Tầng Thời Gian Thực:** Kiểm tra liveness và latency của các dịch vụ OpenViking (19330), Ollama (21434), Watchdog và Cổng cục bộ 20128.
-- **Khối Thẻ Model Chống Cắt Chữ:** Tối ưu hóa layout hình học trên Tkinter, bảo đảm các nhãn đo mili-giây (ms) và mã lỗi HTTP luôn hiển thị đủ 100% trên các độ phân giải từ 880px đến 1400px.
+### 1. Bảng Điều Khiển Tổng Quan & Định Tuyến Slot (Unified Overview & Routing Cockpit)
+- **Giao diện 3 Tab gọn mắt (`Tổng quan` · `Dự trữ` · `Bộ nhớ & Tra cứu`):** Hợp nhất dải 6 thẻ KPI hạ tầng (Server `19330`, Ollama `21434`, VLM đang phục vụ, Extraction Queue, VikingDB Vectors, Long-Term Memories) với polling 2 tầng (`1.5s` liveness + `10s` stats/memories) cùng bảng **Định tuyến Slot** và khung **Theo dõi** thu gọn thông minh ngay trên màn hình đầu tiên.
+- **Chuyển Mạch Nóng VLM & Phát Hiện Drift:** Chuyển nóng giữa Slot Chính `#0` và các Slot Dự Phòng, hỗ trợ khóa/mở khóa failback, thử kết nối 1 chạm và phát hiện lệch cấu hình `ov.conf` so với tiến trình RAM (kèm nút áp dụng khởi động lại tại chỗ và đồng bộ từ Khay hệ thống).
+- **Trình Xem Logs & Cắt Chữ Thông Minh:** Cửa sổ xem 4 tệp log chỉ đọc (`server.log`, `ollama.log`, `lifecycle.jsonl`, `monitor/app.log`) có lọc `Chỉ Lỗi / Cảnh báo` và chép nhanh; độ rộng cột tên Model tự co giãn theo kích thước cửa sổ (`880px–1400px+`).
 
-### 2. Bảng Danh Sách Mô Hình Dự Trữ (Reserve Pool Manager)
-- Tab **Dự trữ** riêng, dùng toàn vùng nội dung. Không có Auto thử; request chỉ chạy khi người dùng chọn thao tác thử/kiểm định.
-- Quản lý hàng chục endpoint LLM dự phòng với tính năng tìm kiếm nhanh, lọc theo trạng thái và endpoint.
-- Bảng co giãn tự nhiên (`autofit`), tự động ẩn/hiện cột ghi chú, hỗ trợ chuột phải thao tác nhanh (Đưa sang Theo dõi, Đưa vào slot, Thử độ trễ, Kiểm định an toàn).
-- **Huy Hiệu Phân Cấp An Toàn [M1] → [M5]:** Tự động hiển thị mức đánh giá an toàn ngay trên cột Trạng thái nếu model đã được kiểm định.
-- **Cache Đo Lường 24 Giờ:** Tự động ghi nhớ báo cáo kiểm định gần nhất trong 24h; cho phép mở xem lại tức thì mà không cần chạy lại mạng.
+### 2. Kho Mô Hình Dự Trữ & Trình Khám Phá Bộ Nhớ
+- **Tab `Dự trữ`:** Tìm kiếm nhanh, lọc trạng thái/endpoint, sắp xếp nhiều cột, thăm dò hàng loạt (`≤2` endpoint song song), hiển thị huy hiệu `Slot #X` / `Theo dõi` tránh trùng, xóa hàng loạt có xác nhận, và quy trình Kiểm định V3.1 dẫn hướng trước khi đưa vào Slot.
+- **Tab `Bộ nhớ & Tra cứu`:** Thống kê truy hồi/độ nóng, quét vệ sinh lưu trữ Dry-run, tra cứu ngữ nghĩa local embedding, và trình duyệt thư mục `viking://` chỉ đọc có đường dẫn breadcrumb tương tác.
+- **Huy Hiệu Phân Cấp An Toàn [M1] → [M5] & Cache 24h/7d:** Mở tức thì từ báo cáo lưu sẵn hoặc chạy đo trực tiếp 7 probe V3.1.
 
 ### Theo Dõi Key Độc Lập
 - Khung **THEO DÕI** trong tab **Tổng quan** (tách riêng khỏi tab **Dự trữ**), giới hạn tối đa **4 key** trên bản Rust/Tauri V2 (`cockpit_rs`, vẫn đọc tương thích và cho phép thu gọn tối đa 7 key từ bản Python legacy), không tìm kiếm. Hai key cùng endpoint/model vẫn là hai bản ghi riêng.
@@ -100,9 +97,9 @@ openviking-cockpit/
 │   ├── TAXONOMY_V3_1.md                # Đặc tả kiến trúc kiểm định V3.1 toàn văn
 │   └── TAXONOMY_V2_2.md                # Đặc tả kiến trúc V2.2
 ├── cockpit_rs/                         # Phân hệ Rust / Tauri V2 độc lập (openviking-cockpit.exe)
-│   ├── src/                            # Lõi DPAPI, DACL Safe Write, Config Gate, Service Control, Storage Inspector (Hygiene Dry-run & Log Tail), Provider Probe & Benchmark, Telemetry (Search & VikingFS Directory List), Watchlist, Auditor V3.1
-│   ├── src-tauri/                      # Tauri V2 Desktop Host, Dynamic Tray Tooltip & Quick Actions, Khởi động Windows, Quản lý vòng đời Slot & 35 lệnh IPC async
-│   └── ui/                             # Giao diện ES Modules Dark Dashboard 4 Tab (Tổng quan + Hàng đợi + Điều khiển Server, Định tuyến Slot nổi bật active + Áp dụng Drift tại chỗ, Dự trữ + Kiểm định dẫn hướng, Bộ nhớ + Trình duyệt Thư mục + Hygiene Dry-run), Slide-over Drawer, Settings Popover, Audit / Provider Explorer & Benchmark / Log Tail Viewer Modals
+│   ├── src/                            # Lõi DPAPI, DACL Safe Write, Config Gate, Service Control, Storage Inspector (Hygiene Dry-run & Log Tail), Provider Probe & Benchmark, Telemetry 2 tầng (Search, VikingFS Dir List & hang-killed), Watchlist, Auditor V3.1
+│   ├── src-tauri/                      # Tauri V2 Desktop Host, Dynamic Tray Tooltip & Quick Actions (non-queueing try_lock + service://busy), Khởi động Windows, Quản lý vòng đời Slot & 35 lệnh IPC async
+│   └── ui/                             # Giao diện ES Modules Dark Dashboard 3 Tab (Tổng quan + Định tuyến Slot + Theo dõi thu gọn, Dự trữ + huy hiệu trùng + xóa hàng loạt, Bộ nhớ + breadcrumb + Hygiene Dry-run), Slide-over Drawer, Settings Popover, Audit / Provider / Log Tail Viewer Modals
 ├── integrations/antigravity/           # Plugin openviking-memory (MCP Stdio 5 công cụ an toàn dùng chung bộ nhớ cho Antigravity)
 ├── ops/                                # Trình khởi chạy ẩn watchdog tự phục hồi (/health watchdog), dọn khóa stale (ov_stale_lock_clean.py) & bọc vòng đời (ov_lifecycle.py)
 ├── scripts/                            # Tiện ích vận hành chạy từ repo (deploy_to_live.ps1, ov_storage_hygiene.py, install_antigravity_plugin.py, retrofit ACL, retention, sync)

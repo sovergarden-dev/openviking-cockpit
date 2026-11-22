@@ -2,6 +2,22 @@
 
 All notable changes to the OpenViking Cockpit, Monitor GUI, and Behavioral Security Auditor are documented in this file.
 
+## [1.10.0] - 2026-11-22
+
+### Added
+- Tracked `total_hang_kills` (`hang-killed` events) from `logs/lifecycle.jsonl` in `LifecycleSummary` (`cockpit_rs/src/services/telemetry.rs`) and surfaced `Tự cứu treo` counters on the OpenViking Server KPI card when non-zero.
+- Added clickable Slot/Watch membership badges next to Reserve model names and guarded batch removal (`Xóa đã chọn`) in `cockpit_rs/ui/src/panels/reserve.js` using descending index commits with chained `reserves_sha256` verification.
+- Added interactive segment breadcrumb navigation (`#memory-breadcrumb`) in `cockpit_rs/ui/src/panels/memory.js`, 1-tap clickable Slot status probe badges (`createProbeStatusBadge` in `utils/format.js`), and `Chỉ Lỗi / Cảnh báo` + `Sao chép` actions in `cockpit_rs/ui/src/modals/log_viewer.js`.
+
+### Changed
+- Merged `Tổng quan` and `Định tuyến Slot` into one unified 3-tab desktop workspace (`Tổng quan`, `Dự trữ`, `Bộ nhớ & Tra cứu`) in `cockpit_rs/ui/index.html`, `styles/app.css`, `main.js`, `panels/overview.js`, and `panels/slots.js` with a balanced `3x2` / `6x1` KPI grid, compact single-line `VLM Đang Phục Vụ` card, collapsible empty `THEO DÕI` hint, `c-btn--accent` secondary emphasis on Slot hot-switch buttons, and `Alt+1..3` keyboard shortcuts.
+- Replaced flat 7-endpoint 2s polling with 2-tier polling (`TelemetryClient::fetch_snapshot_tiered` with `1500 ms` fast HTTP, `4000 ms` slow stats HTTP, and `10s` `slow_telemetry_cache` TTL in `CockpitState` refreshed immediately on manual `Làm mới` or service restart), eliminating spurious `LONG-TERM MEMORIES: Timeout` errors under high memory-store disk counts.
+- Updated `docs/specs/COCKPIT_RUST_SPEC.md` and `README.md` to document the standalone Rust/Tauri V2 3-tab Cockpit layout and live behavior.
+
+### Fixed
+- Prevented queued duplicate restarts in `execute_service_action_and_wait` (`commands.rs`, `lib.rs`) by replacing `service_lock.lock().await` with non-queueing `try_lock()` and broadcasting `service://busy` via an RAII drop guard to disable UI service buttons synchronously during Tray restarts.
+- Keyed `provider_tester.js` model checklist caching by `(key, normalizeEndpoint(apiBase))` and cleared stale loaded model IDs when switching or editing inline base URLs; included `refreshMemoryOverview()` status inside `refreshAll()` boolean return (`main.js`); removed redundant `onAuditClick` check (`format.js`) and unused `re`/`sys` imports (`test_launcher_contract.py`).
+
 ## [1.9.2] - 2026-11-21
 
 ### Changed
