@@ -296,19 +296,25 @@ pub async fn collect_telemetry_once(
         }
     }
 
+    let service_restarting = state.service_lock.try_lock().is_err();
     let uptime_secs = state.started_at.elapsed().as_secs();
     let alerts = state
         .incident_tracker
         .lock()
         .ok()
         .map(|mut tracker| {
-            evaluate_telemetry_incidents_with_uptime(
-                &mut tracker,
-                &snapshot,
-                notify_on_down,
-                notify_on_failover,
-                uptime_secs,
-            )
+            if service_restarting {
+                tracker.reset_server_down_streak();
+                Vec::new()
+            } else {
+                evaluate_telemetry_incidents_with_uptime(
+                    &mut tracker,
+                    &snapshot,
+                    notify_on_down,
+                    notify_on_failover,
+                    uptime_secs,
+                )
+            }
         })
         .unwrap_or_default();
 

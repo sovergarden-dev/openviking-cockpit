@@ -540,19 +540,23 @@ impl Default for TelemetryClient {
 
 impl TelemetryClient {
     pub fn try_new(base_url: &str) -> Result<Self, TelemetryError> {
+        // Loopback uvicorn closes idle keep-alive sockets after 5s; zero idle pool avoids WinError 10054 resets.
         let http = reqwest::Client::builder()
             .timeout(Duration::from_millis(1500))
             .connect_timeout(Duration::from_millis(400))
+            .pool_max_idle_per_host(0)
             .no_proxy()
             .build()?;
         let slow_http = reqwest::Client::builder()
             .timeout(Duration::from_millis(4000))
             .connect_timeout(Duration::from_millis(500))
+            .pool_max_idle_per_host(0)
             .no_proxy()
             .build()?;
         let search_http = reqwest::Client::builder()
             .timeout(Duration::from_secs(12))
             .connect_timeout(Duration::from_millis(500))
+            .pool_max_idle_per_host(0)
             .no_proxy()
             .build()?;
         Ok(Self {
@@ -608,7 +612,7 @@ impl TelemetryClient {
         include_auth: bool,
     ) -> (EndpointStatus, Option<T>, u64) {
         let start = Instant::now();
-        let mut req = client.get(url);
+        let mut req = client.get(url).header(reqwest::header::CONNECTION, "close");
         if include_auth {
             req = self.attach_auth(req);
         }
@@ -1006,18 +1010,30 @@ impl TelemetryClient {
 }
 
 pub const COLD_BOOT_GRACE_SECS: u64 = 75;
+pub const SERVER_DOWN_CONSECUTIVE_FAILS: u32 = 3;
 
-/// Stateful per-incident tracker preventing repeat tray notification storms during sustained outages.
+/// Stateful per-incident tracker requiring consecutive failures before alerting and preventing repeat tray notification storms.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IncidentTracker {
     pub server_down_notified: bool,
+    pub consecutive_down_ticks: u32,
     pub embedding_missing_notified: bool,
+    pub consecutive_embedding_missing_ticks: u32,
     pub failover_slot_notified: Option<usize>,
     pub boot_ready_seen: bool,
 }
 
+impl IncidentTracker {
+    pub fn reset_server_down_streak(&mut self) {
+        self.consecutive_down_ticks = 0;
+        self.server_down_notified = false;
+        self.consecutive_embedding_missing_ticks = 0;
+        self.embedding_missing_notified = false;
+    }
+}
+
 /// Uptime-aware incident evaluator that suppresses cold-boot warnings for the first `75s`
-/// until the server reaches `/ready` once after launch.
+/// until the server reaches `/ready` once after launch, and requires `SERVER_DOWN_CONSECUTIVE_FAILS` ticks.
 pub fn evaluate_telemetry_incidents_with_uptime(
     tracker: &mut IncidentTracker,
     snapshot: &TelemetrySnapshot,
@@ -1038,7 +1054,12 @@ pub fn evaluate_telemetry_incidents_with_uptime(
     let in_cold_boot_grace = !tracker.boot_ready_seen && uptime_secs < COLD_BOOT_GRACE_SECS;
 
     if !server_healthy {
-        if notify_on_down && !in_cold_boot_grace && !tracker.server_down_notified {
+        tracker.consecutive_down_ticks = tracker.consecutive_down_ticks.saturating_add(1);
+        if notify_on_down
+            && !in_cold_boot_grace
+            && !tracker.server_down_notified
+            && tracker.consecutive_down_ticks >= SERVER_DOWN_CONSECUTIVE_FAILS
+        {
             tracker.server_down_notified = true;
             alerts.push((
                 "CẢNH BÁO: OpenViking ngắt kết nối".to_string(),
@@ -1046,12 +1067,20 @@ pub fn evaluate_telemetry_incidents_with_uptime(
             ));
         }
     } else {
+        tracker.consecutive_down_ticks = 0;
         tracker.server_down_notified = false;
     }
 
     match snapshot.embedding_model_ready {
         Some(false) => {
-            if notify_on_down && !in_cold_boot_grace && !tracker.embedding_missing_notified {
+            tracker.consecutive_embedding_missing_ticks = tracker
+                .consecutive_embedding_missing_ticks
+                .saturating_add(1);
+            if notify_on_down
+                && !in_cold_boot_grace
+                && !tracker.embedding_missing_notified
+                && tracker.consecutive_embedding_missing_ticks >= SERVER_DOWN_CONSECUTIVE_FAILS
+            {
                 tracker.embedding_missing_notified = true;
                 let model = snapshot
                     .expected_embedding_model
@@ -1067,6 +1096,7 @@ pub fn evaluate_telemetry_incidents_with_uptime(
             }
         }
         Some(true) => {
+            tracker.consecutive_embedding_missing_ticks = 0;
             tracker.embedding_missing_notified = false;
         }
         None => {}
@@ -1406,7 +1436,18 @@ mod tests {
             lifecycle: None,
         };
 
-        // 1. Missing embedding fires once, then suppresses duplicates until restored
+        // 1. Missing embedding requires consecutive ticks before firing once, then suppresses duplicates until restored
+        for _ in 0..2 {
+            assert!(evaluate_telemetry_incidents_with_uptime(
+                &mut tracker,
+                &snap,
+                true,
+                true,
+                COLD_BOOT_GRACE_SECS,
+            )
+            .is_empty());
+            assert!(!tracker.embedding_missing_notified);
+        }
         let a1 = evaluate_telemetry_incidents_with_uptime(
             &mut tracker,
             &snap,
@@ -1425,7 +1466,7 @@ mod tests {
         )
         .is_empty());
 
-        // Restore embedding -> resets latch
+        // Restore embedding -> resets streak and latch
         snap.embedding_model_ready = Some(true);
         assert!(evaluate_telemetry_incidents_with_uptime(
             &mut tracker,
@@ -1435,7 +1476,40 @@ mod tests {
             COLD_BOOT_GRACE_SECS,
         )
         .is_empty());
+        assert_eq!(tracker.consecutive_embedding_missing_ticks, 0);
         assert!(!tracker.embedding_missing_notified);
+
+        // Transient 2-tick server down blip stays silent and resets when healthy
+        snap.health_status = EndpointStatus::Timeout;
+        for expected in 1..=2 {
+            assert!(evaluate_telemetry_incidents_with_uptime(
+                &mut tracker,
+                &snap,
+                true,
+                true,
+                COLD_BOOT_GRACE_SECS,
+            )
+            .is_empty());
+            assert_eq!(tracker.consecutive_down_ticks, expected);
+        }
+        snap.health_status = EndpointStatus::Ok;
+        assert!(evaluate_telemetry_incidents_with_uptime(
+            &mut tracker,
+            &snap,
+            true,
+            true,
+            COLD_BOOT_GRACE_SECS,
+        )
+        .is_empty());
+        assert_eq!(tracker.consecutive_down_ticks, 0);
+        assert!(!tracker.server_down_notified);
+
+        // reset_server_down_streak clears accumulated down/embedding streaks (used during Start/Restart)
+        tracker.consecutive_down_ticks = 2;
+        tracker.server_down_notified = true;
+        tracker.reset_server_down_streak();
+        assert_eq!(tracker.consecutive_down_ticks, 0);
+        assert!(!tracker.server_down_notified);
 
         // 2. Manual switch (manual_hold=true) must NOT trigger failover alarm
         snap.vlm.as_mut().unwrap().result.as_mut().unwrap().index = Some(1);
@@ -1512,18 +1586,24 @@ mod tests {
         };
 
         let mut tracker = IncidentTracker::default();
-        assert!(
-            evaluate_telemetry_incidents_with_uptime(&mut tracker, &down_snap, true, true, 10)
-                .is_empty()
-        );
-        assert!(!tracker.server_down_notified);
+        for t in [10, 12] {
+            assert!(evaluate_telemetry_incidents_with_uptime(
+                &mut tracker,
+                &down_snap,
+                true,
+                true,
+                t
+            )
+            .is_empty());
+            assert!(!tracker.server_down_notified);
+        }
 
         let after_grace =
             evaluate_telemetry_incidents_with_uptime(&mut tracker, &down_snap, true, true, 75);
         assert_eq!(after_grace.len(), 1);
         assert!(tracker.server_down_notified);
 
-        // If server comes up early (t=20s) and drops later (t=25s), alert fires immediately without waiting 75s
+        // If server comes up early (t=20s), transient drops at t=25s/27s stay silent; 3rd drop at t=29s fires immediately
         let mut boot_tracker = IncidentTracker::default();
         down_snap.health = Some(HealthResponse {
             status: "ok".to_string(),
@@ -1554,8 +1634,18 @@ mod tests {
         assert!(boot_tracker.boot_ready_seen);
 
         down_snap.health_status = EndpointStatus::Unreachable;
+        for t in [25, 27] {
+            assert!(evaluate_telemetry_incidents_with_uptime(
+                &mut boot_tracker,
+                &down_snap,
+                true,
+                true,
+                t
+            )
+            .is_empty());
+        }
         let dropped =
-            evaluate_telemetry_incidents_with_uptime(&mut boot_tracker, &down_snap, true, true, 25);
+            evaluate_telemetry_incidents_with_uptime(&mut boot_tracker, &down_snap, true, true, 29);
         assert_eq!(dropped.len(), 1);
     }
 
