@@ -54,7 +54,7 @@ G:/AI/openviking-cockpit/
     │   ├── secrets/
     │   │   └── secret_store.rs  # Native 64-bit Windows DPAPI & strict ${ENV} secret resolver
     │   └── services/
-    │       ├── telemetry.rs         # 2-tier async polling (1.5s fast liveness + 4s 10s-cached stats/queue/memories), semantic search, VikingFS dir list, Ollama & lifecycle.jsonl (hang-killed) + incident debouncer (75s grace)
+    │       ├── telemetry.rs         # 2-tier async polling (zero-idle loopback Connection: close, 1.5s fast liveness + 4s 10s-cached stats/queue/memories), semantic search, VikingFS dir list, Ollama & lifecycle.jsonl (hang-killed) + incident debouncer (3-tick confirmation, 75s grace & restart suppression)
     │       ├── service_control.rs   # Guarded OpenViking Autostart task start/restart, socket-hang orphan cleanup & lock hygiene
     │       ├── storage_inspector.rs # Read-only storage & peer namespace footprint scanner, Hygiene Dry-run & 4-file allowlisted Log Tail reader
     │       ├── provider_probe.rs    # OpenAI-compatible /v1/models discovery, chat liveness probe & cancellable 1–5 round benchmark
