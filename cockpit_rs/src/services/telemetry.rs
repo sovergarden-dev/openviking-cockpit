@@ -514,6 +514,14 @@ pub struct SlowTelemetryCache {
     pub queue: (EndpointStatus, Option<QueueResponse>, u64),
 }
 
+impl SlowTelemetryCache {
+    pub fn all_ok(&self) -> bool {
+        self.vikingdb.0 == EndpointStatus::Ok
+            && self.memories.0 == EndpointStatus::Ok
+            && self.queue.0 == EndpointStatus::Ok
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TelemetryClient {
     base_url: String,
@@ -923,19 +931,24 @@ impl TelemetryClient {
         );
 
         let server_up = h.0 == EndpointStatus::Ok && h.1.as_ref().is_some_and(|body| body.healthy);
-        let (db, m, q) = match (cached_slow, server_up) {
-            (Some(cache), true) => (
+        let (db, m, q) = if h.0 != EndpointStatus::Ok {
+            (
+                (h.0.clone(), None, 0),
+                (h.0.clone(), None, 0),
+                (h.0.clone(), None, 0),
+            )
+        } else if let (Some(cache), true) = (cached_slow, server_up) {
+            (
                 cache.vikingdb.clone(),
                 cache.memories.clone(),
                 cache.queue.clone(),
-            ),
-            _ => {
-                tokio::join!(
-                    self.fetch_vikingdb(),
-                    self.fetch_memories(),
-                    self.fetch_queue()
-                )
-            }
+            )
+        } else {
+            tokio::join!(
+                self.fetch_vikingdb(),
+                self.fetch_memories(),
+                self.fetch_queue()
+            )
         };
 
         let slow_cache = SlowTelemetryCache {
@@ -989,15 +1002,6 @@ impl TelemetryClient {
         }
 
         (snap, slow_cache)
-    }
-
-    pub async fn fetch_snapshot_with_embedding(
-        &self,
-        expected_embedding_model: Option<&str>,
-    ) -> TelemetrySnapshot {
-        self.fetch_snapshot_tiered(expected_embedding_model, None)
-            .await
-            .0
     }
 }
 
@@ -1626,6 +1630,7 @@ mod tests {
 
         let client = TelemetryClient::new(&base_url).with_ollama_base_url(&base_url);
         let (snap1, cache1) = client.fetch_snapshot_tiered(None, None).await;
+        assert!(cache1.all_ok());
         assert_eq!(memories_hits.load(Ordering::SeqCst), 1);
         assert_eq!(
             snap1
@@ -1647,6 +1652,60 @@ mod tests {
                 .and_then(|r| r.total_memories),
             Some(55)
         );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_snapshot_tiered_short_circuits_on_health_failure_and_all_ok_rejects_errors()
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let base_url = format!("http://127.0.0.1:{}", port);
+        let memories_hits = Arc::new(AtomicUsize::new(0));
+        let memories_hits_srv = Arc::clone(&memories_hits);
+
+        tokio::spawn(async move {
+            for _ in 0..8 {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req_str = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req_str.lines().next().unwrap_or("");
+                    let (status_line, body) = if first_line.starts_with("GET /health ") {
+                        ("HTTP/1.1 503 Service Unavailable", r#"{"healthy":false}"#)
+                    } else if first_line.starts_with("GET /api/v1/stats/memories ") {
+                        memories_hits_srv.fetch_add(1, Ordering::SeqCst);
+                        (
+                            "HTTP/1.1 200 OK",
+                            r#"{"status":"ok","result":{"total_memories":1}}"#,
+                        )
+                    } else if first_line.starts_with("GET /api/tags ") {
+                        ("HTTP/1.1 200 OK", r#"{"models":[]}"#)
+                    } else {
+                        ("HTTP/1.1 503 Service Unavailable", r#"{"status":"down"}"#)
+                    };
+                    let resp = format!(
+                        "{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        status_line,
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                }
+            }
+        });
+
+        let client = TelemetryClient::new(&base_url).with_ollama_base_url(&base_url);
+        let (snap, cache) = client.fetch_snapshot_tiered(None, None).await;
+        assert_eq!(snap.health_status, EndpointStatus::HttpError(503));
+        assert_eq!(snap.vikingdb_status, EndpointStatus::HttpError(503));
+        assert_eq!(snap.memories_status, EndpointStatus::HttpError(503));
+        assert_eq!(snap.queue_status, EndpointStatus::HttpError(503));
+        assert_eq!(memories_hits.load(Ordering::SeqCst), 0);
+        assert!(!cache.all_ok());
     }
 
     #[tokio::test]

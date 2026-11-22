@@ -20,6 +20,7 @@ use cockpit_rs::services::watchlist::{
 
 use crate::commands::{
     collect_telemetry_once, execute_service_action_and_wait, run_due_watch_auto_pass,
+    ServiceActionError,
 };
 use crate::state::{CockpitPaths, CockpitState};
 
@@ -302,9 +303,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                         .await
                         {
                             Ok((outcome, snap)) => {
-                                let _ = app_handle.emit("telemetry://snapshot", &snap);
-                                let _ = app_handle.emit("service://restarted", ());
-                                if outcome.ready_ok {
+                                let status_msg = if outcome.ready_ok {
                                     format!(
                                         "OpenViking Server đã khởi động lại và sẵn sàng ({:.1}s).",
                                         outcome.elapsed_ms as f64 / 1000.0
@@ -315,18 +314,23 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                                 } else {
                                     "Đã gửi lệnh khởi động lại nhưng cổng 19330 chưa phản hồi /ready."
                                         .to_string()
-                                }
+                                };
+                                let _ = app_handle.emit("telemetry://snapshot", &snap);
+                                let _ = app_handle.emit("service://restarted", &status_msg);
+                                status_msg
                             }
-                            Err(err) => {
-                                if err.contains("Đang thực thi") {
-                                    "OpenViking Server đang khởi động lại, vui lòng chờ hoàn tất."
-                                        .to_string()
-                                } else {
-                                    let snap = collect_telemetry_once(&st_ref, true).await;
-                                    let _ = app_handle.emit("telemetry://snapshot", &snap);
+                            Err(ServiceActionError::Busy) => {
+                                "OpenViking Server đang khởi động lại, vui lòng chờ hoàn tất."
+                                    .to_string()
+                            }
+                            Err(ServiceActionError::Failed(_)) => {
+                                let status_msg =
                                     "Không thể khởi động lại OpenViking Server từ khay hệ thống."
-                                        .to_string()
-                                }
+                                        .to_string();
+                                let snap = collect_telemetry_once(&st_ref, true).await;
+                                let _ = app_handle.emit("telemetry://snapshot", &snap);
+                                let _ = app_handle.emit("service://restarted", &status_msg);
+                                status_msg
                             }
                         };
                         let _ = tauri::async_runtime::spawn_blocking(move || {
@@ -484,6 +488,7 @@ pub fn run() {
             commands::delete_watch_entry,
             commands::upsert_reserve_entry,
             commands::delete_reserve_entry,
+            commands::delete_reserve_entries,
             commands::promote_reserve_to_slot,
             commands::copy_reserve_to_watch,
             commands::copy_watch_to_reserve,

@@ -942,6 +942,31 @@ pub fn upsert_reserve_record(
     Ok(state.spare_models.len() - 1)
 }
 
+/// Validates every requested index before mutating so batch reserve deletes are all-or-nothing.
+pub fn remove_reserve_indices(
+    spares: &mut Vec<SpareModelRecord>,
+    indices: &[usize],
+) -> Result<usize, WatchError> {
+    if indices.is_empty() {
+        return Err(WatchError::Validation(
+            "No reserve indices provided".to_string(),
+        ));
+    }
+    let mut unique: Vec<usize> = indices.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    if let Some(&oob) = unique.iter().find(|&&idx| idx >= spares.len()) {
+        return Err(WatchError::Validation(format!(
+            "Reserve index {} out of range",
+            oob
+        )));
+    }
+    for idx in unique.iter().rev().copied() {
+        spares.remove(idx);
+    }
+    Ok(unique.len())
+}
+
 fn sanitize_monitor_label(raw: &str, fallback: &str) -> String {
     let trimmed = raw.trim();
     let chosen = if trimmed.is_empty() {
@@ -1862,5 +1887,35 @@ mod tests {
             serde_json::to_string(&summarize_monitor_state(&st, "s", Some(&env))).unwrap();
         assert!(!summary_json.contains("SYNTHETIC_SLOT_SECRET_999"));
         assert!(!summary_json.contains("dpapi:"));
+    }
+
+    #[test]
+    fn test_remove_reserve_indices_dedups_and_rejects_oob_atomically() {
+        let make_rec = |name: &str| SpareModelRecord {
+            model: name.to_string(),
+            api_base: "https://api.example.com/v1".to_string(),
+            api_key: "${ENV_KEY}".to_string(),
+            note: String::new(),
+            last_probe: None,
+            extra: BTreeMap::new(),
+        };
+        let mut spares = vec![make_rec("m0"), make_rec("m1"), make_rec("m2")];
+
+        assert!(matches!(
+            remove_reserve_indices(&mut spares, &[]),
+            Err(WatchError::Validation(_))
+        ));
+        assert_eq!(spares.len(), 3);
+
+        assert!(matches!(
+            remove_reserve_indices(&mut spares, &[0, 99]),
+            Err(WatchError::Validation(_))
+        ));
+        assert_eq!(spares.len(), 3);
+
+        let removed = remove_reserve_indices(&mut spares, &[2, 0, 2]).expect("atomic batch remove");
+        assert_eq!(removed, 2);
+        assert_eq!(spares.len(), 1);
+        assert_eq!(spares[0].model, "m1");
     }
 }

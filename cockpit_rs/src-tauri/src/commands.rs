@@ -35,12 +35,12 @@ use cockpit_rs::services::telemetry::{
 };
 use cockpit_rs::services::watchlist::{
     copy_reserve_into_watchlist, copy_watch_into_reserve, load_monitor_state,
-    probe_watch_credential, record_watch_probe_outcome, save_monitor_state_with_live_policy,
-    set_reserve_probe_outcome, set_watch_row_auto, summarize_monitor_state_with_audits,
-    upsert_reserve_record, upsert_slot_credential_into_reserve,
-    upsert_slot_credential_into_watchlist, upsert_watch_record, verify_reserves_sha,
-    AutoDisabledAlert, MonitorState, MonitorStateSummary, ProbeOutcome, SpareModelRecord,
-    UpsertReserveInput, UpsertWatchInput,
+    probe_watch_credential, record_watch_probe_outcome, remove_reserve_indices,
+    save_monitor_state_with_live_policy, set_reserve_probe_outcome, set_watch_row_auto,
+    summarize_monitor_state_with_audits, upsert_reserve_record,
+    upsert_slot_credential_into_reserve, upsert_slot_credential_into_watchlist,
+    upsert_watch_record, verify_reserves_sha, AutoDisabledAlert, MonitorState, MonitorStateSummary,
+    ProbeOutcome, SpareModelRecord, UpsertReserveInput, UpsertWatchInput,
 };
 
 use crate::state::{CockpitPaths, CockpitState};
@@ -285,7 +285,11 @@ pub async fn collect_telemetry_once(
     if let Ok(mut guard) = state.slow_telemetry_cache.lock() {
         if server_up {
             if cached_slow.is_none() {
-                *guard = Some((std::time::Instant::now(), new_slow_cache));
+                if new_slow_cache.all_ok() {
+                    *guard = Some((std::time::Instant::now(), new_slow_cache));
+                } else {
+                    *guard = None;
+                }
             }
         } else {
             *guard = None;
@@ -1107,12 +1111,11 @@ pub async fn upsert_reserve_entry(
     Ok(summary)
 }
 
-#[tauri::command]
-pub async fn delete_reserve_entry(
-    app: AppHandle,
-    state: State<'_, Arc<CockpitState>>,
+async fn delete_reserve_indices_inner(
+    app: &AppHandle,
+    state: &Arc<CockpitState>,
     expected_reserves_sha: String,
-    index: usize,
+    indices: Vec<usize>,
 ) -> Result<MonitorStateSummary, String> {
     let paths = state.paths.clone();
     let summary = {
@@ -1122,10 +1125,7 @@ pub async fn delete_reserve_entry(
                 load_monitor_state(&paths.monitor_json_path).map_err(|e| e.to_string())?;
             verify_reserves_sha(&st.spare_models, &expected_reserves_sha)
                 .map_err(|e| e.to_string())?;
-            if index >= st.spare_models.len() {
-                return Err(format!("Reserve index {} out of range", index));
-            }
-            st.spare_models.remove(index);
+            remove_reserve_indices(&mut st.spare_models, &indices).map_err(|e| e.to_string())?;
             let new_sha = save_monitor_state_with_live_policy(
                 &paths.monitor_json_path,
                 &paths.backups_dir,
@@ -1142,6 +1142,26 @@ pub async fn delete_reserve_entry(
     state.invalidate_poll_meta_cache();
     let _ = app.emit("monitor://updated", &summary);
     Ok(summary)
+}
+
+#[tauri::command]
+pub async fn delete_reserve_entry(
+    app: AppHandle,
+    state: State<'_, Arc<CockpitState>>,
+    expected_reserves_sha: String,
+    index: usize,
+) -> Result<MonitorStateSummary, String> {
+    delete_reserve_indices_inner(&app, state.inner(), expected_reserves_sha, vec![index]).await
+}
+
+#[tauri::command]
+pub async fn delete_reserve_entries(
+    app: AppHandle,
+    state: State<'_, Arc<CockpitState>>,
+    expected_reserves_sha: String,
+    indices: Vec<usize>,
+) -> Result<MonitorStateSummary, String> {
+    delete_reserve_indices_inner(&app, state.inner(), expected_reserves_sha, indices).await
 }
 
 #[tauri::command]
@@ -1874,6 +1894,23 @@ pub struct ServiceControlOutcome {
     pub elapsed_ms: u64,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum ServiceActionError {
+    Busy,
+    Failed(String),
+}
+
+impl std::fmt::Display for ServiceActionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServiceActionError::Busy => f.write_str(
+                "Đang thực thi lệnh điều khiển OpenViking Server, vui lòng chờ hoàn tất.",
+            ),
+            ServiceActionError::Failed(msg) => f.write_str(msg),
+        }
+    }
+}
+
 struct ServiceBusyGuard(AppHandle);
 
 impl Drop for ServiceBusyGuard {
@@ -1886,11 +1923,9 @@ pub(crate) async fn execute_service_action_and_wait(
     app: &AppHandle,
     state: &Arc<CockpitState>,
     parsed_action: ServiceAction,
-) -> Result<(ServiceControlOutcome, TelemetrySnapshot), String> {
+) -> Result<(ServiceControlOutcome, TelemetrySnapshot), ServiceActionError> {
     let Ok(_guard) = state.service_lock.try_lock() else {
-        return Err(
-            "Đang thực thi lệnh điều khiển OpenViking Server, vui lòng chờ hoàn tất.".to_string(),
-        );
+        return Err(ServiceActionError::Busy);
     };
     let _ = app.emit("service://busy", true);
     let _busy = ServiceBusyGuard(app.clone());
@@ -1902,7 +1937,8 @@ pub(crate) async fn execute_service_action_and_wait(
         execute_service_step(parsed_action, &ov_home, port)
     })
     .await
-    .map_err(|e| format!("spawn_blocking panicked: {}", e))??;
+    .map_err(|e| ServiceActionError::Failed(format!("spawn_blocking panicked: {}", e)))?
+    .map_err(|e| ServiceActionError::Failed(e.to_string()))?;
 
     let mut health_ok = false;
     let mut ready_ok = false;
@@ -1944,7 +1980,9 @@ pub async fn control_openviking_service(
     action: String,
 ) -> Result<ServiceControlOutcome, String> {
     let parsed_action = ServiceAction::parse(&action)?;
-    let (outcome, _) = execute_service_action_and_wait(&app, state.inner(), parsed_action).await?;
+    let (outcome, _) = execute_service_action_and_wait(&app, state.inner(), parsed_action)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(outcome)
 }
 
